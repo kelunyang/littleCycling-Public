@@ -79,7 +79,8 @@
       "Bash(wc -l /mnt/d/Development/littleCycling/packages/web/src/composables/*.ts)",
       "Bash(find packages/web/src/game/terrain -name \"*.ts\" -exec basename {})",
       "Bash(find packages/web/src/game/phaser -name \"*.ts\" -exec basename {})",
-      "Bash(npx vite:*)"
+      "Bash(npx vite:*)",
+      "Bash(node -e \":*)"
     ]
   }
 }

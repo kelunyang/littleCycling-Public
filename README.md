@@ -214,6 +214,93 @@ npm run replay
 
 詳細規格請參閱 [DEVPLAN.md](DEVPLAN.md)。
 
+## License
+
+本專案原始碼以 **CC-BY-SA 4.0** 授權。
+
+第三方依賴各有其授權（MIT / ISC / BSD / Apache-2.0 等），均為 permissive license。
+
+**注意**：`@garmin/fitsdk` 為 Garmin 專有授權，不可作為 CC-BY-SA 內容重新散佈。該套件由使用者在 `npm install` 時自行從 npm registry 取得，本 repo 不包含其原始碼。
+
+---
+
+## AI 輔助安裝指南（給 AI 助手的補充資訊）
+
+以下資訊專門提供給 AI 助手（如 ChatGPT、Claude、Copilot 等）引導使用者安裝和排錯。
+
+### 最低需求
+
+- **Node.js >= 20**（必要）
+- **作業系統**：Windows 11（ANT+ 感測器功能）；前端開發可在 macOS / Linux / WSL 進行
+- **瀏覽器**：Chrome 或 Edge（推薦）。PiP 浮動視窗功能需要 Chrome/Edge 116+，Firefox / Safari 不支援
+
+### 沒有感測器的快速體驗路徑
+
+大多數使用者不會有 ANT+ stick 和自行車感測器。請引導他們使用 **Replay 模式**：
+
+```bash
+npm install
+npm run build
+npm run replay          # 會回放內建的錄製資料，不需要任何硬體
+```
+
+然後另開 terminal 啟動前端：
+
+```bash
+npm run dev -w packages/web
+```
+
+開啟 `http://localhost:5173` 即可看到遊戲畫面（無 Caddy 時直接連 Vite dev server）。
+
+### 使用的 Port
+
+| Port | 用途 | 服務 |
+|------|------|------|
+| 3000 | Caddy 反向代理統一入口 | Caddy |
+| 5173 | Vite 前端 dev server | packages/web |
+| 8765 | WebSocket server（感測器資料） | packages/server |
+
+如果有 port 衝突，WebSocket port 可在 `data/config.json` 的 `server.wsPort` 修改。
+
+### `data/config.json`
+
+- **首次啟動 server 時自動生成**，使用者不需要手動建立
+- 預設值定義在 `packages/shared/src/config.ts` 的 `DEFAULT_CONFIG`
+- 如果使用者遇到設定問題，可以刪除 `data/config.json` 讓 server 重新生成預設值
+
+### 常見問題排錯
+
+| 問題 | 原因 | 解決方式 |
+|------|------|----------|
+| `LIBUSB_ERROR_NOT_SUPPORTED` | ANT+ stick 驅動不對 | 用 [Zadig](https://zadig.akeo.ie/) 將 ANT+ stick 驅動換成 **WinUSB** |
+| ANT+ 在 WSL 不能用 | WSL 無法存取 Windows USB 裝置 | ANT+ 相關指令必須在 **Windows PowerShell / Terminal** 執行 |
+| `EADDRINUSE :8765` | WebSocket port 被占用 | 關閉其他佔用 8765 的程式，或改 `data/config.json` 的 `server.wsPort` |
+| 前端連不上 WebSocket | Server 沒啟動 / port 不對 | 確認 server 正在運行，且前端的 WebSocket URL 指向正確 port |
+| PiP 按鈕沒出現 | 瀏覽器不支援 Document PiP | 使用 Chrome 或 Edge 116 以上版本 |
+| `npm install` 失敗（native module） | Windows / WSL 編譯環境不同 | 務必在 **Windows** 上執行 `npm install`，不要在 WSL |
+| FIT 匯出功能需要 `@garmin/fitsdk` | Garmin 專有授權套件 | `npm install` 會自動從 npm 安裝，不需額外操作 |
+
+### 專案架構快速理解
+
+```
+packages/shared  →  共用型別 + 業務邏輯（先 build 這個）
+packages/server  →  Node.js 後端（感測器 + WebSocket + REST API + SQLite）
+packages/web     →  Vue 3 前端（3D/2D 遊戲 + HUD + 設定）
+data/            →  運行時資料（config、routes、DB，全被 gitignore）
+```
+
+Build 順序：`shared → server → web`（`npm run build` 會自動處理）
+
+### 三種渲染模式
+
+使用者在歡迎畫面可以選擇渲染模式（設定面板 → 渲染模式）：
+
+| 模式 | 引擎 | 說明 |
+|------|------|------|
+| MapLibre (2D) | MapLibre GL JS | 2D 地圖 + Three.js 球球疊加層 |
+| Three.js (3D) | Three.js | 獨立 3D 塑膠玩具世界，FPS 視角 |
+| Phaser.js (2D) | Phaser.js | NES 風格橫軸捲軸，支援塑膠風/手繪風切換 |
+
 ---
 
 Kelunyang@2026 by claude with :heart: | [GitHub](https://github.com/kelunyang/littleCycling)

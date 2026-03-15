@@ -40,8 +40,9 @@ export class ConfigStore {
       const parsed = JSON.parse(raw) as Record<string, unknown>;
       this.config = deepMerge(DEFAULT_CONFIG, parsed);
     } catch {
-      // File missing or malformed — use defaults
+      // File missing or malformed — use defaults and persist to disk
       this.config = { ...DEFAULT_CONFIG };
+      this.save(this.config);
     }
     return this.config;
   }
