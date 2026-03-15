@@ -40,3 +40,5 @@ export function useThreeBall(
 
   return { layer, updatePosition, setDarkened };
 }
+
+export type ThreeBallAPI = ReturnType<typeof useThreeBall>;

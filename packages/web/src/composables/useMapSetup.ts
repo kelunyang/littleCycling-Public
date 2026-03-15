@@ -140,6 +140,8 @@ export function useMapSetup(containerRef: Ref<HTMLElement | null>) {
   return { map, adapter, mapReady, renderMode, init, addRouteLayer, fitToRoute, dispose };
 }
 
+export type MapSetupAPI = ReturnType<typeof useMapSetup>;
+
 /**
  * Standalone check: can we reach the map tile servers?
  */

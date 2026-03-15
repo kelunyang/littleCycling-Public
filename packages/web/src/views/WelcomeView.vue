@@ -28,7 +28,7 @@
       </div>
 
       <footer class="welcome__footer">
-        <span>kelunyang@2025</span>
+        <span>Kelunyang@2026 by claude with <font-awesome-icon icon="heart" class="welcome__heart" /></span>
         <a href="https://github.com/kelunyang/littleCycling" target="_blank" rel="noopener noreferrer" class="welcome__github-link">
           <font-awesome-icon :icon="['fab', 'github']" />
           GitHub
@@ -235,6 +235,10 @@ onMounted(() => {
 .welcome__github-link:hover {
   color: var(--hud-cyan);
   filter: drop-shadow(0 0 4px rgba(0, 229, 255, 0.5));
+}
+
+.welcome__heart {
+  color: var(--hud-magenta, #ff0066);
 }
 
 .welcome__preview-row {

@@ -58,7 +58,6 @@ import {
 import { faGithub } from '@fortawesome/free-brands-svg-icons';
 
 import 'element-plus/theme-chalk/dark/css-vars.css';
-import 'maplibre-gl/dist/maplibre-gl.css';
 
 import App from './App.vue';
 import router from './router';

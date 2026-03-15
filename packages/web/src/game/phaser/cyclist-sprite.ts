@@ -73,6 +73,8 @@ export function createCyclistSprite(scene: Phaser.Scene, strategy: PhaserStyleSt
 /**
  * Update cyclist sprite each frame.
  */
+export type CyclistSpriteUpdateFn = typeof updateCyclistSprite;
+
 export function updateCyclistSprite(
   sprite: Phaser.GameObjects.Sprite,
   opts: {

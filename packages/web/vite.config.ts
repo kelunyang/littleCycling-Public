@@ -17,19 +17,23 @@ export default defineConfig({
     },
   },
   build: {
-    chunkSizeWarningLimit: 850,
+    chunkSizeWarningLimit: 1500,
     rollupOptions: {
       output: {
-        manualChunks: {
-          'vendor-vue': ['vue', 'vue-router', 'pinia'],
-          'vendor-three': ['three'],
-          'vendor-maplibre': ['maplibre-gl'],
-          'vendor-fontawesome': [
-            '@fortawesome/fontawesome-svg-core',
-            '@fortawesome/free-solid-svg-icons',
-            '@fortawesome/free-brands-svg-icons',
-            '@fortawesome/vue-fontawesome',
-          ],
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            if (id.includes('/three/')) return 'vendor-three';
+            if (id.includes('/phaser/')) return 'vendor-phaser';
+            if (id.includes('/maplibre-gl/')) return 'vendor-maplibre';
+            if (id.includes('/@fortawesome/')) return 'vendor-fontawesome';
+            if (
+              id.includes('/vue/') ||
+              id.includes('/@vue/') ||
+              id.includes('/vue-router/') ||
+              id.includes('/pinia/')
+            )
+              return 'vendor-vue';
+          }
         },
       },
     },

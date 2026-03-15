@@ -21,9 +21,11 @@ import type { PhaserWeatherSystem, WeatherType } from '@/game/phaser/phaser-weat
 import type { TerrainChunkManager2D } from '@/game/phaser/terrain-builder';
 import type { PhaserCoinLayer } from '@/game/phaser/phaser-coin-layer';
 import type { PhaserStyleStrategy } from '@/game/phaser/phaser-style-strategy';
-import { updateCyclistSprite } from '@/game/phaser/cyclist-sprite';
-import { PX_PER_METER } from '@/game/phaser/phaser2d-scene';
+import type { CyclistSpriteUpdateFn } from '@/game/phaser/cyclist-sprite';
 import { useSettingsStore } from '@/stores/settingsStore';
+
+/** Matches PX_PER_METER in phaser2d-scene.ts — inlined to avoid pulling in the full scene module. */
+const PX_PER_METER = 3;
 import { notifySuccess } from '@/utils/notify';
 
 export interface PhaserRendererInitOptions {
@@ -40,6 +42,7 @@ export function usePhaserRenderer() {
   let coinLayer: PhaserCoinLayer | null = null;
   let cyclistSprite: Phaser.GameObjects.Sprite | null = null;
   let styleStrategy: PhaserStyleStrategy | null = null;
+  let updateCyclistSpriteFn: CyclistSpriteUpdateFn | null = null;
 
   let routePoints: RoutePoint[] = [];
   let cumulativeDists: number[] = [];
@@ -59,7 +62,7 @@ export function usePhaserRenderer() {
       { createPhaserGame },
       { buildElevationProfile, fetchAndProjectFeatures, TerrainChunkManager2D: ChunkMgr },
       { PhaserWeatherSystem: WeatherSys },
-      { createCyclistSprite },
+      { createCyclistSprite, updateCyclistSprite },
       { PhaserCoinLayer: CoinLayerClass },
     ] = await Promise.all([
       import('@/game/phaser/phaser-game'),
@@ -68,6 +71,8 @@ export function usePhaserRenderer() {
       import('@/game/phaser/cyclist-sprite'),
       import('@/game/phaser/phaser-coin-layer'),
     ]);
+
+    updateCyclistSpriteFn = updateCyclistSprite;
 
     // Create Phaser game and wait for scene.create() to finish
     gameInstance = await createPhaserGame(opts.canvas, styleStrategy);
@@ -171,7 +176,7 @@ export function usePhaserRenderer() {
       // Convert slope degrees to percent for pose selection
       const slopePercent = Math.tan(slopeDeg * Math.PI / 180) * 100;
 
-      updateCyclistSprite(cyclistSprite, {
+      updateCyclistSpriteFn!(cyclistSprite, {
         worldX,
         worldY,
         slopeDeg,

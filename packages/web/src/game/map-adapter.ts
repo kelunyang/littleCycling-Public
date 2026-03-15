@@ -83,7 +83,10 @@ export async function createMapAdapter(
 ): Promise<MapAdapter> {
   const exaggeration = options.terrainExaggeration ?? 1;
 
-  const maplibregl = (await import('maplibre-gl')).default;
+  const [maplibregl] = await Promise.all([
+    import('maplibre-gl').then((m) => m.default),
+    import('maplibre-gl/dist/maplibre-gl.css'),
+  ]);
   const map = new maplibregl.Map({
     ...options,
     maxTileCacheSize: 200,

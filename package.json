@@ -10,7 +10,8 @@
     "dev": "npm run dev:all -w packages/server",
     "dev:no-caddy": "npm run dev:all -w packages/server -- --no-caddy",
     "build": "npm run build -w packages/shared && npm run build -w packages/server && npm run build -w packages/web",
-    "replay": "npm run replay -w packages/server"
+    "replay": "npm run replay -w packages/server",
+    "publish-public": "bash scripts/publish-public.sh"
   },
   "engines": {
     "node": ">=20.0.0"

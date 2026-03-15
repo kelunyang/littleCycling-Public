@@ -648,3 +648,5 @@ export function useTerrainRenderer() {
     dispose,
   };
 }
+
+export type TerrainRendererAPI = ReturnType<typeof useTerrainRenderer>;

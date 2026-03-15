@@ -958,4 +958,4 @@ interface PhaserBridge {
 
 ---
 
-kelunyang@2025 | [GitHub](https://github.com/kelunyang/littleCycling)
+Kelunyang@2026 by claude with :heart: | [GitHub](https://github.com/kelunyang/littleCycling)

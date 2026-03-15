@@ -75,7 +75,11 @@
       "Bash(grep -r \"test\\\\|jest\\\\|vitest\" /mnt/d/Development/littleCycling/package.json /mnt/d/Development/littleCycling/packages/*/package.json)",
       "Bash(grep -E \"\\\\.\\(js|ts\\)$\")",
       "Bash(xargs cat:*)",
-      "Bash(grep -r \"getFeaturesForBounds\\\\|getLayerFeatures\\\\|getChunkFeatures\" /mnt/d/Development/littleCycling/packages/web/src --include=*.ts --include=*.tsx --include=*.vue)"
+      "Bash(grep -r \"getFeaturesForBounds\\\\|getLayerFeatures\\\\|getChunkFeatures\" /mnt/d/Development/littleCycling/packages/web/src --include=*.ts --include=*.tsx --include=*.vue)",
+      "Bash(wc -l /mnt/d/Development/littleCycling/packages/web/src/composables/*.ts)",
+      "Bash(find packages/web/src/game/terrain -name \"*.ts\" -exec basename {})",
+      "Bash(find packages/web/src/game/phaser -name \"*.ts\" -exec basename {})",
+      "Bash(npx vite:*)"
     ]
   }
 }

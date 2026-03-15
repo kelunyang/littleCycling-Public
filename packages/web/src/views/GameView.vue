@@ -64,9 +64,9 @@ import { ref, computed, watch, shallowRef, toRef, onMounted, onUnmounted, nextTi
 import { useRouter } from 'vue-router';
 import { useRouteStore } from '@/stores/routeStore';
 import { useGameStore } from '@/stores/gameStore';
-import { useMapSetup } from '@/composables/useMapSetup';
-import { useThreeBall } from '@/composables/useThreeBall';
-import { useTerrainRenderer } from '@/composables/useTerrainRenderer';
+import type { MapSetupAPI } from '@/composables/useMapSetup';
+import type { ThreeBallAPI } from '@/composables/useThreeBall';
+import type { TerrainRendererAPI } from '@/composables/useTerrainRenderer';
 import { usePhaserRenderer } from '@/composables/usePhaserRenderer';
 import { useWeatherApi } from '@/composables/useWeatherApi';
 import { useBallEngine } from '@/composables/useBallEngine';
@@ -159,7 +159,7 @@ async function togglePiP() {
           canvas.height = canvas.clientHeight;
         }
       } else {
-        mapSetup.map.value?.resize();
+        mapSetup?.map.value?.resize();
       }
 
       // Listen for PiP window resize
@@ -186,7 +186,7 @@ function handlePiPResize() {
       canvas.height = canvas.clientHeight;
     }
   } else {
-    mapSetup.map.value?.resize();
+    mapSetup?.map.value?.resize();
   }
 }
 
@@ -228,7 +228,7 @@ watch(
           canvas.height = canvas.clientHeight;
         }
       } else {
-        mapSetup.map.value?.resize();
+        mapSetup?.map.value?.resize();
       }
     }
   },
@@ -259,18 +259,10 @@ const cameraControl = useCameraControl(gameViewRef, isThreeJs.value ? {
 const ws = useWebSocket();
 const mock = useMockSensor();
 
-// Map (MapLibre mode or skipped in threejs mode)
-const mapSetup = useMapSetup(containerEl);
-
-// Three.js ball (MapLibre mode)
-const threeBall = useThreeBall(
-  mapSetup.map,
-  mapSetup.mapReady,
-  () => mapSetup.adapter.value?.mercatorFromLngLat,
-);
-
-// Standalone terrain renderer (Three.js mode)
-const terrainRenderer = useTerrainRenderer();
+// Lazily loaded renderer composables (dynamically imported in onMounted based on renderMode)
+let mapSetup: MapSetupAPI | null = null;
+let threeBall: ThreeBallAPI | null = null;
+let terrainRenderer: TerrainRendererAPI | null = null;
 
 // Phaser 2D renderer (Excitebike mode)
 const phaserRenderer = usePhaserRenderer();
@@ -309,7 +301,7 @@ const coinSpawner = useCoinSpawner({
   comboMultiplier: coinSystem.comboMultiplier,
   layer: coinLayer,
   onCoinCollected: () => {
-    if (isThreeJs.value) terrainRenderer.triggerCoinGlow();
+    if (isThreeJs.value) terrainRenderer?.triggerCoinGlow();
     audioManager.coinCollect();
   },
 });
@@ -324,9 +316,9 @@ const gameLoop = useGameLoop({
     const pos = ballEngine.currentPosition.value;
 
     if (isThreeJs.value) {
-      terrainRenderer.updatePosition([pos.lon, pos.lat], pos.ele);
-      terrainRenderer.setDarkened(coinSystem.redLine.value);
-      terrainRenderer.updateDistance(ballEngine.distanceTraveled.value);
+      terrainRenderer!.updatePosition([pos.lon, pos.lat], pos.ele);
+      terrainRenderer!.setDarkened(coinSystem.redLine.value);
+      terrainRenderer!.updateDistance(ballEngine.distanceTraveled.value);
     } else if (isPhaser.value) {
       phaserRenderer.updatePosition([pos.lon, pos.lat], pos.ele);
       phaserRenderer.setDarkened(coinSystem.redLine.value);
@@ -336,14 +328,14 @@ const gameLoop = useGameLoop({
         sensorStore.sc?.cadence ?? 0,
       );
     } else {
-      threeBall.updatePosition([pos.lon, pos.lat], pos.ele);
-      threeBall.setDarkened(coinSystem.redLine.value);
+      threeBall!.updatePosition([pos.lon, pos.lat], pos.ele);
+      threeBall!.setDarkened(coinSystem.redLine.value);
     }
 
     coinSpawner.updateFrame();
     // Update checkpoint flags (fade passed ones)
     if (isThreeJs.value) {
-      terrainRenderer.updateCheckpointFlags(ballEngine.distanceTraveled.value);
+      terrainRenderer!.updateCheckpointFlags(ballEngine.distanceTraveled.value);
     }
   },
   updateCamera: () => {
@@ -359,16 +351,16 @@ const gameLoop = useGameLoop({
       const now = performance.now();
       const dt = lastFrameTime ? (now - lastFrameTime) / 1000 : 0;
       lastFrameTime = now;
-      terrainRenderer.setCameraOptions({
+      terrainRenderer!.setCameraOptions({
         pitchDeg: cameraControl.pitch.value,
         heightAboveM: cameraControl.height.value,
       });
-      terrainRenderer.updateCamera(effectiveBearing, dt);
-      terrainRenderer.updatePhysiology(
+      terrainRenderer!.updateCamera(effectiveBearing, dt);
+      terrainRenderer!.updatePhysiology(
         coinSystem.currentZone.value?.zone ?? null,
         ballEngine.speedKmh.value,
       );
-      terrainRenderer.render(dt);
+      terrainRenderer!.render(dt);
       // Update wind sound intensity based on speed (Three.js only)
       audioManager.updateWind(ballEngine.speedKmh.value);
     } else if (isPhaser.value) {
@@ -379,7 +371,7 @@ const gameLoop = useGameLoop({
       phaserRenderer.render(dt);
       // Update wind sound intensity based on speed (Phaser mode)
       audioManager.updateWind(ballEngine.speedKmh.value);
-    } else if (mapSetup.map.value) {
+    } else if (mapSetup?.map.value) {
       updateMapLibreCamera(mapSetup.map.value, { ...pos, bearing: effectiveBearing }, {
         pitch: cameraControl.pitch.value,
       });
@@ -494,6 +486,10 @@ onMounted(async () => {
     const canvas = threeCanvasRef.value;
     if (!canvas || pts.length === 0) return;
 
+    // Dynamically import Three.js terrain renderer
+    const { useTerrainRenderer } = await import('@/composables/useTerrainRenderer');
+    terrainRenderer = useTerrainRenderer();
+
     // Size canvas to viewport
     canvas.width = canvas.clientWidth;
     canvas.height = canvas.clientHeight;
@@ -532,7 +528,7 @@ onMounted(async () => {
       [() => weatherApi.weatherType.value, () => gameStore.weatherOverride],
       ([apiType, override]) => {
         const type = (override ?? apiType) as typeof apiType;
-        terrainRenderer.setWeather({ type, sunElevation: 45, sunAzimuth: 180 });
+        terrainRenderer!.setWeather({ type, sunElevation: 45, sunAzimuth: 180 });
       },
       { immediate: true },
     );
@@ -540,14 +536,14 @@ onMounted(async () => {
     // Billboard clouds toggle
     watch(
       () => gameStore.cloudsEnabled,
-      (enabled) => terrainRenderer.setCloudsEnabled(enabled),
+      (enabled) => terrainRenderer!.setCloudsEnabled(enabled),
       { immediate: true },
     );
 
     // Glasses lens mode
     watch(
       () => gameStore.glassesLens,
-      (lens) => terrainRenderer.setGlassesLens(lens),
+      (lens) => terrainRenderer!.setGlassesLens(lens),
       { immediate: true },
     );
 
@@ -652,6 +648,18 @@ onMounted(async () => {
     audioManager.gameStart();
   } else {
     // ── MapLibre mode (legacy) ──
+    // Dynamically import MapLibre composables
+    const [{ useMapSetup: createMapSetup }, { useThreeBall: createThreeBall }] = await Promise.all([
+      import('@/composables/useMapSetup'),
+      import('@/composables/useThreeBall'),
+    ]);
+    mapSetup = createMapSetup(containerEl);
+    threeBall = createThreeBall(
+      mapSetup.map,
+      mapSetup.mapReady,
+      () => mapSetup!.adapter.value?.mercatorFromLngLat,
+    );
+
     await mapSetup.init({
       center: initialCenter,
       style: settingsStore.config.map.basemapStyle,
@@ -659,20 +667,20 @@ onMounted(async () => {
     });
 
     watch(
-      () => mapSetup.mapReady.value,
+      () => mapSetup!.mapReady.value,
       (ready) => {
         if (!ready) return;
         const pts = routePoints.value;
         if (pts.length > 0) {
-          mapSetup.addRouteLayer(pts);
+          mapSetup!.addRouteLayer(pts);
           ballEngine.initialize();
 
           // Set coin layer to ThreeBallLayer
-          coinLayer.value = threeBall.layer.value;
+          coinLayer.value = threeBall!.layer.value;
 
           const startPos = ballEngine.currentPosition.value;
-          if (mapSetup.map.value) {
-            updateMapLibreCamera(mapSetup.map.value, startPos, {
+          if (mapSetup!.map.value) {
+            updateMapLibreCamera(mapSetup!.map.value, startPos, {
               pitch: cameraControl.pitch.value,
             });
           }
@@ -700,9 +708,9 @@ onUnmounted(() => {
   mock.stop();
   ws.disconnect();
   weatherApi.stopPolling();
-  terrainRenderer.dispose();
+  terrainRenderer?.dispose();
   phaserRenderer.dispose();
-  mapSetup.dispose();
+  mapSetup?.dispose();
   audioManager.dispose();
 });
 </script>
