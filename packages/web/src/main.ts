@@ -1,0 +1,135 @@
+import { createApp } from 'vue';
+import { createPinia } from 'pinia';
+import { library } from '@fortawesome/fontawesome-svg-core';
+import { FontAwesomeIcon } from '@fortawesome/vue-fontawesome';
+import {
+  faGear,
+  faHeart,
+  faGauge,
+  faBicycle,
+  faBolt,
+  faCoins,
+  faPlay,
+  faStop,
+  faUpload,
+  faRotate,
+  faArrowsLeftRight,
+  faCheck,
+  faXmark,
+  faFlag,
+  faClock,
+  faRoute,
+  faMountain,
+  faWifi,
+  faTriangleExclamation,
+  faChevronRight,
+  faChevronLeft,
+  faChevronDown,
+  faChevronUp,
+  faTrash,
+  faDownload,
+  faSpinner,
+  faTrophy,
+  faMap,
+  faThumbtack,
+  faCodeCompare,
+  faFileExport,
+  faClockRotateLeft,
+  faCaretUp,
+  faCaretDown,
+  faWandMagicSparkles,
+  faCloudSun,
+  faCloudRain,
+  faSnowflake,
+  faSun,
+  faCloud,
+  faGlasses,
+  faCube,
+  faVolumeHigh,
+  faHeartPulse,
+  faCalendarDays,
+  faChartLine,
+  faGaugeHigh,
+  faArrowLeft,
+  faUpRightFromSquare,
+  faArrowTrendUp,
+  faArrowTrendDown,
+} from '@fortawesome/free-solid-svg-icons';
+import { faGithub } from '@fortawesome/free-brands-svg-icons';
+
+import 'element-plus/theme-chalk/dark/css-vars.css';
+import 'maplibre-gl/dist/maplibre-gl.css';
+
+import App from './App.vue';
+import router from './router';
+
+// Register Font Awesome icons
+library.add(
+  faGear,
+  faHeart,
+  faGauge,
+  faBicycle,
+  faBolt,
+  faCoins,
+  faPlay,
+  faStop,
+  faUpload,
+  faRotate,
+  faArrowsLeftRight,
+  faCheck,
+  faXmark,
+  faFlag,
+  faClock,
+  faRoute,
+  faMountain,
+  faWifi,
+  faTriangleExclamation,
+  faChevronRight,
+  faChevronLeft,
+  faChevronDown,
+  faChevronUp,
+  faTrash,
+  faDownload,
+  faSpinner,
+  faTrophy,
+  faMap,
+  faThumbtack,
+  faCodeCompare,
+  faFileExport,
+  faClockRotateLeft,
+  faCaretUp,
+  faCaretDown,
+  faWandMagicSparkles,
+  faCloudSun,
+  faCloudRain,
+  faSnowflake,
+  faSun,
+  faCloud,
+  faGlasses,
+  faCube,
+  faVolumeHigh,
+  faHeartPulse,
+  faCalendarDays,
+  faChartLine,
+  faGaugeHigh,
+  faArrowLeft,
+  faUpRightFromSquare,
+  faArrowTrendUp,
+  faArrowTrendDown,
+  faGithub as unknown as import('@fortawesome/fontawesome-svg-core').IconDefinition,
+);
+
+document.documentElement.classList.add('dark');
+
+const app = createApp(App);
+app.use(createPinia());
+app.use(router);
+app.component('font-awesome-icon', FontAwesomeIcon);
+app.mount('#app');
+
+// Register tile-cache service worker for persistent map tile caching
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/tile-cache-sw.js').catch(() => {
+    // SW registration failed — tiles will still work, just without persistent cache
+  });
+}

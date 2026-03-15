@@ -1,0 +1,40 @@
+# littleCycling Caddy reverse proxy
+#
+# Usage:
+#   cp Caddyfile.example Caddyfile
+#   caddy run
+#
+# Dev mode (Vite dev server + Fastify backend):
+#   1. npm run server --workspace=packages/server   # :8765
+#   2. npm run dev --workspace=packages/web          # :5173
+#   3. caddy run                                     # :3000
+#
+# Production (built frontend + Fastify backend):
+#   1. npm run build --workspace=packages/web
+#   2. npm run server --workspace=packages/server    # :8765
+#   3. caddy run                                     # :3000
+
+:3000 {
+	# API requests → Fastify backend
+	handle /api/* {
+		reverse_proxy localhost:8765
+	}
+
+	# WebSocket requests → Fastify backend
+	handle /ws/* {
+		reverse_proxy localhost:8765
+	}
+
+	# Frontend: serve built static files if available,
+	# otherwise proxy to Vite dev server.
+	#
+	# --- Production: uncomment these 2 lines ---
+	# root * packages/web/dist
+	# try_files {path} /index.html
+	# file_server
+	#
+	# --- Development: proxy to Vite dev server ---
+	handle {
+		reverse_proxy localhost:5173
+	}
+}

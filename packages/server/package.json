@@ -1,0 +1,44 @@
+{
+  "name": "@littlecycling/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/cli.tsx",
+    "server": "tsx src/server.ts",
+    "replay": "tsx src/replay.tsx",
+    "record": "tsx src/recorder.ts",
+    "dev:all": "tsx src/dev-runner.tsx",
+    "ble:test": "tsx src/ble-hr-test.ts",
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.0",
+    "@fastify/multipart": "^9.0.0",
+    "@fastify/websocket": "^11.0.0",
+    "@garmin/fitsdk": "^21.195.0",
+    "@littlecycling/shared": "0.1.0",
+    "@stoprocent/noble": "^1.15.0",
+    "better-sqlite3": "^12.6.2",
+    "dayjs": "^1.11.0",
+    "fastify": "^5.3.0",
+    "fit-file-parser": "^2.3.3",
+    "incyclist-ant-plus": "^0.3.0",
+    "ink": "^6.0.0",
+    "ink-spinner": "^5.0.0",
+    "linkedom": "^0.18.0",
+    "phaser": "^3.90.0",
+    "react": "^19.0.0",
+    "usb": "^2.14.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

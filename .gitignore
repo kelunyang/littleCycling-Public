@@ -1,0 +1,15 @@
+node_modules/
+dist/
+recordings/*.jsonl
+!recordings/.gitkeep
+data/*.jsonl
+data/*.db
+data/config.json
+data/routes/*.json
+!data/routes/.gitkeep
+Caddyfile
+caddy.exe
+
+# Prevent accidental .js commits in TS source
+packages/*/src/**/*.js
+packages/*/src/**/*.js.map

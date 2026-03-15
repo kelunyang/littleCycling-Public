@@ -1,0 +1,25 @@
+{
+  "name": "little-cycling",
+  "version": "0.1.0",
+  "description": "ANT+ sensor recorder for cycling - a personal Zwift-like game project",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev:all -w packages/server",
+    "dev:no-caddy": "npm run dev:all -w packages/server -- --no-caddy",
+    "build": "npm run build -w packages/shared && npm run build -w packages/server && npm run build -w packages/web",
+    "replay": "npm run replay -w packages/server"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@mapbox/vector-tile": "^2.0.4",
+    "pbf": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/pbf": "^3.0.5"
+  }
+}

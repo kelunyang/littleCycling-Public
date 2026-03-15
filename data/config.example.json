@@ -1,0 +1,27 @@
+{
+  "sensor": {
+    "wheelCircumference": 2.105,
+    "trainerModel": "generic-fluid"
+  },
+  "training": {
+    "defaultDuration": 1800000,
+    "hrMax": 190,
+    "ftp": 200
+  },
+  "server": {
+    "wsPort": 8765
+  },
+  "map": {
+    "basemapStyle": "liberty",
+    "renderMode": "threejs",
+    "cameraHeight": 15,
+    "cameraPitch": 30,
+    "cameraLookAhead": 80,
+    "viewRange": 500,
+    "dayNightEnabled": true
+  },
+  "sound": {
+    "enabled": true
+  },
+  "debug": false
+}
