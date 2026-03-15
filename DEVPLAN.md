@@ -749,7 +749,7 @@ ride_samples (
 
 ---
 
-### Phase 7: Phaser.js 2D Excitebike 橫軸清關遊戲模式 🔲 規劃中
+### Phase 7: Phaser.js 2D Excitebike 橫軸清關遊戲模式 ✅ 已完成
 
 在 MapLibre (2D 地圖) 和 Three.js (3D 地形) 之外，新增第三種渲染模式：Phaser.js 驅動的 NES 風格橫軸捲軸騎行遊戲。
 

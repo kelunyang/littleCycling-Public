@@ -187,20 +187,30 @@ npm run replay
 | Phase | 內容 | 狀態 |
 |-------|------|------|
 | 1 | ANT+ 記錄器（CLI 錄製感測器資料到 JSONL） | ✅ 完成 |
-| 2 | Replay Server（WebSocket 回放 JSONL） | 開發中 |
+| 2 | Replay Server（WebSocket 回放 JSONL） | ✅ 完成 |
 | 3 | Ink 終端儀表板（互動式錄製 UI） | ✅ 完成 |
-| 4 | 前端遊戲（Vue 3 + MapLibre + Three.js） | 開發中 |
-| 5 | 訓練紀錄（SQLite 儲存歷史） | 計畫中 |
-| 6 | Live 整合模式 | 計畫中 |
+| 4 | 前端遊戲（Vue 3 + MapLibre + Three.js） | ✅ 完成 |
+| 4.5 | Three.js 獨立地形渲染（塑膠玩具風格） | ✅ 完成 |
+| 5 | 訓練紀錄（SQLite 儲存歷史） | ✅ 完成 |
+| 6 | Live 整合模式 + FIT 匯出 | ✅ 完成 |
+| 7 | Phaser.js 2D 橫軸捲軸遊戲模式（塑膠風/手繪風雙風格） | ✅ 完成 |
 
 ## 遊戲特色
 
 - **真實 3D 地圖**：OpenFreeMap 向量地圖 + AWS 地形高程 + 3D 建築物
-- **GPX 路線**：支援上傳 GPX/TCX，或下載環法/Giro/Vuelta 賽事路線
+- **塑膠玩具美術風格**：MeshToonMaterial 離散色階 + 螢光噴漆配色，完全程序化渲染
+- **GPX 路線**：支援上傳 GPX/TCX/FIT，或從 EuroVelo 目錄下載歐洲長途路線
 - **感測器驅動**：ANT+ 速度/踏頻 + BLE 心率，支援虛擬功率估算
-- **金幣系統**：依心率區間獎勵金幣，鼓勵穩定配速
-- **DOOM 風格 HUD**：即時顯示心率、速度、踏頻、功率、金幣
+- **金幣系統**：依心率區間獎勵金幣，combo 倍率機制，鼓勵穩定配速
+- **Cyberpunk HUD**：霓虹風格即時顯示心率、速度、踏頻、功率、金幣
 - **雙模式**：軌道模式（沿 GPX 路線）或自由漫遊（需雙邊功率計）
+- **FTP 結構化訓練**：5 種內建訓練模式 + HUD 分段進度條 + 3D checkpoint flag
+- **天氣系統**：Open-Meteo 即時天氣 + 動態日夜循環 + 雨雪粒子
+- **騎行風鏡**：5 種鏡片模式 + 隧道視覺效果 + 區域照明
+- **NES 音效**：純 Web Audio API 合成，零音檔零依賴
+- **Picture-in-Picture**：Document PiP 浮動視窗，邊騎車邊看影片
+- **訓練行事曆**：雙月檢視 + d3.js 統計圖表 + FIT 匯出至 Strava
+- **雷達圖對比**：本次騎乘 vs 同路線歷史 PB 五軸雷達圖
 
 詳細規格請參閱 [DEVPLAN.md](DEVPLAN.md)。
 
