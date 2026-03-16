@@ -56,6 +56,11 @@ export const useSettingsStore = defineStore('settings', () => {
     saveConfig({ sound: config.value.sound });
   }
 
+  function updateLlm(llm: AppConfig['llm']) {
+    config.value.llm = llm;
+    saveConfig({ llm });
+  }
+
   function updateDebug(debug: boolean) {
     config.value.debug = debug;
     saveConfig({ debug });
@@ -65,5 +70,5 @@ export const useSettingsStore = defineStore('settings', () => {
     config.value = structuredClone(DEFAULT_CONFIG);
   }
 
-  return { config, fetchConfig, saveConfig, updateSensor, updateTraining, updateServer, updateMap, updateSound, updateDebug, reset };
+  return { config, fetchConfig, saveConfig, updateSensor, updateTraining, updateServer, updateMap, updateSound, updateLlm, updateDebug, reset };
 });

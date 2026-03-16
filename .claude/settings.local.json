@@ -80,7 +80,22 @@
       "Bash(find packages/web/src/game/terrain -name \"*.ts\" -exec basename {})",
       "Bash(find packages/web/src/game/phaser -name \"*.ts\" -exec basename {})",
       "Bash(npx vite:*)",
-      "Bash(node -e \":*)"
+      "Bash(node -e \":*)",
+      "Bash(find /mnt/d/Development/littleCycling -type f -name *db* -o -name *sqlite* -o -name *schema* -o -name *migration*)",
+      "Bash(find /mnt/d/Development/littleCycling -name littlecycling.db* -o -name *.db)",
+      "Bash(grep -r \"GAME_MESSAGE_TYPES\\\\|GameBubble\\\\|typewriter\" /mnt/d/Development/littleCycling/packages/web/src/components/game --include=*.vue --include=*.ts -l)",
+      "Bash(grep -E \"\\\\.\\(ts|vue\\)$\")",
+      "WebFetch(domain:api-docs.deepseek.com)",
+      "WebFetch(domain:ai.google.dev)",
+      "WebFetch(domain:platform.moonshot.ai)",
+      "WebFetch(domain:www.alibabacloud.com)",
+      "WebFetch(domain:open.bigmodel.cn)",
+      "WebFetch(domain:help.apiyi.com)",
+      "WebFetch(domain:docs.litellm.ai)",
+      "WebFetch(domain:www.codecademy.com)",
+      "WebFetch(domain:docs.z.ai)",
+      "Bash(git -C /mnt/d/Development/littleCycling ls-files data/)",
+      "Bash(git rm:*)"
     ]
   }
 }

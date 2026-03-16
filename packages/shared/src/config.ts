@@ -3,6 +3,15 @@
  * Persisted in data/config.json, editable via the settings page.
  */
 
+/** LLM provider configuration (OpenAI-compatible endpoints) */
+export interface LlmProvider {
+  name: string;              // display name, e.g. 'DeepSeek'
+  key: string;               // API key
+  endpoint: string;          // base URL, e.g. 'https://api.deepseek.com/v1'
+  model: string;             // model ID, e.g. 'deepseek-chat'
+  enabled: boolean;          // whether this provider is active
+}
+
 export interface AppConfig {
   sensor: {
     wheelCircumference: number;  // meters
@@ -29,6 +38,7 @@ export interface AppConfig {
   sound: {
     enabled: boolean;  // master sound on/off toggle
   };
+  llm: LlmProvider[];
   debug: boolean; // enable verbose console logging for terrain, MVT, weather, etc.
 }
 
@@ -58,5 +68,6 @@ export const DEFAULT_CONFIG: AppConfig = {
   sound: {
     enabled: true,
   },
+  llm: [],
   debug: false,
 };

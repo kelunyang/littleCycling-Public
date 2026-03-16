@@ -42,7 +42,7 @@ export class ConfigStore {
     } catch {
       // File missing or malformed — use defaults and persist to disk
       this.config = { ...DEFAULT_CONFIG };
-      this.save(this.config);
+      this.save(this.config as unknown as Record<string, unknown>);
     }
     return this.config;
   }

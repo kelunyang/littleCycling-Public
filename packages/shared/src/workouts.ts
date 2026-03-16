@@ -14,6 +14,8 @@ export interface WorkoutSegment {
   targetFtpPercent: number;  // target power as % of FTP (100 = FTP)
   targetCadence?: number;    // optional cadence target (rpm)
   color: string;             // progress bar color (HEX)
+  hrMin?: number;            // optional HR target floor (bpm) — used by training plans
+  hrMax?: number;            // optional HR target ceiling (bpm) — used by training plans
 }
 
 /** Internal segment template (percentage-based duration) */

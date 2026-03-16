@@ -35,6 +35,7 @@ export interface PhaserRendererInitOptions {
 
 export function usePhaserRenderer() {
   const isReady = ref(false);
+  const mvtFailed = ref(false);
 
   let gameInstance: PhaserGameInstance | null = null;
   let weatherSystem: PhaserWeatherSystem | null = null;
@@ -115,6 +116,7 @@ export function usePhaserRenderer() {
     }).catch((err) => {
       loadingMsg.close();
       console.warn('[Phaser] MVT feature fetch failed, terrain will render without features:', err);
+      mvtFailed.value = true;
     });
 
     isReady.value = true;
@@ -353,6 +355,7 @@ export function usePhaserRenderer() {
     updateCheckpointFlags,
     setWorkoutZoneColor,
     drawWorkoutSegmentFlags,
+    mvtFailed,
     dispose,
   };
 }

@@ -34,6 +34,7 @@
           :month="leftMonth"
           :day-counts="calendar.dayCounts.value"
           :selected-date="calendar.selectedDate.value"
+          :plan-markers="planMarkers"
           @select-date="calendar.selectDate"
         />
 
@@ -44,6 +45,7 @@
           :month="rightMonth"
           :day-counts="calendar.dayCounts.value"
           :selected-date="calendar.selectedDate.value"
+          :plan-markers="planMarkers"
           @select-date="calendar.selectDate"
         />
 
@@ -74,21 +76,50 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import dayjs from 'dayjs';
+import { getCurrentPlanDay, getSessionByDay } from '@littlecycling/shared';
 import CalendarMonth from './CalendarMonth.vue';
 import DayRideList from './DayRideList.vue';
 import RideDetailDrawer from './RideDetailDrawer.vue';
 import { useCalendar } from '@/composables/useCalendar';
+import { usePlanStore } from '@/stores/planStore';
 
 defineProps<{
   open: boolean;
 }>();
 
 const calendar = useCalendar();
+const planStore = usePlanStore();
 
 const leftYear = computed(() => calendar.viewMonth.value.subtract(1, 'month').year());
 const leftMonth = computed(() => calendar.viewMonth.value.subtract(1, 'month').month());
 const rightYear = computed(() => calendar.viewMonth.value.year());
 const rightMonth = computed(() => calendar.viewMonth.value.month());
+
+/** Build plan markers for all active plans across the visible date range. */
+const planMarkers = computed(() => {
+  const markers = new Map<string, 'training' | 'rest' | 'done'>();
+  for (const { plan, startDate } of planStore.activePlans) {
+    for (let d = 1; d <= plan.totalDays; d++) {
+      const dateStr = dayjs(startDate).add(d - 1, 'day').format('YYYY-MM-DD');
+      const session = getSessionByDay(plan, d);
+      if (!session) continue;
+
+      if (planStore.isCompleted(plan.id, d)) {
+        markers.set(dateStr, 'done');
+      } else if (session.type === 'training') {
+        if (!markers.has(dateStr) || markers.get(dateStr) !== 'done') {
+          markers.set(dateStr, 'training');
+        }
+      } else {
+        if (!markers.has(dateStr)) {
+          markers.set(dateStr, 'rest');
+        }
+      }
+    }
+  }
+  return markers;
+});
 </script>
 
 <style scoped>

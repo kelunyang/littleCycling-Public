@@ -79,6 +79,11 @@ export class MVTFetcher {
     }
   }
 
+  /** Whether tile URL was successfully resolved. */
+  isAvailable(): boolean {
+    return this.tileUrlTemplate !== null;
+  }
+
   /**
    * Get all MVT features covering the given geographic bounds.
    * Returns cached results if available.

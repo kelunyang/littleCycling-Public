@@ -15,6 +15,14 @@
       </div>
     </div>
 
+    <!-- Plan indicator -->
+    <div v-if="todayTrainingSessions.length > 0" class="checklist__plan-tag">
+      <font-awesome-icon icon="clipboard-list" />
+      <span v-for="s in todayTrainingSessions" :key="s.plan.id">
+        {{ s.plan.name }} Day {{ s.day }} ({{ s.session.durationMin }} min)
+      </span>
+    </div>
+
     <!-- Duration picker -->
     <div class="checklist__duration">
       <label>
@@ -48,6 +56,14 @@
           :label="opt.label"
         />
       </el-select>
+      <!-- Random events toggle (freeride only) -->
+      <div v-if="gameStore.selectedWorkoutId === 'none'" class="checklist__toggle checklist__toggle--indent">
+        <label>
+          <font-awesome-icon icon="dice" />
+          Random Events
+        </label>
+        <el-switch v-model="gameStore.randomEventsEnabled" />
+      </div>
       <div v-if="selectedWorkoutProfile" class="checklist__workout-desc">
         {{ selectedWorkoutProfile.description }}
       </div>
@@ -212,6 +228,7 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { useSensorStore } from '@/stores/sensorStore';
 import { useGameStore } from '@/stores/gameStore';
 import { useComparisonStore } from '@/stores/comparisonStore';
+import { usePlanStore } from '@/stores/planStore';
 import { notifyWarn } from '@/utils/notify';
 
 const router = useRouter();
@@ -220,6 +237,7 @@ const settingsStore = useSettingsStore();
 const sensorStore = useSensorStore();
 const gameStore = useGameStore();
 const comparisonStore = useComparisonStore();
+const planStore = usePlanStore();
 
 const showCompareDialog = ref(false);
 const historyRides = ref<Ride[]>([]);
@@ -269,6 +287,11 @@ const workoutPreviewSegments = computed(() => {
   if (!profile) return [];
   return buildWorkoutSegments(profile, settingsStore.config.training.defaultDuration);
 });
+
+/** Today's active plan training sessions (filtered to training type only). */
+const todayTrainingSessions = computed(() =>
+  planStore.todaySessions.filter((s) => s.session.type === 'training'),
+);
 
 const mapReachable = ref(false);
 const starting = ref(false);
@@ -353,6 +376,12 @@ async function launchGame() {
     }
   } catch {
     notifyWarn('Sensor recording unavailable');
+  }
+
+  // Inject plan segments if an active plan has training for today
+  const todayTraining = todayTrainingSessions.value[0];
+  if (todayTraining) {
+    gameStore.planDaySegments = todayTraining.session.segments;
   }
 
   gameStore.startGame(settingsStore.config.training.defaultDuration);
@@ -453,6 +482,20 @@ onUnmounted(() => {
   filter: drop-shadow(0 0 4px rgba(255,45,107,0.6));
 }
 
+.checklist__plan-tag {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: rgba(0, 229, 255, 0.08);
+  border: 1px solid rgba(0, 229, 255, 0.2);
+  font-size: 10px;
+  color: var(--hud-cyan);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
 .checklist__duration {
   display: flex;
   align-items: center;
@@ -509,6 +552,11 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   font-size: 11px;
+}
+
+.checklist__toggle--indent {
+  margin-top: 2px;
+  padding-left: 4px;
 }
 
 .checklist__weather {

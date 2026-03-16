@@ -72,6 +72,7 @@ export function useTerrainRenderer() {
   let glassesEffect: CyclingGlassesEffect | null = null;
   let sampler: ElevationSampler | null = null;
   let mvtFetcher: MVTFetcher | null = null;
+  const mvtFailed = ref(false);
 
   // Scene objects
   let routeLine: THREE.Group | null = null;
@@ -204,6 +205,10 @@ export function useTerrainRenderer() {
     // Must initialize first to resolve the current tile URL from TileJSON
     mvtFetcher = new MVTFetcher();
     await mvtFetcher.initialize();
+    // Check if tile URL was resolved — if not, MVT overlays are unavailable
+    if (!mvtFetcher.isAvailable()) {
+      mvtFailed.value = true;
+    }
 
     // Route line (immediate — route-first UX)
     // Uses a height offset of 1m above origin to float above terrain
@@ -645,6 +650,7 @@ export function useTerrainRenderer() {
     clearCoins,
     spawnCheckpointFlags,
     updateCheckpointFlags,
+    mvtFailed,
     dispose,
   };
 }

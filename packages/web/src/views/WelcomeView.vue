@@ -8,6 +8,8 @@
         </h1>
       </header>
 
+      <PlanBanner />
+
       <div class="welcome__body">
         <div class="welcome__left">
           <RouteList />
@@ -39,6 +41,9 @@
         <el-button class="welcome__top-btn" circle @click="calendar.open()">
           <font-awesome-icon icon="calendar-days" />
         </el-button>
+        <el-button class="welcome__top-btn" circle @click="presetOpen = true">
+          <font-awesome-icon icon="clipboard-list" />
+        </el-button>
         <el-button class="welcome__top-btn" circle @click="settingsOpen = true">
           <font-awesome-icon icon="gear" />
         </el-button>
@@ -47,6 +52,7 @@
 
     <SettingsPanel :open="settingsOpen" @close="settingsOpen = false" />
     <TrainingCalendar :open="calendar.isOpen.value" @close="calendar.close()" />
+    <PresetDrawer :open="presetOpen" @close="presetOpen = false" />
   </div>
 </template>
 
@@ -57,6 +63,9 @@ import RouteList from '@/components/welcome/RouteList.vue';
 import StartChecklist from '@/components/welcome/StartChecklist.vue';
 import SettingsPanel from '@/components/welcome/SettingsPanel.vue';
 import TrainingCalendar from '@/components/welcome/TrainingCalendar.vue';
+import PresetDrawer from '@/components/welcome/PresetDrawer.vue';
+import PlanBanner from '@/components/welcome/PlanBanner.vue';
+import { usePlanStore } from '@/stores/planStore';
 import WorkoutElevationPreview from '@/components/welcome/WorkoutElevationPreview.vue';
 import RoutePreviewMap from '@/components/welcome/RoutePreviewMap.vue';
 import { useRouteStore } from '@/stores/routeStore';
@@ -68,8 +77,10 @@ import { useCalendar } from '@/composables/useCalendar';
 const routeStore = useRouteStore();
 const settingsStore = useSettingsStore();
 const gameStore = useGameStore();
+const planStore = usePlanStore();
 const ws = useWebSocket();
 const settingsOpen = ref(false);
+const presetOpen = ref(false);
 const calendar = useCalendar();
 
 const workoutPreviewSegments = computed(() => {
@@ -81,6 +92,8 @@ const workoutPreviewSegments = computed(() => {
 onMounted(() => {
   routeStore.fetchRoutes();
   settingsStore.fetchConfig();
+  planStore.fetchPlans();
+  planStore.fetchActivePlans();
   ws.connect();
 });
 </script>

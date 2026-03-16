@@ -18,6 +18,7 @@ export function useWorkoutTracker(
   workoutSegments: Ref<WorkoutSegment[]>,
   elapsedMs: Ref<number>,
   currentPower: Ref<number>,
+  currentHr?: Ref<number>,
 ): WorkoutTrackerReturn {
   const settingsStore = useSettingsStore();
   const segmentChanged = ref(false);
@@ -49,7 +50,15 @@ export function useWorkoutTracker(
   });
 
   const isOnTarget = computed(() => {
-    if (!currentSegment.value) return false;
+    const seg = currentSegment.value;
+    if (!seg) return false;
+
+    // HR zone mode: if segment has hrMin/hrMax, use HR-based on-target
+    if (seg.hrMin != null && seg.hrMax != null && currentHr?.value) {
+      return currentHr.value >= seg.hrMin && currentHr.value <= seg.hrMax;
+    }
+
+    // FTP mode: ±10% of target watts
     const target = targetWatts.value;
     if (target <= 0) return false;
     const tolerance = target * 0.1;

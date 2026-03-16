@@ -43,8 +43,19 @@
       :pip-supported="pip.isSupported.value"
       :camera-pitch="cameraControl.pitch.value"
       :camera-height="cameraControl.height.value"
+      :message="gameMessages.currentMessage.value"
+      :is-event-active="randomEvents.isEventActive.value"
+      :active-event="randomEvents.activeEvent.value"
+      :event-elapsed-ms="randomEvents.eventElapsedMs.value"
+      :event-progress="randomEvents.eventProgress.value"
+      :event-target-watts="randomEvents.eventTargetWatts.value"
+      :event-target-cadence="randomEvents.eventTargetCadence.value"
+      :is-event-on-target="randomEvents.isEventOnTarget.value"
+      :event-screen-tint="randomEvents.eventScreenTint.value"
+      :event-screen-tint-opacity="randomEvents.eventScreenTintOpacity.value"
       @stop="handleStop"
       @toggle-pip="togglePiP"
+      @typewriter-done="gameMessages.onTypewriterDone"
     />
 
     <!-- Placeholder when game is in PiP window -->
@@ -80,11 +91,14 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { useSensorStore } from '@/stores/sensorStore';
 import { useComparison } from '@/composables/useComparison';
 import { useWorkoutTracker } from '@/composables/useWorkoutTracker';
+import { useGameMessages } from '@/composables/useGameMessages';
+import { useRandomEvents } from '@/composables/useRandomEvents';
 import { updateFpsCamera as updateMapLibreCamera } from '@/game/camera';
 import type { CoinLayerInterface } from '@/game/coin-interface';
 import { setDebugEnabled } from '@/game/debug-logger';
 import { AudioManager } from '@/game/audio/audio-manager';
 import { useDocumentPiP } from '@/composables/useDocumentPiP';
+import { usePlanStore } from '@/stores/planStore';
 import MapContainer from '@/components/game/MapContainer.vue';
 import GlassesOverlay from '@/components/game/GlassesOverlay.vue';
 import Hud from '@/components/game/Hud.vue';
@@ -95,6 +109,7 @@ const routeStore = useRouteStore();
 const gameStore = useGameStore();
 const settingsStore = useSettingsStore();
 const sensorStore = useSensorStore();
+const planStore = usePlanStore();
 
 // Redirect if not playing
 if (gameStore.state !== 'playing') {
@@ -388,11 +403,66 @@ const gameLoop = useGameLoop({
 // Comparison mode
 const { metrics: comparisonMetrics } = useComparison(gameLoop.elapsedMs);
 
-// Workout tracker
+// Workout tracker (with optional HR for plan-based on-target)
+const currentHr = computed(() => sensorStore.hr?.heartRate ?? 0);
 const workoutTracker = useWorkoutTracker(
   toRef(gameStore, 'workoutSegments'),
   gameLoop.elapsedMs,
   ballEngine.speedKmh,  // virtual power as proxy for actual power
+  currentHr,
+);
+
+// Game messages (comic bubble)
+const gameMessages = useGameMessages({
+  currentZone: coinSystem.currentZone,
+  redLine: coinSystem.redLine,
+  comboMultiplier: coinSystem.comboMultiplier,
+  coins: computed(() => gameStore.coins),
+  segmentChanged: workoutTracker.segmentChanged,
+  currentSegment: workoutTracker.currentSegment,
+  laps: computed(() => gameStore.laps),
+  distanceTraveled: ballEngine.distanceTraveled,
+  speedKmh: ballEngine.speedKmh,
+  maxSpeed: computed(() => gameLoop.stats.value.maxSpeed),
+  maxPower: computed(() => gameLoop.stats.value.maxPower),
+  isOnTarget: workoutTracker.isOnTarget,
+  weatherType: weatherApi.weatherType,
+});
+
+// Random events (freeride challenges)
+const savedWeatherType = ref<string | null>(null);
+const randomEvents = useRandomEvents({
+  elapsedMs: gameLoop.elapsedMs,
+  currentPower: ballEngine.speedKmh,  // virtual power as proxy
+  currentCadence: computed(() => sensorStore.sc?.cadence ?? 0),
+  ftp: computed(() => settingsStore.config.training.ftp),
+  selectedWorkoutId: toRef(gameStore, 'selectedWorkoutId'),
+  randomEventsEnabled: toRef(gameStore, 'randomEventsEnabled'),
+  targetDurationMs: toRef(gameStore, 'targetDurationMs'),
+  pushMessage: gameMessages.pushMessage,
+  addCoins: (amount) => gameStore.addCoins(amount),
+  setWeather: (config) => {
+    // Save current weather before overriding
+    savedWeatherType.value = gameStore.weatherOverride ?? weatherApi.weatherType.value;
+    gameStore.weatherOverride = config.type;
+  },
+  setDarkened: (dark) => {
+    if (isThreeJs.value) terrainRenderer?.setDarkened(dark);
+    else if (isPhaser.value) phaserRenderer.setDarkened(dark);
+  },
+  restoreWeather: () => {
+    // Restore to previous weather (or null to use API weather)
+    gameStore.weatherOverride = savedWeatherType.value === weatherApi.weatherType.value
+      ? null
+      : savedWeatherType.value;
+    savedWeatherType.value = null;
+  },
+});
+
+// Sync isRandomEvent flag with gameStore
+watch(
+  () => randomEvents.isEventActive.value,
+  (active) => { gameStore.isRandomEvent = active; },
 );
 
 // ── Audio event watchers ──
@@ -449,7 +519,20 @@ async function handleStop() {
     }
   }
 
+  gameMessages.pushMessage('game-end');
   audioManager.gameEnd();
+
+  // Record plan completion for all active plans with today's training
+  for (const entry of planStore.todaySessions) {
+    if (entry.session.type === 'training' && !planStore.isCompleted(entry.plan.id, entry.day)) {
+      planStore.recordCompletion(
+        entry.plan.id,
+        entry.day,
+        gameStore.currentRideId ?? undefined,
+      );
+    }
+  }
+
   gameStore.endGame();
 }
 
@@ -563,8 +646,14 @@ onMounted(async () => {
       { immediate: true },
     );
 
+    await gameMessages.preload();
+    if (terrainRenderer!.mvtFailed.value) {
+      gameMessages.pushMessage('mvt-failed');
+    }
+    gameMessages.pushMessage('terrain-ready');
     gameLoop.start();
     audioManager.gameStart();
+    gameMessages.pushMessage('game-start');
   } else if (isPhaser.value) {
     // ── Phaser 2D Excitebike mode ──
     const canvas = phaserCanvasRef.value;
@@ -644,8 +733,17 @@ onMounted(async () => {
       },
     );
 
+    // Watch for async MVT failure (fire-and-forget in Phaser)
+    watch(
+      () => phaserRenderer.mvtFailed.value,
+      (failed) => { if (failed) gameMessages.pushMessage('mvt-failed'); },
+    );
+
+    await gameMessages.preload();
+    gameMessages.pushMessage('terrain-ready');
     gameLoop.start();
     audioManager.gameStart();
+    gameMessages.pushMessage('game-start');
   } else {
     // ── MapLibre mode (legacy) ──
     // Dynamically import MapLibre composables
@@ -685,9 +783,12 @@ onMounted(async () => {
             });
           }
 
-          setTimeout(() => {
+          setTimeout(async () => {
+            await gameMessages.preload();
+            gameMessages.pushMessage('terrain-ready');
             gameLoop.start();
             audioManager.gameStart();
+            gameMessages.pushMessage('game-start');
           }, 500);
         }
       },

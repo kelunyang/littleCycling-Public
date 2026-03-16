@@ -26,8 +26,12 @@ import recordingApi from './routes/recording-api.js';
 import catalogApi from './routes/catalog-api.js';
 import liveApi from './routes/live-api.js';
 import rideApi from './routes/ride-api.js';
+import messageApi from './routes/message-api.js';
 import debugApi from './routes/debug-api.js';
+import planApi from './routes/plan-api.js';
+import llmApi from './routes/llm-api.js';
 import { DebugWriter } from './lib/debug-writer.js';
+import { PlanStore } from './lib/plan-store.js';
 
 // ── Parse CLI args ──
 
@@ -64,6 +68,8 @@ routeStore.autoImport().then((count) => {
   console.warn('[auto-import] Error during auto-import:', err);
 });
 
+const planStore = new PlanStore(resolve(dataDir, 'plans'));
+
 const relay = new WsRelay();
 
 // ── SQLite database ──
@@ -95,7 +101,10 @@ await fastify.register(recordingApi, { dataDir });
 await fastify.register(catalogApi, { routeStore });
 await fastify.register(liveApi, { liveSession });
 await fastify.register(rideApi, { db });
+await fastify.register(messageApi, { db });
 await fastify.register(debugApi, { debugWriter });
+await fastify.register(planApi, { planStore, db, configStore });
+await fastify.register(llmApi, { db, configStore });
 
 // ── WebSocket: live sensor relay ──
 

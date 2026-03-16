@@ -4,9 +4,13 @@ recordings/*.jsonl
 !recordings/.gitkeep
 data/*.jsonl
 data/*.db
+data/*.db-shm
+data/*.db-wal
 data/config.json
 data/routes/*.json
 !data/routes/.gitkeep
+data/plans/*.json
+!data/plans/.gitkeep
 Caddyfile
 caddy.exe
 

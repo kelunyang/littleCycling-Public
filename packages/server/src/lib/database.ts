@@ -5,7 +5,7 @@
 
 import Database from 'better-sqlite3';
 import type BetterSqlite3 from 'better-sqlite3';
-import type { Ride, RideSample, RideDayCount, ComparisonSample } from '@littlecycling/shared';
+import type { Ride, RideSample, RideDayCount, ComparisonSample, ActivePlanState, PlanDayCompletion } from '@littlecycling/shared';
 import { getHrZone } from '@littlecycling/shared';
 
 export interface CreateRideOpts {
@@ -79,6 +79,33 @@ export class RideDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_samples_ride_elapsed
         ON ride_samples(ride_id, elapsed_ms);
+
+      CREATE TABLE IF NOT EXISTS message_variants (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        type_id   TEXT NOT NULL,
+        template  TEXT NOT NULL,
+        UNIQUE(type_id, template)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_msg_type
+        ON message_variants(type_id);
+
+      -- Training plan active state (supports multiple active plans)
+      CREATE TABLE IF NOT EXISTS active_plans (
+        plan_id     TEXT PRIMARY KEY,
+        start_date  TEXT NOT NULL
+      );
+
+      -- Training plan day completions
+      CREATE TABLE IF NOT EXISTS plan_completions (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_id       TEXT NOT NULL,
+        day           INTEGER NOT NULL,
+        ride_id       INTEGER REFERENCES rides(id) ON DELETE SET NULL,
+        completed_at  INTEGER NOT NULL,
+        manual        INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(plan_id, day)
+      );
     `);
   }
 
@@ -301,6 +328,112 @@ export class RideDatabase {
       routeId: row.route_id ?? undefined,
       routeName: row.route_name ?? undefined,
       notes: row.notes ?? undefined,
+    };
+  }
+
+  // ── Message variants ──
+
+  upsertMessageVariants(typeId: string, templates: string[]): void {
+    const insert = this.db.prepare(
+      'INSERT OR IGNORE INTO message_variants (type_id, template) VALUES (?, ?)',
+    );
+    const tx = this.db.transaction((items: string[]) => {
+      for (const t of items) insert.run(typeId, t);
+    });
+    tx(templates);
+  }
+
+  getRandomVariant(typeId: string): string | null {
+    const row = this.db.prepare(
+      'SELECT template FROM message_variants WHERE type_id = ? ORDER BY RANDOM() LIMIT 1',
+    ).get(typeId) as { template: string } | undefined;
+    return row?.template ?? null;
+  }
+
+  getVariants(typeId: string): { id: number; template: string }[] {
+    return this.db.prepare(
+      'SELECT id, template FROM message_variants WHERE type_id = ? ORDER BY id',
+    ).all(typeId) as { id: number; template: string }[];
+  }
+
+  deleteVariants(typeId: string): number {
+    const result = this.db.prepare(
+      'DELETE FROM message_variants WHERE type_id = ?',
+    ).run(typeId);
+    return result.changes;
+  }
+
+  getVariantCounts(): { typeId: string; count: number }[] {
+    const rows = this.db.prepare(
+      'SELECT type_id, COUNT(*) as count FROM message_variants GROUP BY type_id',
+    ).all() as { type_id: string; count: number }[];
+    return rows.map((r) => ({ typeId: r.type_id, count: r.count }));
+  }
+
+  getBatchRandomVariants(): Record<string, string> {
+    const result: Record<string, string> = {};
+    const types = this.db.prepare(
+      'SELECT DISTINCT type_id FROM message_variants',
+    ).all() as { type_id: string }[];
+
+    for (const { type_id } of types) {
+      const variant = this.getRandomVariant(type_id);
+      if (variant) result[type_id] = variant;
+    }
+    return result;
+  }
+
+  // ── Training plan active state ──
+
+  addActivePlan(planId: string, startDate: string): void {
+    this.db.prepare(
+      'INSERT OR REPLACE INTO active_plans (plan_id, start_date) VALUES (?, ?)',
+    ).run(planId, startDate);
+  }
+
+  getActivePlans(): ActivePlanState[] {
+    const rows = this.db.prepare('SELECT plan_id, start_date FROM active_plans').all() as any[];
+    return rows.map((r) => ({ planId: r.plan_id, startDate: r.start_date }));
+  }
+
+  removeActivePlan(planId: string): boolean {
+    const result = this.db.prepare('DELETE FROM active_plans WHERE plan_id = ?').run(planId);
+    return result.changes > 0;
+  }
+
+  // ── Training plan completions ──
+
+  recordCompletion(planId: string, day: number, rideId: number | null, manual: boolean): void {
+    this.db.prepare(`
+      INSERT OR REPLACE INTO plan_completions (plan_id, day, ride_id, completed_at, manual)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(planId, day, rideId, Date.now(), manual ? 1 : 0);
+  }
+
+  getCompletions(planId: string): PlanDayCompletion[] {
+    const rows = this.db.prepare(
+      'SELECT plan_id, day, ride_id, completed_at, manual FROM plan_completions WHERE plan_id = ? ORDER BY day',
+    ).all(planId) as any[];
+    return rows.map((r) => ({
+      planId: r.plan_id,
+      day: r.day,
+      rideId: r.ride_id ?? null,
+      completedAt: r.completed_at,
+      manual: r.manual === 1,
+    }));
+  }
+
+  getCompletion(planId: string, day: number): PlanDayCompletion | null {
+    const row = this.db.prepare(
+      'SELECT plan_id, day, ride_id, completed_at, manual FROM plan_completions WHERE plan_id = ? AND day = ?',
+    ).get(planId, day) as any;
+    if (!row) return null;
+    return {
+      planId: row.plan_id,
+      day: row.day,
+      rideId: row.ride_id ?? null,
+      completedAt: row.completed_at,
+      manual: row.manual === 1,
     };
   }
 

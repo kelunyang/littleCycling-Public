@@ -76,7 +76,7 @@ export {
 } from './hr-zones.js';
 
 // Config
-export type { AppConfig } from './config.js';
+export type { AppConfig, LlmProvider } from './config.js';
 export { DEFAULT_CONFIG } from './config.js';
 
 // GPX parser
@@ -104,6 +104,40 @@ export {
   totalWorkoutDuration,
   workoutGrade,
 } from './workouts.js';
+
+// Game message types
+export type { GameMessageType } from './game-message-types.js';
+export { GAME_MESSAGE_TYPES, fillTemplate } from './game-message-types.js';
+
+// Training plans
+export type {
+  SegmentType,
+  PlanSegment,
+  PlanSession,
+  PlanWeek,
+  TrainingPlanInput,
+  TrainingPlan,
+  TrainingPlanSummary,
+  ActivePlanState,
+  PlanDayCompletion,
+} from './training-plan.js';
+export {
+  SEGMENT_TYPE_COLORS,
+  getCurrentPlanDay,
+  getSessionByDay,
+  planSegmentsToWorkoutSegments,
+  createPlanFromInput,
+  validatePlanInput,
+} from './training-plan.js';
+
+// Random events
+export type { RandomEventDef, RandomEventVisual } from './random-events.js';
+export {
+  RANDOM_EVENTS,
+  RANDOM_EVENTS_MAP,
+  pickRandomEvent,
+  buildEventSegment,
+} from './random-events.js';
 
 // Sensor parser
 export {

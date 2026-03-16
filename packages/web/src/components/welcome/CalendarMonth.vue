@@ -26,6 +26,11 @@
       >
         <span class="cal-month__day-num">{{ day }}</span>
         <span v-if="getCount(day) > 0" class="cal-month__badge">{{ getCount(day) }}</span>
+        <span
+          v-if="getPlanMarker(day)"
+          class="cal-month__plan-dot"
+          :class="`cal-month__plan-dot--${getPlanMarker(day)}`"
+        />
       </div>
     </div>
   </div>
@@ -40,6 +45,8 @@ const props = defineProps<{
   month: number; // 0-indexed
   dayCounts: Map<string, number>;
   selectedDate: string | null;
+  /** Plan day markers: dateStr → 'training' | 'rest' | 'done' */
+  planMarkers?: Map<string, 'training' | 'rest' | 'done'>;
 }>();
 
 const emit = defineEmits<{
@@ -80,6 +87,10 @@ function isToday(day: number): boolean {
 
 function isFuture(day: number): boolean {
   return dayjs().year(props.year).month(props.month).date(day).isAfter(dayjs(), 'day');
+}
+
+function getPlanMarker(day: number): string | null {
+  return props.planMarkers?.get(dateStr(day)) ?? null;
 }
 
 function onDayClick(day: number) {
@@ -181,6 +192,29 @@ function onDayClick(day: number) {
   font-family: var(--font-display);
   font-size: 12px;
   color: var(--hud-text);
+}
+
+.cal-month__plan-dot {
+  position: absolute;
+  bottom: 2px;
+  left: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.cal-month__plan-dot--training {
+  background: #66bb6a;
+  box-shadow: 0 0 4px rgba(102,187,106,0.6);
+}
+
+.cal-month__plan-dot--rest {
+  background: #666;
+}
+
+.cal-month__plan-dot--done {
+  background: var(--hud-cyan);
+  box-shadow: 0 0 4px rgba(0,229,255,0.6);
 }
 
 .cal-month__badge {

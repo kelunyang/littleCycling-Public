@@ -50,7 +50,34 @@
       />
     </div>
 
+    <!-- Random event progress bar -->
+    <div class="hud__event-bar">
+      <HudEventBar
+        :is-event-active="props.isEventActive"
+        :active-event="props.activeEvent"
+        :event-elapsed-ms="props.eventElapsedMs"
+        :event-progress="props.eventProgress"
+        :target-watts="props.eventTargetWatts"
+        :target-cadence="props.eventTargetCadence"
+        :is-on-target="props.isEventOnTarget"
+      />
+    </div>
+
+    <!-- Event screen tint overlay -->
+    <div
+      class="event-overlay"
+      :style="{
+        backgroundColor: props.eventScreenTint ?? 'transparent',
+        opacity: props.eventScreenTint ? props.eventScreenTintOpacity : 0,
+      }"
+    />
+
     <ZoneWarning :visible="redLine" />
+
+    <GameBubble
+      :message="message"
+      @typewriter-done="(ms: number) => emit('typewriterDone', ms)"
+    />
 
     <GameSummary
       :elapsed-ms="elapsedMs"
@@ -62,8 +89,9 @@
 </template>
 
 <script setup lang="ts">
-import type { RoutePoint, ComparisonMetrics, WorkoutSegment } from '@littlecycling/shared';
+import type { RoutePoint, ComparisonMetrics, WorkoutSegment, RandomEventDef } from '@littlecycling/shared';
 import type { GameStats, TimeSeriesSample } from '@/composables/useGameLoop';
+import type { GameMessage } from '@/composables/useGameMessages';
 import { computed } from 'vue';
 import { useChartPin } from '@/composables/useChartPin';
 import { useGameStore } from '@/stores/gameStore';
@@ -74,7 +102,9 @@ import HudBottomLeft from './HudBottomLeft.vue';
 import HudBottomRight from './HudBottomRight.vue';
 import HudChart from './HudChart.vue';
 import ZoneWarning from './ZoneWarning.vue';
+import GameBubble from './GameBubble.vue';
 import GameSummary from './GameSummary.vue';
+import HudEventBar from './HudEventBar.vue';
 
 const props = defineProps<{
   routePoints: RoutePoint[];
@@ -98,9 +128,20 @@ const props = defineProps<{
   pipSupported: boolean;
   cameraPitch: number;
   cameraHeight: number;
+  message: GameMessage | null;
+  // Random events
+  isEventActive: boolean;
+  activeEvent: RandomEventDef | null;
+  eventElapsedMs: number;
+  eventProgress: number;
+  eventTargetWatts: number;
+  eventTargetCadence: number | null;
+  isEventOnTarget: boolean;
+  eventScreenTint: string | null;
+  eventScreenTintOpacity: number;
 }>();
 
-const emit = defineEmits<{ stop: []; togglePip: [] }>();
+const emit = defineEmits<{ stop: []; togglePip: []; typewriterDone: [durationMs: number] }>();
 
 const chartPin = useChartPin();
 const gameStore = useGameStore();
@@ -187,5 +228,20 @@ const lensOptions = [
   position: absolute;
   bottom: 16px;
   right: 16px;
+}
+
+.hud__event-bar {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.event-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9;
+  transition: opacity 0.3s ease, background-color 0.3s ease;
 }
 </style>
