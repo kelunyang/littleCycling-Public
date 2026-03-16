@@ -14,9 +14,6 @@ if ! git rev-parse --verify public-main &>/dev/null; then
   exit 1
 fi
 
-# 儲存目前 branch
-CURRENT_BRANCH=$(git branch --show-current)
-
 # 確保工作目錄乾淨
 if [ -n "$(git status --porcelain)" ]; then
   echo "Error: Working directory not clean. Commit or stash changes first."
@@ -26,9 +23,17 @@ fi
 # 取得 commit message（可選參數或預設）
 MSG="${1:-Update public release $(date +%Y-%m-%d)}"
 
-# 切到 public-main，同步 main 的檔案
-git checkout public-main
-git checkout main -- .
+# 使用 worktree 避免切換分支（SQLite 鎖定檔案會導致 checkout 失敗）
+WORK_DIR=$(mktemp -d)
+trap 'git worktree remove --force "$WORK_DIR" 2>/dev/null; rm -rf "$WORK_DIR"' EXIT
+
+git worktree add "$WORK_DIR" public-main
+
+# 同步 main 的檔案到 worktree
+git --work-tree="$WORK_DIR" checkout main -- .
+
+# 在 worktree 中操作
+cd "$WORK_DIR"
 git add -A
 
 # 如果有變更才 commit
@@ -39,6 +44,3 @@ else
   git push public public-main:main
   echo "Published to public repo!"
 fi
-
-# 切回原本 branch
-git checkout "$CURRENT_BRANCH"
