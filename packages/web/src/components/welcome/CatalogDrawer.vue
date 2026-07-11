@@ -131,7 +131,13 @@
       </el-collapse>
 
       <p class="catalog__attribution">
-        {{ catalogStore.catalog?.attribution ?? 'Route data © EuroVelo (eurovelo.com), licensed under ODbL' }}
+        {{ catalogStore.catalog?.attribution ?? 'Contains information from EuroVelo GPX tracks downloaded from www.EuroVelo.com, which is made available under the Open Database License (ODbL).' }}
+        <template v-if="catalogStore.catalog">
+          <br />
+          <a :href="catalogStore.catalog.licenseUrl" target="_blank" rel="noopener noreferrer">{{ catalogStore.catalog.licenseName }}</a>
+          ·
+          <a :href="catalogStore.catalog.licenseDocUrl" target="_blank" rel="noopener noreferrer">License &amp; Disclaimer</a>
+        </template>
       </p>
     </div>
   </el-drawer>

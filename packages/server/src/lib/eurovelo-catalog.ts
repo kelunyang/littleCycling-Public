@@ -14,6 +14,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import dayjs from 'dayjs';
 import { DOMParser as LinkedomDOMParser } from 'linkedom';
 import {
   calcRouteDistance,
@@ -33,8 +34,17 @@ if (typeof globalThis.DOMParser === 'undefined') {
 
 const BASE_URL = 'https://en.eurovelo.com';
 const USER_AGENT = 'littleCycling/0.1 (+https://github.com/kelunyang/littleCycling)';
+// EuroVelo's officially-worded ODbL attribution. Per their License & Disclaimer,
+// a per-download date belongs in "(DATE)" — we fill it with the route's actual
+// download date when embedding the notice in an exported stage GPX; the catalog
+// UI shows this date-less form plus each route's fetched date separately.
 const ATTRIBUTION =
-  'Contains information from EuroVelo GPX tracks (eurovelo.com), licensed under ODbL';
+  'Contains information from EuroVelo GPX tracks downloaded from www.EuroVelo.com, ' +
+  'which is made available under the Open Database License (ODbL).';
+const LICENSE_NAME = 'ODbL v1.0';
+const LICENSE_URL = 'https://opendatacommons.org/licenses/odbl/1-0/';
+const LICENSE_DOC_URL =
+  'https://pro.eurovelo.com/download/document/ECF_GPX%20tracks_License%20and%20Disclaimer_20241007.pdf';
 
 interface RouteConfig {
   id: string;
@@ -98,6 +108,9 @@ export class EuroVeloCatalog {
     return {
       updatedAt: Date.now(),
       attribution: ATTRIBUTION,
+      licenseName: LICENSE_NAME,
+      licenseUrl: LICENSE_URL,
+      licenseDocUrl: LICENSE_DOC_URL,
       races: ROUTES.map((cfg) => this.toRace(cfg, this.manifest.routes[cfg.id])),
     };
   }
@@ -159,6 +172,7 @@ export class EuroVeloCatalog {
         return [
           '<?xml version="1.0" encoding="UTF-8"?>',
           '<gpx creator="littleCycling" version="1.1" xmlns="http://www.topografix.com/GPX/1/1">',
+          this.stageMetadataXml(routeId),
           block,
           '</gpx>',
           '',
@@ -166,6 +180,31 @@ export class EuroVeloCatalog {
       }
     }
     return null;
+  }
+
+  /**
+   * ODbL attribution embedded in every exported stage GPX, so the required
+   * notice travels with the file (attribution + license + source + the date the
+   * data was downloaded). Order follows the GPX 1.1 metadata schema.
+   */
+  private stageMetadataXml(routeId: string): string {
+    const cfg = ROUTES.find((r) => r.id === routeId);
+    const fetchedAt = this.manifest.routes[routeId]?.fetchedAt;
+    const date = fetchedAt ? dayjs(fetchedAt).format('YYYY-MM-DD') : 'unknown date';
+    const desc =
+      `Contains information from EuroVelo GPX tracks downloaded from www.EuroVelo.com on ${date}, ` +
+      `which is made available under the Open Database License (ODbL).`;
+    const sourceUrl = cfg ? `${BASE_URL}/ev${cfg.evNum}` : BASE_URL;
+    const linkText = cfg ? xmlEscape(`EuroVelo ${cfg.evNum} — ${cfg.name}`) : 'EuroVelo';
+    return [
+      '  <metadata>',
+      `    <desc>${xmlEscape(desc)}</desc>`,
+      '    <copyright author="EuroVelo">',
+      `      <license>${LICENSE_URL}</license>`,
+      '    </copyright>',
+      `    <link href="${sourceUrl}"><text>${linkText}</text></link>`,
+      '  </metadata>',
+    ].join('\n');
   }
 
   private readGpx(routeId: string): string | null {
@@ -268,4 +307,14 @@ function parseStatus(raw: string): EuroVeloStageStatus {
   }
   if (s.startsWith('undeveloped')) return 'UNDEVELOPED';
   return 'OTHER';
+}
+
+/** Minimal XML text escaping for values embedded in the exported GPX metadata. */
+function xmlEscape(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }

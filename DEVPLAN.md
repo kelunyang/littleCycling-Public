@@ -353,7 +353,10 @@ GPX 下載：`https://en.eurovelo.com/route/get-gpx/{gpxId}`，不需 API key。
 3. 回傳 `SavedRoute`（不含 points，節省傳輸）
 4. 前端更新路線列表，下載過的 stage 直接可選
 
-**Attribution：** `Route data © EuroVelo (eurovelo.com), available under ODbL`
+**Attribution / ODbL 合規：** EuroVelo GPX 於 2024-10-09 正式以 **ODbL v1.0** 開放資料釋出。
+- 使用官方要求的署名原句:「*Contains information from EuroVelo GPX tracks downloaded from www.EuroVelo.com on (DATE), which is made available under the Open Database License (ODbL).*」CatalogDrawer 顯示此署名並附 ODbL 授權連結 + 官方 License & Disclaimer 文件連結。
+- **匯出的分段 GPX 會嵌入 `<metadata>`**(`copyright author="EuroVelo"` + ODbL license URL + 下載日期 + 來源 link),讓署名/授權通知隨檔案留存(ODbL「keep the notice intact」)。
+- 我們**不在 repo 內散布** EuroVelo 資料(GPX 快取於 gitignore 的 `data/eurovelo-cache/`,由各使用者的 server 自行向官網下載),故 Share-Alike 不觸發;EuroVelo 資料(ODbL)與專案程式碼(CC-BY-SA)授權分離。
 
 **方式二：Auto-import（進階使用者）**
 

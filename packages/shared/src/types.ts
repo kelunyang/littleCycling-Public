@@ -262,7 +262,10 @@ export interface CatalogRace {
 
 export interface RouteCatalog {
   updatedAt: number;
-  attribution: string;  // ODbL attribution text shown in UI
+  attribution: string;   // ODbL attribution text shown in UI
+  licenseName: string;   // e.g. 'ODbL v1.0'
+  licenseUrl: string;    // ODbL license text URL
+  licenseDocUrl: string; // EuroVelo's "License and Disclaimer" document
   races: CatalogRace[];
 }
 
