@@ -17,6 +17,19 @@ import Phaser from 'phaser';
 import type { WaterFeaturePos } from './terrain-builder';
 import { lerpColor } from './phaser-weather';
 import type { PhaserStyleStrategy } from './phaser-style-strategy';
+import {
+  CyclingGlassesPipeline,
+  CYCLING_GLASSES_PIPELINE_KEY,
+  type GlassesLens,
+  type WeatherType as GlassesWeatherType,
+  type ZoneType as GlassesZoneType,
+} from './cycling-glasses-pipeline';
+import {
+  TunnelVisionPipeline,
+  TUNNEL_VISION_PIPELINE_KEY,
+  computeTunnelIntensity,
+} from './tunnel-vision-pipeline';
+import { PhaserLensMarksManager, type MarkType } from './phaser-lens-marks-manager';
 
 /** Plain JS object for Vue ↔ Phaser per-frame communication. */
 export interface PhaserBridge {
@@ -34,18 +47,30 @@ export interface PhaserBridge {
 /** Pixels per meter for the 2D world. */
 export const PX_PER_METER = 3;
 
+/** Minimum sky headroom (px) kept above the highest terrain point. */
+const TERRAIN_TOP_MARGIN_PX = 140;
+
 /** Vertical exaggeration factor for elevation. */
 export const ELEVATION_EXAGGERATION = 4;
 
-/** Cyclist screen position as fraction of viewport width from left. */
-const CYCLIST_SCREEN_X = 0.3;
+/** Cyclist screen position as fraction of viewport width from left.
+ * 0.5 keeps the rider perfectly centered horizontally so the world scrolls
+ * symmetrically on both sides as they pedal. */
+const CYCLIST_SCREEN_X = 0.5;
 
 /** Ground baseline Y position (pixels from top) — terrain is drawn relative to this. */
 export const GROUND_BASELINE_Y = 0.75; // 75% down from top
 
+export type PhaserSceneMode = 'game' | 'welcome';
+
 export class Phaser2DScene extends Phaser.Scene {
   private bridge: PhaserBridge;
   private strategy: PhaserStyleStrategy;
+  private mode: PhaserSceneMode;
+  /** Override of GROUND_BASELINE_Y for this scene instance. Game mode uses
+   *  the default 0.75; Welcome lowers it (~0.90) so the green ground band
+   *  takes only 10–20 % of screen height instead of ~25 %. */
+  private groundBaselineFraction: number = GROUND_BASELINE_Y;
 
   // Promise that resolves when create() finishes — await before using scene objects
   private _readyResolve!: () => void;
@@ -56,8 +81,24 @@ export class Phaser2DScene extends Phaser.Scene {
   private overlayObj!: Phaser.GameObjects.GameObject | null;
   private markerGfx!: Phaser.GameObjects.Graphics;
 
-  // Speed/wind particle emitter
+  // Independent layers — route line/markers (with Bloom) and text labels stay
+  // off the main display list so they can be styled & filtered separately.
+  private routeLayer!: Phaser.GameObjects.Layer;
+  private textLayer!: Phaser.GameObjects.Layer;
+
+  // Cycling-glasses post-processing
+  private glassesPipeline: CyclingGlassesPipeline | null = null;
+  private tunnelPipeline: TunnelVisionPipeline | null = null;
+  private lensMarks: PhaserLensMarksManager | null = null;
+  private markAccumulator = 0;
+  private currentMarksWeather: GlassesWeatherType = 'sunny';
+  private currentZone: GlassesZoneType = 'open';
+
+  // Speed/wind particle emitter (driven by ride speed, not weather wind)
   private windEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
+
+  // Environmental wind magnitude (0..2) — drives lens-mark spawn rate
+  private windMagnitude = 0;
 
   // Water shimmer
   private waterShimmerGfx!: Phaser.GameObjects.Graphics;
@@ -86,19 +127,37 @@ export class Phaser2DScene extends Phaser.Scene {
   // Overlay frame counter (for animated overlays like film grain)
   private overlayFrameCount = 0;
 
-  constructor(bridge: PhaserBridge, strategy: PhaserStyleStrategy) {
+  constructor(bridge: PhaserBridge, strategy: PhaserStyleStrategy, mode: PhaserSceneMode = 'game') {
     super({ key: 'Phaser2DScene' });
     this.bridge = bridge;
     this.strategy = strategy;
+    this.mode = mode;
   }
 
   create() {
     // Terrain graphics — scrolls with the world
     this.terrainGfx = this.add.graphics();
 
-    // Distance markers — scrolls with the world
+    // Route layer holds anything that should glow (distance markers, flags) —
+    // a Bloom FX is attached to the layer so its contents render with neon edges.
+    this.routeLayer = this.add.layer();
+    this.routeLayer.setDepth(60);
+
+    // Text layer holds in-world text (km labels, START/FINISH) so it stays on
+    // its own display list, separate from the bloomed route geometry.
+    this.textLayer = this.add.layer();
+    this.textLayer.setDepth(70);
+
+    // Distance markers — scrolls with the world; lives inside the route layer.
     this.markerGfx = this.add.graphics();
     this.markerGfx.setDepth(50);
+    this.routeLayer.add(this.markerGfx);
+
+    // Apply Bloom FX to the route layer so markers/flags get a soft glow.
+    // (color, offsetX, offsetY, blurStrength, strength, steps)
+    if (this.routeLayer.postFX) {
+      this.routeLayer.postFX.addBloom(0xffffff, 1, 1, 1, 1.2, 4);
+    }
 
     // Water shimmer layer — above terrain features
     this.waterShimmerGfx = this.add.graphics();
@@ -111,6 +170,27 @@ export class Phaser2DScene extends Phaser.Scene {
 
     // Style-specific overlay (CRT scanlines for plastic, film grain for cuphead, etc.)
     this.overlayObj = this.strategy.drawOverlay(this);
+
+    // ── Cycling-glasses post-processing (game mode only) ──
+    // Welcome backdrop reuses this scene but per the design rule must NOT
+    // apply the glasses/tunnel PostFX overlays.
+    if (this.mode === 'game') {
+      // Lens marks first (canvas → Phaser CanvasTexture), then attach pipelines
+      // to the main camera so the whole canvas renders through the glasses.
+      this.lensMarks = new PhaserLensMarksManager(this);
+
+      this.cameras.main.setPostPipeline([CYCLING_GLASSES_PIPELINE_KEY, TUNNEL_VISION_PIPELINE_KEY]);
+      const glasses = this.cameras.main.getPostPipeline(CYCLING_GLASSES_PIPELINE_KEY);
+      const tunnel = this.cameras.main.getPostPipeline(TUNNEL_VISION_PIPELINE_KEY);
+      this.glassesPipeline = (Array.isArray(glasses) ? glasses[0] : glasses) as CyclingGlassesPipeline;
+      this.tunnelPipeline = (Array.isArray(tunnel) ? tunnel[0] : tunnel) as TunnelVisionPipeline;
+      if (this.glassesPipeline && this.lensMarks) {
+        // Looked up lazily — Phaser may allocate the canvas's GL texture on first
+        // upload, after this scene.create() runs.
+        const marks = this.lensMarks;
+        this.glassesPipeline.setMarksTextureSource(() => marks.glTexture);
+      }
+    }
 
     // Speed/wind particle emitter
     const windColor = this.strategy.getWindParticleColor();
@@ -159,8 +239,11 @@ export class Phaser2DScene extends Phaser.Scene {
       this.totalRouteDistM = profile[profile.length - 1].distM;
       this.totalRouteDistPx = this.totalRouteDistM * PX_PER_METER;
 
-      // Draw static markers (flags, distance ticks)
-      this.drawStaticMarkers();
+      // Draw static markers (flags, distance ticks) — game mode only.
+      // Welcome backdrop runs on a synthetic profile and skips km labels.
+      if (this.mode === 'game') {
+        this.drawStaticMarkers();
+      }
     }
   }
 
@@ -173,6 +256,7 @@ export class Phaser2DScene extends Phaser.Scene {
    * Called every frame by Phaser (driven externally via tick()).
    */
   update(_time: number, _delta: number) {
+    const dtSec = _delta / 1000;
     const { distanceM } = this.bridge;
     const w = this.game.canvas.width;
     const h = this.game.canvas.height;
@@ -211,6 +295,91 @@ export class Phaser2DScene extends Phaser.Scene {
     this.overlayFrameCount++;
     this.strategy.updateOverlay?.(this.overlayFrameCount);
 
+    // ── Cycling-glasses post-processing tick ──
+    this.tickGlasses(dtSec);
+  }
+
+  /**
+   * Drive lens-mark spawning, mark fade, and pipeline transition lerps.
+   * Mark spawning is weather + zone driven (mirrors useTerrainRenderer behaviour).
+   */
+  private tickGlasses(dt: number) {
+    if (!this.lensMarks || !this.glassesPipeline) return;
+
+    // Weather-driven marks (rain/snow) at fixed rate.
+    this.markAccumulator += dt;
+    const rate = this.getMarkSpawnRate(this.currentMarksWeather);
+    while (rate.interval > 0 && this.markAccumulator >= rate.interval) {
+      this.markAccumulator -= rate.interval;
+      if (Math.random() < rate.chance) {
+        this.lensMarks.addMark(rate.type);
+      }
+    }
+
+    // Zone-driven ambient marks. Wind boosts dust/leaf spawn (1× .. 2×).
+    const windFactor = 1 + this.windMagnitude * 0.5;
+    if (this.currentZone === 'forest') {
+      if (Math.random() < dt * 0.25 * windFactor) this.lensMarks.addMark('leaf');
+    } else if (this.currentZone === 'open') {
+      if (Math.random() < dt * 0.08 * windFactor) this.lensMarks.addMark('leaf');
+      if (Math.random() < dt * 0.15 * windFactor) this.lensMarks.addMark('dust');
+    } else {
+      if (Math.random() < dt * 0.3 * windFactor) this.lensMarks.addMark('dust');
+    }
+
+    this.lensMarks.update(dt);
+    this.glassesPipeline.tick(dt);
+  }
+
+  private getMarkSpawnRate(weather: GlassesWeatherType): { type: MarkType; interval: number; chance: number } {
+    switch (weather) {
+      case 'rainy': return { type: 'rain', interval: 0.3, chance: 0.8 };
+      case 'snowy': return { type: 'snow', interval: 0.6, chance: 0.7 };
+      default: return { type: 'dust', interval: 0, chance: 0 };
+    }
+  }
+
+  // ── Public glasses API (called from usePhaserRenderer) ──
+
+  setLens(lens: GlassesLens) {
+    this.glassesPipeline?.setLens(lens);
+  }
+
+  setMarksWeather(weather: GlassesWeatherType) {
+    this.currentMarksWeather = weather;
+    this.glassesPipeline?.setWeather(weather);
+  }
+
+  /** Set wind magnitude (0..2). Drives leaf/dust lens-mark spawn rate. */
+  setWindMagnitude(mag: number) {
+    this.windMagnitude = Math.max(0, Math.min(2, mag));
+  }
+
+  /** Trigger a brief camera flash to accompany a lightning strike. */
+  triggerLightningFlash() {
+    // Phaser camera flash: 180ms slight white fade, on top of the bolt graphic.
+    this.cameras.main.flash(180, 220, 230, 255, true);
+  }
+
+  triggerCoinGlow() {
+    this.glassesPipeline?.triggerCoinGlow();
+    this.lensMarks?.addMark('coin');
+  }
+
+  addLensMark(type: MarkType) {
+    this.lensMarks?.addMark(type);
+  }
+
+  updatePhysiology(hrZone: number | null, speedKmh: number) {
+    if (!this.tunnelPipeline) return;
+    const intensity = computeTunnelIntensity(hrZone, speedKmh);
+    this.tunnelPipeline.setIntensity(intensity);
+  }
+
+  setEnvironmentZone(zone: GlassesZoneType) {
+    if (this.currentZone === zone) return;
+    this.currentZone = zone;
+    this.glassesPipeline?.setZone(zone);
   }
 
   /**
@@ -283,14 +452,38 @@ export class Phaser2DScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * Pixel span used to draw the full elevation range.
+   *
+   * The historical scale (baselineY·0.6·EXAGGERATION, halved for >500 m
+   * ranges) can exceed the viewport: a route riding near its own high point
+   * (e.g. one that STARTS at its summit) put the surface — and the cyclist
+   * on it — hundreds of px above the screen top, leaving only the terrain
+   * fill visible as a wall of paper. Clamp to the headroom that actually
+   * exists between the baseline and the top margin so the surface always
+   * stays on screen.
+   */
+  private eleScalePx(baselineY: number): number {
+    const elevRange = Math.max(this.maxElevation - this.minElevation, 10);
+    const desired = (baselineY * 0.6) * ELEVATION_EXAGGERATION / (elevRange > 500 ? 2 : 1);
+    return Math.min(desired, Math.max(baselineY - TERRAIN_TOP_MARGIN_PX, 0));
+  }
+
+  /** Map elevation → scene Y. Single source of truth shared by the terrain
+   *  surface, markers, coins and the cyclist so they always agree. */
+  eleToY(eleM: number, baselineY: number): number {
+    const elevRange = Math.max(this.maxElevation - this.minElevation, 10);
+    const normalizedEle = (eleM - this.minElevation) / elevRange;
+    return baselineY - normalizedEle * this.eleScalePx(baselineY);
+  }
+
   /** Draw terrain from elevation profile — delegates visual style to strategy. */
   private drawTerrain(w: number, h: number) {
     this.terrainGfx.clear();
 
     if (this.elevationProfile.length < 2) return;
 
-    const baselineY = h * GROUND_BASELINE_Y;
-    const elevRange = Math.max(this.maxElevation - this.minElevation, 10);
+    const baselineY = h * this.groundBaselineFraction;
 
     // Determine visible range in world X
     const camLeft = this.cameras.main.scrollX;
@@ -304,14 +497,8 @@ export class Phaser2DScene extends Phaser.Scene {
     for (const pt of this.elevationProfile) {
       const x = pt.distM * PX_PER_METER;
       if (x < visLeft) continue;
-      if (x > visRight) {
-        const y = baselineY - ((pt.eleM - this.minElevation) / elevRange) * (baselineY * 0.6) * ELEVATION_EXAGGERATION / (this.maxElevation > 500 ? 2 : 1);
-        points.push({ x, y });
-        break;
-      }
-      const normalizedEle = (pt.eleM - this.minElevation) / elevRange;
-      const y = baselineY - normalizedEle * (baselineY * 0.6) * ELEVATION_EXAGGERATION / (elevRange > 500 ? 2 : 1);
-      points.push({ x, y });
+      points.push({ x, y: this.eleToY(pt.eleM, baselineY) });
+      if (x > visRight) break;
     }
 
     if (points.length === 0) return;
@@ -327,11 +514,9 @@ export class Phaser2DScene extends Phaser.Scene {
    */
   getTerrainY(distanceM: number): number {
     const h = this.game.canvas.height;
-    const baselineY = h * GROUND_BASELINE_Y;
+    const baselineY = h * this.groundBaselineFraction;
 
     if (this.elevationProfile.length < 2) return baselineY;
-
-    const elevRange = Math.max(this.maxElevation - this.minElevation, 10);
 
     let lo = 0;
     let hi = this.elevationProfile.length - 1;
@@ -347,8 +532,7 @@ export class Phaser2DScene extends Phaser.Scene {
     const t = segLen > 0 ? (distanceM - p0.distM) / segLen : 0;
     const ele = p0.eleM + (p1.eleM - p0.eleM) * Math.max(0, Math.min(1, t));
 
-    const normalizedEle = (ele - this.minElevation) / elevRange;
-    return baselineY - normalizedEle * (baselineY * 0.6) * ELEVATION_EXAGGERATION / (elevRange > 500 ? 2 : 1);
+    return this.eleToY(ele, baselineY);
   }
 
   /**
@@ -403,6 +587,7 @@ export class Phaser2DScene extends Phaser.Scene {
         label.setOrigin(0.5, 1);
         label.setAlpha(0.6);
         label.setDepth(50);
+        this.textLayer.add(label);
       }
     }
 
@@ -428,6 +613,21 @@ export class Phaser2DScene extends Phaser.Scene {
     });
     text.setOrigin(0.5, 1);
     text.setDepth(50);
+    this.textLayer.add(text);
+  }
+
+  /** Move the ground/sky boundary. Welcome lowers this so the visible green
+   *  ground band shrinks to 10–20 % of canvas height; game mode keeps the
+   *  default 0.75. Triggers a terrain redraw on the next frame. */
+  setGroundBaselineFraction(fraction: number) {
+    this.groundBaselineFraction = Math.max(0.5, Math.min(0.95, fraction));
+    this.lastTerrainScrollX = NaN;
+  }
+
+  /** Read by PhaserWeatherSystem and TerrainChunkManager2D so sky/parallax
+   *  and scenery features all stay vertically aligned with the terrain. */
+  getGroundBaselineFraction(): number {
+    return this.groundBaselineFraction;
   }
 
   /** Handle resize — recreate overlay and reset terrain dirty flag. */
@@ -437,6 +637,61 @@ export class Phaser2DScene extends Phaser.Scene {
       this.overlayObj.destroy();
     }
     this.overlayObj = this.strategy.drawOverlay(this);
+    this.lastTerrainScrollX = NaN;
+  }
+
+  /**
+   * Hot-swap the visual style strategy without rebuilding the Phaser game.
+   * Rebuilds overlay + wind emitter (whose colors depend on the strategy)
+   * and forces a terrain redraw on the next frame.
+   *
+   * Cyclist sprite textures are managed by cyclist-sprite.ts — caller must
+   * separately invoke rebuildCyclistTextures() to refresh them.
+   */
+  setStrategy(newStrategy: PhaserStyleStrategy) {
+    this.strategy = newStrategy;
+
+    // Rebuild overlay (CRT scanlines / film grain)
+    if (this.overlayObj) {
+      this.overlayObj.destroy();
+    }
+    this.overlayObj = this.strategy.drawOverlay(this);
+
+    // Rebuild wind emitter — its texture color comes from the strategy
+    const initW = Number(this.game.config.width);
+    const initH = Number(this.game.config.height);
+    const wasActive = this.windEmitter.active;
+    this.windEmitter.destroy();
+    if (this.textures.exists('__wind_particle__')) {
+      this.textures.remove('__wind_particle__');
+    }
+    const windColor = this.strategy.getWindParticleColor();
+    const c = document.createElement('canvas');
+    c.width = 2;
+    c.height = 1;
+    const wctx = c.getContext('2d')!;
+    const wr = (windColor >> 16) & 0xff;
+    const wg = (windColor >> 8) & 0xff;
+    const wb = windColor & 0xff;
+    wctx.fillStyle = `rgb(${wr},${wg},${wb})`;
+    wctx.fillRect(0, 0, 2, 1);
+    this.textures.addCanvas('__wind_particle__', c);
+    this.windEmitter = this.add.particles(0, 0, '__wind_particle__', {
+      x: { min: 0, max: initW + 100 },
+      y: { min: 0, max: initH },
+      speedX: { min: -400, max: -200 },
+      speedY: 0,
+      lifespan: 800,
+      frequency: 80,
+      quantity: 1,
+      alpha: { start: this.strategy.getWindParticleAlpha(), end: 0 },
+      scaleX: { min: 3, max: 8 },
+      active: wasActive,
+    });
+    this.windEmitter.setScrollFactor(0);
+    this.windEmitter.setDepth(450);
+
+    // Force terrain redraw next frame
     this.lastTerrainScrollX = NaN;
   }
 }

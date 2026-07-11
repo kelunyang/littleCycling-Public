@@ -10,8 +10,9 @@
           </feMerge>
         </filter>
       </defs>
+      <!-- Static opaque black backdrop — does NOT rotate, so no corners sweep through -->
+      <rect x="0" y="0" :width="svgW" :height="svgH" fill="#050a14" />
       <g :transform="rotateTransform">
-        <rect x="0" y="0" :width="svgW" :height="svgH" fill="rgba(5,10,20,0.8)" />
         <polyline
           :points="routePolyline"
           fill="none"
@@ -170,7 +171,7 @@ const directionArrow = computed(() => {
   height: 120px;
   overflow: hidden;
   background: #050a14;
-  border: 1px solid var(--hud-border);
+  border: 1.5px solid var(--hud-border);
   clip-path: var(--clip-panel);
   box-shadow: var(--hud-glow-cyan);
 }

@@ -55,6 +55,7 @@ export function createCupheadStyle(): PhaserStyleStrategy {
       buildingColors: [...P.BUILDING_COLORS],
       treeTrunk: P.TREE_TRUNK,
       treeCanopy: P.TREE_CANOPY,
+      treeCanopyColors: [...P.TREE_CANOPY_COLORS],
       waterFill: P.WATER_FILL,
       waterOutline: P.WATER_OUTLINE,
       grassOverlay: P.GRASS_OVERLAY,
@@ -93,8 +94,9 @@ export function createCupheadStyle(): PhaserStyleStrategy {
     },
 
     drawOverlay(scene) {
-      const w = Number(scene.game.config.width);
-      const h = Number(scene.game.config.height);
+      // scale.width/height 跟隨 resize;game.config 是建立當下的尺寸,永不更新
+      const w = scene.scale.width;
+      const h = scene.scale.height;
 
       // Generate film grain texture
       if (scene.textures.exists(GRAIN_TEXTURE_KEY)) {
@@ -161,18 +163,36 @@ export function createCupheadStyle(): PhaserStyleStrategy {
     },
 
     renderTree(gfx, x, y, size, seed) {
-      const treeH = 18 + (seed % 12);
-      const crownR = 7 + (seed % 5);
-      const trunkH = 5 + (seed % 3);
+      // Per-tree size variation
+      const scale = 0.8 + ((seed % 100) / 100) * 0.5;
+      const treeH = (18 + (seed % 12)) * scale;
+      const crownR = (7 + (seed % 5)) * scale;
+      const trunkH = (5 + (seed % 3)) * scale;
+
+      const canopyColor = P.TREE_CANOPY_COLORS[seed % P.TREE_CANOPY_COLORS.length];
+      // Three blob silhouettes: round (single blob), tall (vertical ellipse-ish via stacked blobs), wide (two-blob bushy)
+      const shape = seed % 3;
 
       // Wobbly trunk
       drawInkLine(gfx, x, y, x + (seededRandom(seed + 10) - 0.5) * 3, y - trunkH, seed, 3, P.TREE_TRUNK);
 
-      // Organic blob canopy
       const canopyCy = y - trunkH - crownR * 0.7;
-      drawOrganicBlob(gfx, x, canopyCy, crownR, seed + 50, P.TREE_CANOPY, P.INK, 2);
 
-      // Highlight spot
+      if (shape === 0) {
+        // Round single blob — original look
+        drawOrganicBlob(gfx, x, canopyCy, crownR, seed + 50, canopyColor, P.INK, 2);
+      } else if (shape === 1) {
+        // Tall poplar — two stacked blobs
+        const upperCy = canopyCy - crownR * 0.7;
+        drawOrganicBlob(gfx, x, canopyCy, crownR * 0.85, seed + 50, canopyColor, P.INK, 2);
+        drawOrganicBlob(gfx, x, upperCy, crownR * 0.65, seed + 90, canopyColor, P.INK, 2);
+      } else {
+        // Wide bushy — twin side-by-side blobs
+        drawOrganicBlob(gfx, x - crownR * 0.4, canopyCy, crownR * 0.75, seed + 50, canopyColor, P.INK, 2);
+        drawOrganicBlob(gfx, x + crownR * 0.4, canopyCy - crownR * 0.2, crownR * 0.7, seed + 110, canopyColor, P.INK, 2);
+      }
+
+      // Highlight spot (slightly lighter than canopy)
       gfx.fillStyle(0x8aaa5a, 0.3);
       gfx.fillCircle(x - crownR * 0.3, canopyCy - crownR * 0.2, crownR * 0.35);
 
@@ -237,14 +257,19 @@ export function createCupheadStyle(): PhaserStyleStrategy {
       // Lamp housing (organic blob)
       drawOrganicBlob(gfx, x + armW, y - poleH, 4, seed + 320, P.LAMP_POST, P.INK, 1.5);
 
+      // Hatch shadow at base
+      drawSimpleHatch(gfx, x - 3, y - 5, 6, 5, P.INK, 0.08, 3);
+    },
+
+    renderRoadLampGlow(gfx, x, y, seed) {
+      const poleH = 35 + (seed % 10);
+      const armW = 8;
+
       // Warm glow
       gfx.fillStyle(P.LAMP_GLOW, 0.12);
       gfx.fillCircle(x + armW, y - poleH + 2, 16);
       gfx.fillStyle(P.LAMP_GLOW, 0.2);
       gfx.fillCircle(x + armW, y - poleH + 2, 7);
-
-      // Hatch shadow at base
-      drawSimpleHatch(gfx, x - 3, y - 5, 6, 5, P.INK, 0.08, 3);
     },
 
     // ── Sky / weather ──
@@ -674,7 +699,7 @@ export function createCupheadStyle(): PhaserStyleStrategy {
     // ── Markers / flags ──
 
     getMarkerFont() {
-      return 'Georgia, serif';
+      return 'Georgia, "Noto Sans TC", serif';
     },
 
     drawFlag(gfx, x, y, color, label, seed) {

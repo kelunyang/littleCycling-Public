@@ -19,17 +19,18 @@ import { WsRelay } from './lib/ws-relay.js';
 import { ReplaySession } from './lib/ws-replay.js';
 import { RideDatabase } from './lib/database.js';
 import { LiveSession, type LiveSensorSnapshot } from './lib/live-session.js';
+import { EuroVeloCatalog } from './lib/eurovelo-catalog.js';
 
 import routeApi from './routes/route-api.js';
 import configApi from './routes/config-api.js';
 import recordingApi from './routes/recording-api.js';
-import catalogApi from './routes/catalog-api.js';
 import liveApi from './routes/live-api.js';
 import rideApi from './routes/ride-api.js';
 import messageApi from './routes/message-api.js';
 import debugApi from './routes/debug-api.js';
 import planApi from './routes/plan-api.js';
 import llmApi from './routes/llm-api.js';
+import catalogApi from './routes/catalog-api.js';
 import { DebugWriter } from './lib/debug-writer.js';
 import { PlanStore } from './lib/plan-store.js';
 
@@ -38,6 +39,10 @@ import { PlanStore } from './lib/plan-store.js';
 const args = process.argv.slice(2);
 let portOverride: number | undefined;
 let dataDir = resolve(process.cwd(), 'data');
+let mock = false;
+let replayArg: string | undefined;
+let replaySpeed = 1;
+let replayLoop = false;
 
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
@@ -45,10 +50,44 @@ for (let i = 0; i < args.length; i++) {
     portOverride = parseInt(args[++i], 10);
   } else if (arg === '--data-dir' && args[i + 1]) {
     dataDir = resolve(args[++i]);
+  } else if (arg === '--mock') {
+    mock = true;
+  } else if (arg === '--replay' && args[i + 1]) {
+    replayArg = args[++i];
+  } else if (arg === '--replay-speed' && args[i + 1]) {
+    replaySpeed = parseFloat(args[++i]) || 1;
+  } else if (arg === '--replay-loop') {
+    replayLoop = true;
   } else if (arg === '--help' || arg === '-h') {
-    console.log('Usage: npx tsx src/server.ts [--port N] [--data-dir path]');
+    console.log('Usage: npx tsx src/server.ts [--port N] [--data-dir path] [--mock]');
+    console.log('       [--replay <file.jsonl>] [--replay-speed N] [--replay-loop]');
+    console.log('');
+    console.log('  --replay drives the game simulation from a recorded ride instead of');
+    console.log('  live sensors. <file> is resolved against <data-dir>/sessions, then');
+    console.log('  <data-dir>, then as given (absolute or cwd-relative).');
     process.exit(0);
   }
+}
+
+// Resolve a --replay file against the likely recording locations so the user
+// can pass a bare filename (e.g. `--replay ride-7-....jsonl`).
+let replayFile: string | undefined;
+if (replayArg) {
+  const candidates = [
+    resolve(dataDir, 'sessions', replayArg),
+    resolve(dataDir, replayArg),
+    resolve(process.cwd(), replayArg),
+    resolve(replayArg),
+  ];
+  replayFile = candidates.find((p) => existsSync(p));
+  if (!replayFile) {
+    console.error(`[replay] file not found: ${replayArg}`);
+    console.error('[replay] looked in:');
+    for (const c of candidates) console.error(`  - ${c}`);
+    process.exit(1);
+  }
+  console.log(`[replay] driving simulation from: ${replayFile}`);
+  console.log(`[replay] speed=${replaySpeed}x, loop=${replayLoop}`);
 }
 
 // ── Initialize stores ──
@@ -70,6 +109,8 @@ routeStore.autoImport().then((count) => {
 
 const planStore = new PlanStore(resolve(dataDir, 'plans'));
 
+const euroveloCatalog = new EuroVeloCatalog(dataDir);
+
 const relay = new WsRelay();
 
 // ── SQLite database ──
@@ -83,7 +124,10 @@ const debugWriter = new DebugWriter(dataDir);
 
 // ── LiveSession (sensor connection + recording) ──
 
-const liveSession = new LiveSession({ relay, db });
+const liveSession = new LiveSession({
+  relay, db, dataDir, configStore, mock,
+  replayFile, replaySpeed, replayLoop,
+});
 
 // ── Build Fastify server ──
 
@@ -98,13 +142,13 @@ await fastify.register(fastifyWebSocket);
 await fastify.register(routeApi, { routeStore });
 await fastify.register(configApi, { configStore });
 await fastify.register(recordingApi, { dataDir });
-await fastify.register(catalogApi, { routeStore });
-await fastify.register(liveApi, { liveSession });
+await fastify.register(liveApi, { liveSession, routeStore });
 await fastify.register(rideApi, { db });
 await fastify.register(messageApi, { db });
 await fastify.register(debugApi, { debugWriter });
 await fastify.register(planApi, { planStore, db, configStore });
 await fastify.register(llmApi, { db, configStore });
+await fastify.register(catalogApi, { routeStore, catalog: euroveloCatalog });
 
 // ── WebSocket: live sensor relay ──
 
@@ -112,6 +156,9 @@ fastify.get('/ws/live', { websocket: true }, (socket) => {
   relay.addClient(socket);
   // Push current session state immediately (solves late-join)
   socket.send(JSON.stringify(liveSession.getStatusMessage()));
+  // Late joiner / reconnect: force a full coin reconcile in the next
+  // game_state frame so the client's coin set converges immediately.
+  liveSession.requestGameReconcile();
   console.log(`[ws/live] client connected (total: ${relay.clientCount})`);
   socket.on('close', () => {
     console.log(`[ws/live] client disconnected (total: ${relay.clientCount})`);
@@ -169,7 +216,6 @@ try {
   console.log(`  REST    http://localhost:${port}/api/routes`);
   console.log(`  REST    http://localhost:${port}/api/config`);
   console.log(`  REST    http://localhost:${port}/api/recordings`);
-  console.log(`  REST    http://localhost:${port}/api/catalog`);
   console.log(`  REST    http://localhost:${port}/api/live/status`);
   console.log(`  REST    http://localhost:${port}/api/rides`);
   console.log(`  WS      ws://localhost:${port}/ws/live`);

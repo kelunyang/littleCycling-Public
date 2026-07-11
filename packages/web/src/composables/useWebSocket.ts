@@ -1,5 +1,7 @@
 import { ref, onUnmounted } from 'vue';
 import { useSensorStore } from '@/stores/sensorStore';
+import { useGameStore } from '@/stores/gameStore';
+import { useGameStateStore } from '@/stores/gameStateStore';
 import {
   parseHrData,
   parseScData,
@@ -14,6 +16,8 @@ export function useWebSocket() {
   const lastError = ref<string | null>(null);
 
   const sensorStore = useSensorStore();
+  const gameStore = useGameStore();
+  const gameStateStore = useGameStateStore();
   let ws: WebSocket | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let backoff = 1000;
@@ -24,6 +28,11 @@ export function useWebSocket() {
       const msg = JSON.parse(event.data) as WsMessage;
 
       if (msg.type === 'sensor') {
+        // Anchor the server clock on every frame — even while paused — so the
+        // game timer keeps tracking real wall-clock (方案甲: pauses are not
+        // deducted, matching the recorded ride duration).
+        sensorStore.updateClock(msg.elapsed);
+        if (gameStore.isPaused) return;
         const { profile, data } = msg;
         if (profile === 'HR') {
           sensorStore.updateHr(parseHrData(data));
@@ -32,6 +41,10 @@ export function useWebSocket() {
         } else if (profile === 'PWR') {
           sensorStore.updatePwr(parsePwrData(data));
         }
+      } else if (msg.type === 'game_state') {
+        // Buffered even while paused — the store needs paused/elapsed frames
+        // to keep the HUD clock and pause overlay state honest.
+        gameStateStore.push(msg);
       } else if (msg.type === 'status') {
         sensorStore.updateStatus(msg);
       }

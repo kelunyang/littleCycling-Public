@@ -10,34 +10,29 @@
           </feMerge>
         </filter>
       </defs>
-      <rect x="0" y="0" :width="svgW" :height="svgH" fill="rgba(5,10,20,0.82)" />
+      <rect x="0" y="0" :width="svgW" :height="svgH" class="route-preview__bg" />
       <polyline
         :points="routePolyline"
-        fill="none"
-        stroke="#fcee09"
+        class="route-preview__line"
         stroke-width="2"
         stroke-linejoin="round"
         stroke-linecap="round"
-        filter="url(#preview-glow)"
-        opacity="0.8"
       />
-      <!-- Start marker (green) -->
+      <!-- Start marker -->
       <circle
         v-if="startPt"
         :cx="startPt.x"
         :cy="startPt.y"
         r="4"
-        fill="#00e676"
-        filter="url(#preview-glow)"
+        class="route-preview__marker route-preview__marker--start"
       />
-      <!-- End marker (magenta) -->
+      <!-- End marker -->
       <circle
         v-if="endPt"
         :cx="endPt.x"
         :cy="endPt.y"
         r="4"
-        fill="#ff2d6b"
-        filter="url(#preview-glow)"
+        class="route-preview__marker route-preview__marker--end"
       />
     </svg>
   </div>
@@ -114,13 +109,39 @@ const endPt = computed(() => {
   height: 120px;
   flex-shrink: 0;
   overflow: hidden;
-  border: 1px solid var(--hud-border);
-  clip-path: var(--clip-panel);
-  box-shadow: var(--hud-glow-cyan);
+  border: 1.5px solid var(--hud-border-bright);
+  border-radius: var(--card-radius-sm);
+  background: var(--surface-light);
+  box-shadow: var(--accent-glow-soft);
 }
 
 .route-preview__svg {
   width: 100%;
   height: 100%;
+}
+
+.route-preview__bg {
+  fill: var(--surface-light);
+}
+
+.route-preview__line {
+  fill: none;
+  stroke: var(--hud-cyan);
+  filter: url(#preview-glow);
+  opacity: 0.95;
+}
+
+.route-preview__marker {
+  filter: url(#preview-glow);
+  stroke: var(--hud-border-bright);
+  stroke-width: 1.5;
+}
+
+.route-preview__marker--start {
+  fill: #00c853;
+}
+
+.route-preview__marker--end {
+  fill: var(--hud-magenta);
 }
 </style>

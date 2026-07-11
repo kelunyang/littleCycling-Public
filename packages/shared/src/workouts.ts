@@ -208,6 +208,128 @@ export function totalWorkoutDuration(segments: WorkoutSegment[]): number {
   return segments.reduce((sum, s) => sum + s.durationMs, 0);
 }
 
+// ── Segment themes (narrative skin for structured training) ──
+//
+// Structured-workout segments are presented in the HUD as themed "events"
+// (逆風來襲, 警車追擊 …) — same visual language as freeride random events —
+// instead of dry sport-science labels, so the rider instantly reads the
+// intent: how hard, and why. Purely presentational: theming never changes
+// targets, grading, or the on-target evaluation.
+
+/** Narrative theme attached to a workout segment for HUD presentation. */
+export interface SegmentTheme {
+  id: string;
+  /** Story name shown big in the HUD (Chinese). */
+  name: string;
+  /** Font Awesome icon name. */
+  icon: string;
+  /** Accent color for HUD elements. */
+  color: string;
+  /** Full-screen tint overlay (hex) while the segment is active. */
+  screenTint: string;
+  /** Tint opacity 0-1 (kept subtle — this runs for minutes, not seconds). */
+  screenTintOpacity: number;
+  /** One-line flavor instruction (Chinese). */
+  hint: string;
+}
+
+const SEGMENT_THEMES = {
+  warmup: {
+    id: 'warmup',
+    name: '晨間出發',
+    icon: 'sun',
+    color: ZONE_COLORS.warmup,
+    screenTint: '#4a90d9',
+    screenTintOpacity: 0.05,
+    hint: '輕鬆轉動雙腿，喚醒身體',
+  },
+  recovery: {
+    id: 'recovery',
+    name: '補給站',
+    icon: 'mug-hot',
+    color: ZONE_COLORS.recovery,
+    screenTint: '#00e676',
+    screenTintOpacity: 0.05,
+    hint: '放輕鬆，補水喘口氣',
+  },
+  cruise: {
+    id: 'cruise',
+    name: '順風巡航',
+    icon: 'feather',
+    color: ZONE_COLORS.endurance,
+    screenTint: '#66bb6a',
+    screenTintOpacity: 0.05,
+    hint: '穩定節奏，維持巡航',
+  },
+  headwind: {
+    id: 'headwind',
+    name: '逆風來襲',
+    icon: 'wind',
+    color: ZONE_COLORS.sweetSpot,
+    screenTint: '#ffab00',
+    screenTintOpacity: 0.08,
+    hint: '頂住風壓，穩穩輸出',
+  },
+  climb: {
+    id: 'climb',
+    name: '長坡爬升',
+    icon: 'mountain',
+    color: ZONE_COLORS.threshold,
+    screenTint: '#ff6d00',
+    screenTintOpacity: 0.08,
+    hint: '咬住坡度，別掉檔',
+  },
+  chase: {
+    id: 'chase',
+    name: '警車追擊',
+    icon: 'car-side',
+    color: ZONE_COLORS.vo2max,
+    screenTint: '#ff1744',
+    screenTintOpacity: 0.10,
+    hint: '全力踩！別被追上',
+  },
+  sprint: {
+    id: 'sprint',
+    name: '終點衝刺',
+    icon: 'person-running',
+    color: ZONE_COLORS.sprint,
+    screenTint: '#d500f9',
+    screenTintOpacity: 0.10,
+    hint: '掏空自己，衝線！',
+  },
+  cooldown: {
+    id: 'cooldown',
+    name: '夕陽返家',
+    icon: 'cloud-sun',
+    color: ZONE_COLORS.warmup,
+    screenTint: '#4a90d9',
+    screenTintOpacity: 0.05,
+    hint: '緩和收操，慢慢回家',
+  },
+} as const satisfies Record<string, SegmentTheme>;
+
+/**
+ * Map a workout segment to its narrative theme.
+ *
+ * Name keywords win (Warm Up / Cool Down / Recovery / Rest carry intent that
+ * intensity alone can't distinguish — a 55% warm-up and a 55% recovery feel
+ * different); otherwise classify by target intensity (%FTP).
+ */
+export function getSegmentTheme(segment: WorkoutSegment): SegmentTheme {
+  const name = segment.name.toLowerCase();
+  if (/warm/.test(name)) return SEGMENT_THEMES.warmup;
+  if (/cool/.test(name)) return SEGMENT_THEMES.cooldown;
+  if (/recovery|rest/.test(name)) return SEGMENT_THEMES.recovery;
+
+  const pct = segment.targetFtpPercent;
+  if (pct <= 55) return SEGMENT_THEMES.recovery;
+  if (pct <= 79) return SEGMENT_THEMES.cruise;
+  if (pct <= 94) return SEGMENT_THEMES.headwind;
+  if (pct <= 109) return SEGMENT_THEMES.climb;
+  if (pct <= 139) return SEGMENT_THEMES.chase;
+  return SEGMENT_THEMES.sprint;
+}
+
 /**
  * Compute overall workout grade based on time-on-target percentage.
  */

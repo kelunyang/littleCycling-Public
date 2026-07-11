@@ -23,6 +23,11 @@ const RAIN_GAIN = 0.08;
 const DRIP_MIN_MS = 80;
 const DRIP_MAX_MS = 400;
 
+/** Environmental wind volume cap (separate from speed-driven wind). */
+const AMBIENT_WIND_MAX_GAIN = 0.18;
+/** Environmental wind saturation speed (km/h). */
+const AMBIENT_WIND_SATURATION_KMH = 50;
+
 export class AmbientNoise {
   private ctx: AudioContext;
   private dest: AudioNode;
@@ -39,6 +44,11 @@ export class AmbientNoise {
   private rainGain: GainNode;
   private rainActive = false;
   private dripTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Ambient (weather-driven) wind chain: separate from the speed-driven one.
+  private ambientWindSource: AudioBufferSourceNode | null = null;
+  private ambientWindFilter: BiquadFilterNode;
+  private ambientWindGain: GainNode;
 
   constructor(ctx: AudioContext, destination: AudioNode) {
     this.ctx = ctx;
@@ -68,6 +78,17 @@ export class AmbientNoise {
     this.rainGain.gain.value = 0;
     this.rainFilter.connect(this.rainGain);
     this.rainGain.connect(this.dest);
+
+    // Ambient wind filter + gain — lower freq than speed-wind, deeper rumble.
+    this.ambientWindFilter = ctx.createBiquadFilter();
+    this.ambientWindFilter.type = 'lowpass';
+    this.ambientWindFilter.frequency.value = 250;
+    this.ambientWindFilter.Q.value = 0.4;
+
+    this.ambientWindGain = ctx.createGain();
+    this.ambientWindGain.gain.value = 0;
+    this.ambientWindFilter.connect(this.ambientWindGain);
+    this.ambientWindGain.connect(this.dest);
   }
 
   /** Generate a white noise AudioBuffer. */
@@ -111,6 +132,49 @@ export class AmbientNoise {
 
     this.windGain.gain.setTargetAtTime(targetGain, t, 0.3);
     this.windFilter.frequency.setTargetAtTime(targetFreq, t, 0.3);
+  }
+
+  /**
+   * Set environmental wind level from weather (separate from speed-driven wind).
+   * 0 km/h fades out; 50+ km/h reaches the gain ceiling.
+   */
+  setAmbientWind(kmh: number): void {
+    if (!this.ambientWindSource) {
+      this.ambientWindSource = this.createNoiseSource();
+      this.ambientWindSource.connect(this.ambientWindFilter);
+      this.ambientWindSource.start();
+    }
+    const t = this.ctx.currentTime;
+    const ratio = Math.min(Math.max(kmh / AMBIENT_WIND_SATURATION_KMH, 0), 1);
+    this.ambientWindGain.gain.setTargetAtTime(ratio * AMBIENT_WIND_MAX_GAIN, t, 0.5);
+    this.ambientWindFilter.frequency.setTargetAtTime(150 + ratio * 350, t, 0.5);
+  }
+
+  /**
+   * Play a one-shot thunder sound. distance 0..1 (0 = very close/loud, 1 = far).
+   */
+  playThunder(distance: number): void {
+    const dist = Math.max(0, Math.min(1, distance));
+    const t = this.ctx.currentTime;
+    const src = this.createNoiseSource();
+    const lp = this.ctx.createBiquadFilter();
+    const g = this.ctx.createGain();
+
+    lp.type = 'lowpass';
+    lp.frequency.value = 80 + (1 - dist) * 200;
+    lp.Q.value = 0.5;
+    src.connect(lp);
+    lp.connect(g);
+    g.connect(this.dest);
+
+    const peakGain = (1 - dist) * 0.6 + 0.05;
+    const dur = 1.6 + dist * 1.2;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(peakGain, t + 0.05);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+
+    src.start(t);
+    src.stop(t + dur + 0.1);
   }
 
   /** Enable/disable rain ambient sound with fade. */
@@ -201,5 +265,13 @@ export class AmbientNoise {
       clearTimeout(this.dripTimer);
       this.dripTimer = null;
     }
+
+    if (this.ambientWindSource) {
+      this.ambientWindSource.stop();
+      this.ambientWindSource.disconnect();
+      this.ambientWindSource = null;
+    }
+    this.ambientWindFilter.disconnect();
+    this.ambientWindGain.disconnect();
   }
 }

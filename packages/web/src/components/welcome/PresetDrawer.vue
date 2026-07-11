@@ -544,7 +544,7 @@ async function handleImport() {
   align-items: center;
   justify-content: space-between;
   padding: 16px 20px;
-  border-bottom: 1px solid var(--hud-border-bright);
+  border-bottom: 1.5px solid var(--hud-border-bright);
   position: relative;
 }
 
@@ -569,7 +569,7 @@ async function handleImport() {
   color: var(--hud-cyan);
   text-transform: uppercase;
   letter-spacing: 2px;
-  text-shadow: 0 0 10px rgba(0,229,255,0.3);
+  text-shadow: 0 0 10px rgba(var(--accent-rgb), 0.3);
 }
 
 .preset__header :deep(.el-button) {
@@ -589,14 +589,14 @@ async function handleImport() {
 }
 
 fieldset {
-  border: 1px solid var(--hud-border);
+  border: 1.5px solid var(--hud-border);
   border-radius: 0;
   clip-path: var(--clip-panel-sm);
   padding: 12px 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  background: rgba(0,229,255,0.02);
+  background: rgba(var(--accent-rgb), 0.02);
 }
 
 legend {
@@ -655,7 +655,7 @@ label {
 
 .preset__notes-input :deep(.el-textarea__inner),
 .preset__prompt-input :deep(.el-textarea__inner) {
-  font-family: monospace;
+  font-family: 'Consolas', 'Courier New', 'Noto Sans TC', monospace;
   font-size: 12px;
   background: rgba(0,0,0,0.3);
   color: var(--hud-text);
@@ -670,8 +670,8 @@ label {
 
 /* ── Plan card ── */
 .preset__card {
-  border: 1px solid var(--hud-border);
-  background: rgba(0,229,255,0.02);
+  border: 1.5px solid var(--hud-border);
+  background: rgba(var(--accent-rgb), 0.02);
 }
 
 .preset__card-header {
@@ -684,7 +684,7 @@ label {
 }
 
 .preset__card-header:hover {
-  background: rgba(0,229,255,0.05);
+  background: rgba(var(--accent-rgb), 0.05);
 }
 
 .preset__card-info {
@@ -706,7 +706,7 @@ label {
 }
 
 .preset__card-source {
-  background: rgba(0,229,255,0.1);
+  background: rgba(var(--accent-rgb), 0.1);
   color: var(--hud-cyan);
   padding: 0 4px;
   border-radius: 2px;
@@ -739,7 +739,7 @@ label {
 /* ── Day grid ── */
 .preset__day-grid-wrap {
   padding: 8px 12px 12px;
-  border-top: 1px solid var(--hud-border);
+  border-top: 1.5px solid var(--hud-border);
 }
 
 .preset__card-desc {
@@ -786,7 +786,7 @@ label {
   justify-content: center;
   cursor: pointer;
   color: var(--hud-cyan);
-  border: 1px solid var(--hud-border);
+  border: 1.5px solid var(--hud-border);
   flex-shrink: 0;
   transition: all 0.15s;
   font-size: 11px;
@@ -794,7 +794,7 @@ label {
 
 .preset__week-arrow:hover {
   border-color: var(--hud-cyan);
-  background: rgba(0, 229, 255, 0.1);
+  background: rgba(var(--accent-rgb), 0.1);
 }
 
 .preset__week-arrow--hidden {
@@ -853,7 +853,7 @@ label {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--hud-border);
+  border: 1.5px solid var(--hud-border);
   cursor: pointer;
   position: relative;
   min-height: 36px;
@@ -879,12 +879,12 @@ label {
 }
 
 .preset__day-cell--done {
-  background: rgba(0,229,255,0.1);
+  background: rgba(var(--accent-rgb), 0.1);
   border-color: var(--hud-cyan);
 }
 
 .preset__day-cell--today {
-  box-shadow: 0 0 8px rgba(0,229,255,0.5);
+  box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.5);
   border-color: var(--hud-cyan);
 }
 

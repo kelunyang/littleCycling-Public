@@ -1,99 +1,102 @@
 /**
- * Catalog API — browse EuroVelo routes and download GPX stages.
+ * Catalog API — browse EuroVelo routes and import individual stages
+ * as saved routes.
  *
- * Data: © EuroVelo (eurovelo.com), available under ODbL
+ * Data: © EuroVelo (eurovelo.com), distributed under ODbL.
  */
 
 import type { FastifyInstance } from 'fastify';
 import { parseRouteFile } from '@littlecycling/shared';
 import type { RouteStore } from '../lib/route-store.js';
-import { EuroveloCatalog } from '../lib/eurovelo-catalog.js';
+import type { EuroVeloCatalog } from '../lib/eurovelo-catalog.js';
 
-// Polyfill DOMParser for Node.js (shared gpx-parser uses it)
-import { DOMParser as LinkedomDOMParser } from 'linkedom';
-if (typeof globalThis.DOMParser === 'undefined') {
-  (globalThis as Record<string, unknown>).DOMParser = LinkedomDOMParser;
-}
-
-/** Deterministic fileName for catalog stages — used to detect duplicates. */
-function catalogFileName(raceId: string, stage: number): string {
-  return `${raceId}-stage-${stage}.gpx`;
+function catalogFileName(routeId: string, stage: number): string {
+  return `${routeId}-stage-${stage}.gpx`;
 }
 
 export default async function catalogApi(
   fastify: FastifyInstance,
-  opts: { routeStore: RouteStore },
+  opts: { routeStore: RouteStore; catalog: EuroVeloCatalog },
 ): Promise<void> {
-  const { routeStore } = opts;
-  const catalog = new EuroveloCatalog();
+  const { routeStore, catalog } = opts;
 
-  /** Fetch EuroVelo catalog → return catalog + which stages are already downloaded. */
-  fastify.get('/api/catalog', async (_, reply) => {
-    let catalogData;
-    try {
-      catalogData = await catalog.getCatalog();
-    } catch (err) {
-      return reply.code(502).send({ error: `Failed to fetch catalog: ${(err as Error).message}` });
-    }
-
-    // Detect already-downloaded stages by matching fileName
-    const existing = routeStore.list();
-    const existingFileNames = new Set(existing.map((r) => r.fileName));
-
+  /** List the 17 EuroVelo routes + which stages are already saved locally. */
+  fastify.get('/api/catalog', async () => {
+    const data = catalog.getCatalog();
+    const existing = new Set(routeStore.list().map((r) => r.fileName));
     const downloadedStageIds: string[] = [];
-    for (const race of catalogData.races) {
+    for (const race of data.races) {
       for (const stage of race.stages) {
-        if (existingFileNames.has(catalogFileName(race.id, stage.stage))) {
+        if (existing.has(catalogFileName(race.id, stage.stage))) {
           downloadedStageIds.push(`${race.id}-s${stage.stage}`);
         }
       }
     }
-
-    return { catalog: catalogData, downloadedStageIds };
+    return { catalog: data, downloadedStageIds };
   });
 
-  /** Download a GPX stage from EuroVelo and save as a route. */
-  fastify.post<{ Body: { raceId: string; stage: number } }>('/api/catalog/download', async (req, reply) => {
-    const { raceId, stage } = req.body;
+  /** Fetch (or revalidate) a route's stage list. Returns the updated CatalogRace. */
+  fastify.post<{ Params: { routeId: string } }>(
+    '/api/catalog/route/:routeId/fetch',
+    async (req, reply) => {
+      try {
+        const race = await catalog.fetchRoute(req.params.routeId);
+        return race;
+      } catch (err) {
+        return reply.code(502).send({ error: (err as Error).message });
+      }
+    },
+  );
 
-    if (!raceId || stage == null) {
-      return reply.code(400).send({ error: 'Missing raceId or stage' });
-    }
+  /** Download a single stage as a saved route. */
+  fastify.post<{ Body: { routeId: string; stage: number } }>(
+    '/api/catalog/download',
+    async (req, reply) => {
+      const { routeId, stage } = req.body ?? {};
+      if (!routeId || typeof stage !== 'number') {
+        return reply.code(400).send({ error: 'Missing routeId or stage' });
+      }
 
-    // Check if already downloaded
-    const fn = catalogFileName(raceId, stage);
-    const existing = routeStore.list();
-    const alreadyDownloaded = existing.find((r) => r.fileName === fn);
-    if (alreadyDownloaded) {
-      return alreadyDownloaded;
-    }
+      const fn = catalogFileName(routeId, stage);
+      const existing = routeStore.list().find((r) => r.fileName === fn);
+      if (existing) {
+        return reply.code(200).send({ ...existing, created: false });
+      }
 
-    // Find race and stage in catalog
-    const found = await catalog.findStage(raceId, stage);
-    if (!found) return reply.code(404).send({ error: `Stage ${stage} not found in ${raceId}` });
+      let stageGpx = catalog.getStageGpx(routeId, stage);
+      if (!stageGpx) {
+        try {
+          await catalog.fetchRoute(routeId);
+          stageGpx = catalog.getStageGpx(routeId, stage);
+        } catch (err) {
+          return reply
+            .code(502)
+            .send({ error: `Failed to fetch route GPX: ${(err as Error).message}` });
+        }
+      }
+      if (!stageGpx) {
+        return reply.code(404).send({ error: `Stage ${stage} not found in ${routeId}` });
+      }
 
-    const { race, stage: stageInfo } = found;
+      const points = parseRouteFile(stageGpx, fn);
+      if (points.length === 0) {
+        return reply.code(400).send({ error: 'No track points found in stage GPX' });
+      }
 
-    // Download GPX from EuroVelo
-    let gpxXml: string;
-    try {
-      gpxXml = await catalog.downloadGpx(stageInfo.gpxId);
-    } catch (err) {
-      return reply.code(502).send({ error: `Failed to download GPX: ${(err as Error).message}` });
-    }
+      const data = catalog.getCatalog();
+      const race = data.races.find((r) => r.id === routeId);
+      const stageInfo = race?.stages.find((s) => s.stage === stage);
+      const displayName = stageInfo
+        ? `${race!.name} — Stage ${stage}: ${stageInfo.name}`
+        : `${routeId} — Stage ${stage}`;
 
-    // Parse GPX
-    const points = parseRouteFile(gpxXml, fn);
-    if (points.length === 0) {
-      return reply.code(400).send({ error: 'No route points found in downloaded GPX' });
-    }
-
-    // Save as route
-    const name = `${race.name} — Stage ${stage}: ${stageInfo.name}`;
-    const route = routeStore.create(name, fn, points);
-
-    // Return summary (without points to save bandwidth)
-    const { points: _, ...summary } = route;
-    return reply.code(201).send(summary);
-  });
+      const route = routeStore.create(displayName, fn, points);
+      console.log(
+        `[catalog] saved ${routeId}/stage-${stage}: ${route.id} ` +
+          `(${(route.distanceM / 1000).toFixed(1)} km, ${route.points.length} pts)`,
+      );
+      const { points: _drop, ...summary } = route;
+      return reply.code(201).send({ ...summary, created: true });
+    },
+  );
 }

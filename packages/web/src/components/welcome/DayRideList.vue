@@ -55,6 +55,15 @@
           <el-button size="small" @click.stop="exportFit(ride.id)" title="Export FIT">
             <font-awesome-icon icon="file-export" />
           </el-button>
+          <el-button
+            size="small"
+            class="day-rides__delete"
+            :loading="deletingId === ride.id"
+            title="Delete ride"
+            @click.stop="deleteRide(ride)"
+          >
+            <font-awesome-icon icon="trash" />
+          </el-button>
         </div>
       </div>
     </div>
@@ -62,9 +71,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import dayjs from 'dayjs';
+import { ElMessageBox } from 'element-plus';
 import type { Ride } from '@littlecycling/shared';
+import { notifySuccess, notifyError } from '@/utils/notify';
 
 const props = defineProps<{
   date: string;
@@ -74,7 +85,10 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'back'): void;
   (e: 'select-ride', ride: Ride): void;
+  (e: 'deleted', rideId: number): void;
 }>();
+
+const deletingId = ref<number | null>(null);
 
 const formattedDate = computed(() =>
   dayjs(props.date).format('MMMM D, YYYY')
@@ -97,6 +111,29 @@ function formatDuration(ms?: number): string {
 function exportFit(rideId: number) {
   window.open(`/api/rides/${rideId}/export.fit`, '_blank');
 }
+
+async function deleteRide(ride: Ride) {
+  try {
+    await ElMessageBox.confirm(
+      `Delete this ride from ${dayjs(ride.startedAt).format('HH:mm')}? This cannot be undone.`,
+      'Delete ride',
+      { confirmButtonText: 'Delete', cancelButtonText: 'Cancel', type: 'warning' },
+    );
+  } catch {
+    return; // user cancelled
+  }
+  deletingId.value = ride.id;
+  try {
+    const res = await fetch(`/api/rides/${ride.id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    notifySuccess('Ride deleted');
+    emit('deleted', ride.id);
+  } catch (err: any) {
+    notifyError(`Failed to delete ride: ${err?.message ?? err}`);
+  } finally {
+    deletingId.value = null;
+  }
+}
 </script>
 
 <style scoped>
@@ -111,7 +148,7 @@ function exportFit(rideId: number) {
   align-items: center;
   gap: 10px;
   padding-bottom: 8px;
-  border-bottom: 1px solid var(--hud-border);
+  border-bottom: 1.5px solid var(--hud-border);
 }
 
 .day-rides__header :deep(.el-button) {
@@ -121,7 +158,7 @@ function exportFit(rideId: number) {
 
 .day-rides__date {
   font-family: var(--font-display);
-  font-size: 13px;
+  font-size: 16px;
   font-weight: 700;
   color: var(--hud-cyan);
   text-transform: uppercase;
@@ -135,7 +172,7 @@ function exportFit(rideId: number) {
   gap: 8px;
   padding: 30px 0;
   color: var(--hud-text);
-  font-size: 12px;
+  font-size: 14px;
   opacity: 0.6;
 }
 
@@ -148,8 +185,8 @@ function exportFit(rideId: number) {
 }
 
 .day-rides__card {
-  background: rgba(0,229,255,0.03);
-  border: 1px solid var(--hud-border);
+  background: rgba(var(--accent-rgb), 0.03);
+  border: 1.5px solid var(--hud-border);
   clip-path: var(--clip-panel-sm);
   padding: 10px 14px;
   cursor: pointer;
@@ -160,9 +197,9 @@ function exportFit(rideId: number) {
 }
 
 .day-rides__card:hover {
-  background: rgba(0,229,255,0.08);
+  background: rgba(var(--accent-rgb), 0.08);
   border-color: var(--hud-border-bright);
-  filter: drop-shadow(0 0 4px rgba(0,229,255,0.3));
+  filter: drop-shadow(0 0 4px rgba(var(--accent-rgb), 0.3));
 }
 
 .day-rides__card-top {
@@ -173,7 +210,8 @@ function exportFit(rideId: number) {
 
 .day-rides__time {
   font-family: var(--font-display);
-  font-size: 13px;
+  font-size: 15px;
+  font-weight: 700;
   color: var(--hud-text-bright);
   display: flex;
   align-items: center;
@@ -182,7 +220,7 @@ function exportFit(rideId: number) {
 
 .day-rides__duration {
   font-family: var(--font-display);
-  font-size: 12px;
+  font-size: 14px;
   color: var(--hud-text);
   letter-spacing: 1px;
 }
@@ -194,7 +232,7 @@ function exportFit(rideId: number) {
 }
 
 .day-rides__stat {
-  font-size: 11px;
+  font-size: 14px;
   color: var(--hud-text);
   display: flex;
   align-items: center;
@@ -202,8 +240,8 @@ function exportFit(rideId: number) {
 }
 
 .day-rides__route {
-  font-size: 10px;
-  color: rgba(255,255,255,0.35);
+  font-size: 13px;
+  color: var(--hud-text-dim);
   display: flex;
   align-items: center;
   gap: 5px;
@@ -212,11 +250,22 @@ function exportFit(rideId: number) {
 .day-rides__card-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 6px;
 }
 
 .day-rides__card-actions :deep(.el-button) {
   border-color: var(--hud-border);
   color: var(--hud-text);
   font-size: 11px;
+}
+
+.day-rides__card-actions :deep(.day-rides__delete) {
+  color: var(--hud-magenta, #ff0066);
+  border-color: rgba(255, 0, 102, 0.35);
+}
+
+.day-rides__card-actions :deep(.day-rides__delete:hover) {
+  background: rgba(255, 0, 102, 0.08);
+  border-color: var(--hud-magenta, #ff0066);
 }
 </style>

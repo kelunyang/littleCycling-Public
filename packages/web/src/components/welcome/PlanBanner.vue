@@ -65,8 +65,8 @@ const planStore = usePlanStore();
   align-items: center;
   justify-content: space-between;
   padding: 8px 12px;
-  border: 1px solid var(--hud-border);
-  background: rgba(0, 229, 255, 0.04);
+  border: 1.5px solid var(--hud-border);
+  background: rgba(var(--accent-rgb), 0.04);
   gap: 12px;
 }
 
@@ -125,6 +125,6 @@ const planStore = usePlanStore();
 .plan-banner__done {
   color: var(--hud-cyan);
   font-size: 18px;
-  filter: drop-shadow(0 0 4px rgba(0, 229, 255, 0.5));
+  filter: drop-shadow(0 0 4px rgba(var(--accent-rgb), 0.5));
 }
 </style>

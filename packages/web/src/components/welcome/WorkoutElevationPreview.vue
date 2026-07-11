@@ -8,6 +8,92 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import type { RoutePoint, WorkoutSegment } from '@littlecycling/shared';
 import { buildCumulativeDistances } from '@/game/route-geometry';
+import { useSettingsStore } from '@/stores/settingsStore';
+
+const settingsStore = useSettingsStore();
+const worldStyle = computed(
+  () => settingsStore.config.map.phaserStyle ?? 'plastic',
+);
+
+interface ElevPalette {
+  bg: string;
+  scanline: string;
+  line: string;
+  fillTop: string;
+  fillBottom: string;
+  glow: string;
+  border: string;
+  cursor: string;
+  cursorGlow: string;
+  slopeText: string;
+  slopeShadow: string;
+  segmentSeparator: string;
+  segmentBoundary: string;
+  segmentLabel: string;
+  activeStripe: string;
+  font: string;
+}
+
+const PALETTES: Record<'plastic' | 'cuphead' | 'default', ElevPalette> = {
+  plastic: {
+    bg: 'rgba(255, 247, 251, 0.94)',
+    scanline: 'rgba(26, 17, 64, 0.05)',
+    line: 'rgba(255, 59, 141, 0.95)',
+    fillTop: 'rgba(255, 59, 141, 0.30)',
+    fillBottom: 'rgba(255, 59, 141, 0.04)',
+    glow: 'rgba(255, 59, 141, 0.55)',
+    border: '#1a1140',
+    cursor: 'rgba(255, 234, 0, 1)',
+    cursorGlow: 'rgba(26, 17, 64, 0.7)',
+    slopeText: '#1a1140',
+    slopeShadow: 'rgba(255, 234, 0, 0.6)',
+    segmentSeparator: 'rgba(26, 17, 64, 0.2)',
+    segmentBoundary: 'rgba(26, 17, 64, 0.5)',
+    segmentLabel: 'rgba(26, 17, 64, 0.7)',
+    activeStripe: 'rgba(26, 17, 64, 0.18)',
+    font: '11px Fredoka, sans-serif',
+  },
+  cuphead: {
+    bg: 'rgba(232, 220, 192, 0.95)',
+    scanline: 'rgba(42, 36, 32, 0.05)',
+    line: '#a0523c',
+    fillTop: 'rgba(196, 160, 53, 0.45)',
+    fillBottom: 'rgba(196, 160, 53, 0.10)',
+    glow: 'rgba(0, 0, 0, 0)',
+    border: '#2a2420',
+    cursor: '#a0523c',
+    cursorGlow: 'rgba(0, 0, 0, 0)',
+    slopeText: '#2a2420',
+    slopeShadow: 'rgba(196, 160, 53, 0.55)',
+    segmentSeparator: 'rgba(42, 36, 32, 0.3)',
+    segmentBoundary: 'rgba(42, 36, 32, 0.55)',
+    segmentLabel: 'rgba(42, 36, 32, 0.8)',
+    activeStripe: 'rgba(42, 36, 32, 0.2)',
+    font: '12px "Cabin Sketch", cursive',
+  },
+  default: {
+    bg: 'rgba(5, 10, 20, 0.82)',
+    scanline: 'rgba(0, 229, 255, 0.04)',
+    line: 'rgba(0, 229, 255, 0.9)',
+    fillTop: 'rgba(0, 229, 255, 0.15)',
+    fillBottom: 'rgba(0, 229, 255, 0.02)',
+    glow: 'rgba(0, 229, 255, 0.8)',
+    border: 'rgba(0, 229, 255, 0.3)',
+    cursor: 'rgba(0, 229, 255, 0.95)',
+    cursorGlow: 'rgba(0, 229, 255, 0.8)',
+    slopeText: 'rgba(255, 215, 0, 0.85)',
+    slopeShadow: 'rgba(255, 215, 0, 0.4)',
+    segmentSeparator: 'rgba(255, 255, 255, 0.15)',
+    segmentBoundary: 'rgba(255, 255, 255, 0.35)',
+    segmentLabel: 'rgba(255, 255, 255, 0.4)',
+    activeStripe: 'rgba(255, 255, 255, 0.18)',
+    font: '11px Orbitron, monospace',
+  },
+};
+
+const palette = computed<ElevPalette>(
+  () => PALETTES[worldStyle.value] ?? PALETTES.default,
+);
 
 /** Build cumulative elapsed time (ms) from tsEpoch. Returns null if timestamps missing. */
 function buildCumulativeTimes(pts: RoutePoint[]): number[] | null {
@@ -150,8 +236,10 @@ function draw() {
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, w, CANVAS_H);
 
+  const pal = palette.value;
+
   // Background
-  ctx.fillStyle = 'rgba(5, 10, 20, 0.82)';
+  ctx.fillStyle = pal.bg;
   ctx.fillRect(0, 0, w, CANVAS_H);
 
   const plotW = w - PAD.left - PAD.right;
@@ -202,7 +290,7 @@ function draw() {
           ctx.beginPath();
           ctx.rect(xOffset, PAD.top, segW, plotH);
           ctx.clip();
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+          ctx.strokeStyle = pal.activeStripe;
           ctx.lineWidth = 1;
           const step = 6;
           const span = segW + plotH;
@@ -219,8 +307,8 @@ function draw() {
         if (globalIdx > 0) {
           ctx.save();
           ctx.strokeStyle = cycle > 0 && i === 0
-            ? 'rgba(255, 255, 255, 0.35)' // stronger line at cycle boundary
-            : 'rgba(255, 255, 255, 0.15)';
+            ? pal.segmentBoundary // stronger line at cycle boundary
+            : pal.segmentSeparator;
           ctx.lineWidth = 1;
           ctx.setLineDash(cycle > 0 && i === 0 ? [5, 3] : [3, 3]);
           ctx.beginPath();
@@ -233,8 +321,8 @@ function draw() {
         // Segment name label at bottom
         if (segW > 20) {
           ctx.save();
-          ctx.font = '8px Orbitron, monospace';
-          ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+          ctx.font = pal.font;
+          ctx.fillStyle = pal.segmentLabel;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'top';
           const labelX = xOffset + segW / 2;
@@ -252,7 +340,7 @@ function draw() {
   }
 
   // CRT scan lines
-  ctx.strokeStyle = 'rgba(0, 229, 255, 0.04)';
+  ctx.strokeStyle = pal.scanline;
   ctx.lineWidth = 1;
   for (let y = PAD.top; y <= PAD.top + plotH; y += 3) {
     ctx.beginPath();
@@ -306,16 +394,16 @@ function draw() {
   ctx.closePath();
 
   const fillGrad = ctx.createLinearGradient(0, PAD.top, 0, PAD.top + plotH);
-  fillGrad.addColorStop(0, 'rgba(0, 229, 255, 0.15)');
-  fillGrad.addColorStop(1, 'rgba(0, 229, 255, 0.02)');
+  fillGrad.addColorStop(0, pal.fillTop);
+  fillGrad.addColorStop(1, pal.fillBottom);
   ctx.fillStyle = fillGrad;
   ctx.fill();
 
   // Glow pass
   ctx.save();
   ctx.shadowBlur = 8;
-  ctx.shadowColor = 'rgba(0, 229, 255, 0.8)';
-  ctx.strokeStyle = 'rgba(0, 229, 255, 0.6)';
+  ctx.shadowColor = pal.glow;
+  ctx.strokeStyle = pal.glow;
   ctx.lineWidth = 2;
   ctx.lineJoin = 'round';
   ctx.beginPath();
@@ -327,8 +415,8 @@ function draw() {
   ctx.restore();
 
   // Sharp line
-  ctx.strokeStyle = 'rgba(0, 229, 255, 0.9)';
-  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = pal.line;
+  ctx.lineWidth = 1.8;
   ctx.lineJoin = 'round';
   ctx.beginPath();
   ctx.moveTo(points[0].x, points[0].y);
@@ -354,16 +442,19 @@ function draw() {
       }
 
       ctx.save();
-      ctx.font = '8px Orbitron, monospace';
-      ctx.fillStyle = 'rgba(255, 215, 0, 0.8)';
+      ctx.font = pal.font;
+      ctx.fillStyle = pal.slopeText;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
       ctx.shadowBlur = 4;
-      ctx.shadowColor = 'rgba(255, 215, 0, 0.4)';
+      ctx.shadowColor = pal.slopeShadow;
       ctx.fillText(`▲${marker.gradient}%`, mx, my - 4);
       ctx.restore();
     }
   }
+
+  // ── Minute graduations on the X (time) axis ──
+  drawMinuteTicks(ctx, plotW, plotH, displayDur, pal);
 
   // ── Live-mode triangle cursor ──
   if (isLive && displayDur > 0) {
@@ -373,8 +464,8 @@ function draw() {
     const triW = 6;
     ctx.save();
     ctx.shadowBlur = 6;
-    ctx.shadowColor = 'rgba(0, 229, 255, 0.8)';
-    ctx.fillStyle = 'rgba(0, 229, 255, 0.95)';
+    ctx.shadowColor = pal.cursorGlow;
+    ctx.fillStyle = pal.cursor;
     ctx.beginPath();
     ctx.moveTo(cx, PAD.top + plotH + 2);        // tip pointing down into label area
     ctx.lineTo(cx - triW, PAD.top + plotH + 2 + triH);
@@ -384,13 +475,75 @@ function draw() {
     ctx.restore();
   }
 
-  // Glowing border
+  // Border (themed)
   ctx.save();
-  ctx.shadowBlur = 6;
-  ctx.shadowColor = 'rgba(0, 229, 255, 0.4)';
-  ctx.strokeStyle = 'rgba(0, 229, 255, 0.3)';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(0.5, 0.5, w - 1, CANVAS_H - 1);
+  ctx.strokeStyle = pal.border;
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(0.75, 0.75, w - 1.5, CANVAS_H - 1.5);
+  ctx.restore();
+}
+
+/**
+ * Draw one graduation per minute along the X (time) axis so the rider can always
+ * read elapsed/remaining time even if the game state misbehaves. Every minute gets
+ * a tick; minute numbers are labelled at a spacing that avoids overlap.
+ */
+function drawMinuteTicks(
+  ctx: CanvasRenderingContext2D,
+  plotW: number,
+  plotH: number,
+  displayDur: number,
+  pal: ElevPalette,
+) {
+  if (displayDur <= 0 || plotW <= 0) return;
+
+  const totalMin = displayDur / 60000;
+  const pxPerMin = (60000 / displayDur) * plotW;
+
+  // Pick a label spacing (in minutes) so numbers stay ~20px apart
+  let labelEvery = 1;
+  for (const step of [1, 2, 5, 10, 15, 30, 60]) {
+    labelEvery = step;
+    if (pxPerMin * step >= 20) break;
+  }
+
+  const lastMin = Math.floor(totalMin + 1e-6);
+  ctx.save();
+  ctx.font = pal.font;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+
+  for (let m = 0; m <= lastMin; m++) {
+    const x = PAD.left + ((m * 60000) / displayDur) * plotW;
+    if (x > PAD.left + plotW + 0.5) break;
+    const labeled = m % labelEvery === 0;
+
+    if (labeled && m > 0) {
+      // Full-height faint guide line to help align with the cursor
+      ctx.strokeStyle = pal.segmentSeparator;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 4]);
+      ctx.beginPath();
+      ctx.moveTo(x, PAD.top);
+      ctx.lineTo(x, PAD.top + plotH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Top-edge tick mark (stronger on labelled minutes)
+    ctx.strokeStyle = labeled ? pal.segmentBoundary : pal.segmentSeparator;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, PAD.top);
+    ctx.lineTo(x, PAD.top + (labeled ? 6 : 3));
+    ctx.stroke();
+
+    // Minute number (skip 0 to avoid crowding the left border)
+    if (labeled && m > 0) {
+      ctx.fillStyle = pal.segmentLabel;
+      ctx.fillText(String(m), x, PAD.top + 6);
+    }
+  }
   ctx.restore();
 }
 
@@ -416,9 +569,16 @@ onUnmounted(() => {
   resizeObserver?.disconnect();
 });
 
-// Redraw when props change
+// Redraw when props or theme change
 watch(
-  () => [props.routePoints, props.workoutSegments, props.totalDurationMs, props.displayDurationMs, props.elapsedMs],
+  () => [
+    props.routePoints,
+    props.workoutSegments,
+    props.totalDurationMs,
+    props.displayDurationMs,
+    props.elapsedMs,
+    worldStyle.value,
+  ],
   () => draw(),
   { deep: true },
 );

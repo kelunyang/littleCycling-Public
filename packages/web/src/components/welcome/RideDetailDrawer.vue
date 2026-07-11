@@ -194,7 +194,7 @@ function formatDuration(ms?: number): string {
   align-items: center;
   justify-content: space-between;
   padding: 16px 20px;
-  border-bottom: 1px solid var(--hud-border-bright);
+  border-bottom: 1.5px solid var(--hud-border-bright);
   position: relative;
   flex-shrink: 0;
 }
@@ -220,7 +220,7 @@ function formatDuration(ms?: number): string {
   color: var(--hud-cyan);
   text-transform: uppercase;
   letter-spacing: 2px;
-  text-shadow: 0 0 10px rgba(0,229,255,0.3);
+  text-shadow: 0 0 10px rgba(var(--accent-rgb), 0.3);
 }
 
 .ride-detail__header :deep(.el-button) {
@@ -241,8 +241,8 @@ function formatDuration(ms?: number): string {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
-  background: rgba(0,229,255,0.02);
-  border: 1px solid var(--hud-border);
+  background: rgba(var(--accent-rgb), 0.02);
+  border: 1.5px solid var(--hud-border);
   clip-path: var(--clip-panel-sm);
   padding: 10px 14px;
 }
@@ -295,10 +295,10 @@ function formatDuration(ms?: number): string {
 }
 
 .ride-detail__chart-section {
-  border: 1px solid var(--hud-border);
+  border: 1.5px solid var(--hud-border);
   clip-path: var(--clip-panel-sm);
   padding: 10px 12px;
-  background: rgba(0,229,255,0.02);
+  background: rgba(var(--accent-rgb), 0.02);
 }
 
 .ride-detail__chart-section legend {

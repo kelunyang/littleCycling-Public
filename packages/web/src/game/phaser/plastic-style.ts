@@ -27,6 +27,12 @@ const PALETTE = {
   ],
   treeTrunk: 0x5d4037,
   treeCanopy: 0x2e7d32,
+  treeCanopyColors: [
+    0x2e7d32, // forest green (matches Three.js cartoon-materials)
+    0x388e3c, // medium green
+    0x1b5e20, // deep green
+    0x4caf50, // bright green for variety
+  ],
   waterFill: 0x1565c0,
   waterOutline: 0x42a5f5,
   grassOverlay: 0x66bb6a,
@@ -69,7 +75,11 @@ const COIN_SIZE = 12;
 export function createPlasticStyle(): PhaserStyleStrategy {
   return {
     style: 'plastic',
-    palette: { ...PALETTE, buildingColors: [...PALETTE.buildingColors] as number[] },
+    palette: {
+      ...PALETTE,
+      buildingColors: [...PALETTE.buildingColors] as number[],
+      treeCanopyColors: [...PALETTE.treeCanopyColors] as number[],
+    },
 
     // ── Terrain ──
 
@@ -100,8 +110,9 @@ export function createPlasticStyle(): PhaserStyleStrategy {
     },
 
     drawOverlay(scene) {
-      const w = Number(scene.game.config.width);
-      const h = Number(scene.game.config.height);
+      // scale.width/height 跟隨 resize;game.config 是建立當下的尺寸,永不更新
+      const w = scene.scale.width;
+      const h = scene.scale.height;
       const gfx = scene.add.graphics();
       gfx.setScrollFactor(0);
       gfx.setDepth(999);
@@ -111,14 +122,6 @@ export function createPlasticStyle(): PhaserStyleStrategy {
       for (let y = 0; y < h; y += 3) {
         gfx.fillRect(0, y, w, 1);
       }
-
-      // Vignette corners
-      gfx.fillStyle(0x000000, 0.15);
-      const cs = 80;
-      gfx.fillTriangle(0, 0, cs, 0, 0, cs);
-      gfx.fillTriangle(w, 0, w - cs, 0, w, cs);
-      gfx.fillTriangle(0, h, cs, h, 0, h - cs);
-      gfx.fillTriangle(w, h, w - cs, h, w, h - cs);
 
       return gfx;
     },
@@ -151,24 +154,45 @@ export function createPlasticStyle(): PhaserStyleStrategy {
     },
 
     renderTree(gfx, x, y, size, seed) {
-      const treeH = 18 + (seed % 12);
-      const crownW = 12 + (seed % 8);
-      const trunkH = 5 + (seed % 3);
-      const trunkW = 3;
+      // Per-tree size variation: 0.8x ~ 1.3x of base
+      const scale = 0.8 + ((seed % 100) / 100) * 0.5;
+      const treeH = (18 + (seed % 12)) * scale;
+      const crownW = (12 + (seed % 8)) * scale;
+      const trunkH = (5 + (seed % 3)) * scale;
+      const trunkW = 3 * scale;
+
+      // Pick canopy color from variants — keeps neighboring trees visually distinct
+      const canopyColor = PALETTE.treeCanopyColors[seed % PALETTE.treeCanopyColors.length];
+      // Three shape variants by seed: triangle (conifer), round (broadleaf), oval (poplar)
+      const shape = seed % 3;
 
       // Trunk
       gfx.fillStyle(PALETTE.treeTrunk, 1);
       gfx.fillRect(x - trunkW / 2, y - trunkH, trunkW, trunkH);
 
-      // Crown (triangle)
       const crownBase = y - trunkH;
       const crownTop = crownBase - treeH + trunkH;
-      gfx.fillStyle(PALETTE.treeCanopy, 1);
-      gfx.fillTriangle(x, crownTop, x - crownW / 2, crownBase, x + crownW / 2, crownBase);
 
-      // Highlight edge
-      gfx.lineStyle(1, PALETTE.grassOverlay, 0.6);
-      gfx.lineBetween(x, crownTop, x + crownW / 2, crownBase);
+      gfx.fillStyle(canopyColor, 1);
+      if (shape === 0) {
+        // Triangle conifer
+        gfx.fillTriangle(x, crownTop, x - crownW / 2, crownBase, x + crownW / 2, crownBase);
+        gfx.lineStyle(1, PALETTE.grassOverlay, 0.6);
+        gfx.lineBetween(x, crownTop, x + crownW / 2, crownBase);
+      } else if (shape === 1) {
+        // Round broadleaf
+        const r = crownW / 2;
+        const cy = (crownTop + crownBase) / 2;
+        gfx.fillCircle(x, cy, r);
+        gfx.lineStyle(1, PALETTE.grassOverlay, 0.5);
+        gfx.strokeCircle(x, cy, r);
+      } else {
+        // Tall oval poplar
+        const cy = (crownTop + crownBase) / 2;
+        gfx.fillEllipse(x, cy, crownW * 0.7, treeH);
+        gfx.lineStyle(1, PALETTE.grassOverlay, 0.5);
+        gfx.strokeEllipse(x, cy, crownW * 0.7, treeH);
+      }
     },
 
     renderWater(gfx, x, y, w, h, _seed) {
@@ -204,6 +228,11 @@ export function createPlasticStyle(): PhaserStyleStrategy {
       // Lamp housing
       gfx.fillStyle(0x333333, 1);
       gfx.fillRect(x + armW - 3, y - poleH - 1, 6, 4);
+    },
+
+    renderRoadLampGlow(gfx, x, y, seed) {
+      const poleH = 35 + (seed % 10);
+      const armW = 8;
 
       // Glow circle
       gfx.fillStyle(PALETTE.lampGlow, 0.15);
@@ -469,7 +498,7 @@ export function createPlasticStyle(): PhaserStyleStrategy {
     // ── Markers / flags ──
 
     getMarkerFont() {
-      return 'monospace';
+      return 'Consolas, "Courier New", "Noto Sans TC", monospace';
     },
 
     drawFlag(gfx, x, y, color, label, _seed) {

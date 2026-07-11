@@ -103,44 +103,44 @@ function onDayClick(day: number) {
 .cal-month {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .cal-month__header {
   text-align: center;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--hud-border);
+  padding-bottom: 8px;
+  border-bottom: 1.5px solid var(--hud-border-bright);
 }
 
 .cal-month__title {
   font-family: var(--font-display);
-  font-size: 13px;
+  font-size: 18px;
   font-weight: 700;
   color: var(--hud-cyan);
-  letter-spacing: 2px;
-  text-shadow: 0 0 10px rgba(0,229,255,0.3);
+  letter-spacing: 1.5px;
 }
 
 .cal-month__weekdays {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
-  gap: 2px;
+  gap: 4px;
   text-align: center;
 }
 
 .cal-month__wd {
   font-family: var(--font-display);
-  font-size: 9px;
-  color: rgba(255,255,255,0.35);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--hud-text);
   text-transform: uppercase;
   letter-spacing: 1px;
-  padding: 2px 0;
+  padding: 4px 0;
 }
 
 .cal-month__grid {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
-  gap: 2px;
+  gap: 4px;
 }
 
 .cal-month__cell {
@@ -150,89 +150,94 @@ function onDayClick(day: number) {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: rgba(255,255,255,0.02);
-  border: 1px solid transparent;
+  background: var(--accent-soft);
+  border: 1.5px solid var(--hud-border);
+  border-radius: var(--card-radius-sm);
   cursor: pointer;
   transition: all 0.15s;
-  min-height: 36px;
+  min-height: 44px;
 }
 
 .cal-month__cell--empty {
   background: transparent;
+  border-color: transparent;
   cursor: default;
 }
 
 .cal-month__cell:not(.cal-month__cell--empty):not(.cal-month__cell--future):hover {
-  background: rgba(0,229,255,0.06);
-  border-color: var(--hud-border);
+  background: var(--accent-tint);
+  border-color: var(--hud-border-bright);
 }
 
 .cal-month__cell--has-rides {
-  background: rgba(0,229,255,0.05);
-  border-color: rgba(0,229,255,0.15);
+  background: var(--accent-tint);
+  border-color: var(--hud-border-bright);
 }
 
 .cal-month__cell--selected {
-  background: rgba(0,229,255,0.12) !important;
-  border-color: var(--hud-cyan) !important;
+  background: var(--accent-hover) !important;
+  border: 2px solid var(--hud-cyan) !important;
   box-shadow: var(--hud-glow-cyan);
+}
+
+.cal-month__cell--today {
+  border-color: var(--hud-yellow);
 }
 
 .cal-month__cell--today .cal-month__day-num {
   color: var(--hud-yellow);
-  text-shadow: 0 0 6px rgba(252,238,9,0.4);
 }
 
 .cal-month__cell--future {
-  opacity: 0.25;
+  opacity: 0.45;
   cursor: default;
 }
 
 .cal-month__day-num {
   font-family: var(--font-display);
-  font-size: 12px;
-  color: var(--hud-text);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--hud-text-bright);
 }
 
 .cal-month__plan-dot {
   position: absolute;
-  bottom: 2px;
-  left: 2px;
-  width: 6px;
-  height: 6px;
+  bottom: 3px;
+  left: 3px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
+  border: 1.5px solid var(--hud-border-bright);
 }
 
 .cal-month__plan-dot--training {
   background: #66bb6a;
-  box-shadow: 0 0 4px rgba(102,187,106,0.6);
 }
 
 .cal-month__plan-dot--rest {
-  background: #666;
+  background: #999;
 }
 
 .cal-month__plan-dot--done {
   background: var(--hud-cyan);
-  box-shadow: 0 0 4px rgba(0,229,255,0.6);
 }
 
 .cal-month__badge {
   position: absolute;
-  bottom: 2px;
-  right: 2px;
-  min-width: 14px;
-  height: 14px;
+  bottom: 3px;
+  right: 3px;
+  min-width: 18px;
+  height: 18px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: var(--hud-cyan);
-  color: #000;
+  color: var(--hud-text-bright);
   font-family: var(--font-display);
-  font-size: 8px;
+  font-size: 11px;
   font-weight: 700;
-  border-radius: 7px;
-  padding: 0 3px;
-  box-shadow: 0 0 6px rgba(0,229,255,0.5);
+  border: 1.5px solid var(--hud-border-bright);
+  border-radius: 9px;
+  padding: 0 4px;
 }
 </style>

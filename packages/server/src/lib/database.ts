@@ -5,13 +5,15 @@
 
 import Database from 'better-sqlite3';
 import type BetterSqlite3 from 'better-sqlite3';
-import type { Ride, RideSample, RideDayCount, ComparisonSample, ActivePlanState, PlanDayCompletion } from '@littlecycling/shared';
+import type { Ride, RideSample, RideDayCount, ComparisonSample, ActivePlanState, PlanDayCompletion, DetectedSensor } from '@littlecycling/shared';
 import { getHrZone } from '@littlecycling/shared';
 
 export interface CreateRideOpts {
   startedAt: number;
   routeId?: string;
   routeName?: string;
+  /** Sensors active at the start of the ride; serialised to JSON in the DB. */
+  sensors?: DetectedSensor[];
 }
 
 export interface EndRideSummary {
@@ -26,6 +28,9 @@ export interface EndRideSummary {
   maxPowerW?: number;
   maxSpeed?: number;
   totalCoins?: number;
+  totalLaps?: number;
+  /** % of hr>0 time in Z2/Z3 (0-100, one decimal). Server-sim rides only. */
+  zoneSustainPct?: number;
 }
 
 export interface InsertSampleOpts {
@@ -44,6 +49,7 @@ export class RideDatabase {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.init();
+    this.recoverOrphanRides();
   }
 
   private init(): void {
@@ -62,6 +68,7 @@ export class RideDatabase {
         max_power_w   REAL,
         max_speed     REAL,
         total_coins   INTEGER DEFAULT 0,
+        total_laps    INTEGER DEFAULT 0,
         route_id      TEXT,
         route_name    TEXT,
         notes         TEXT
@@ -107,16 +114,129 @@ export class RideDatabase {
         UNIQUE(plan_id, day)
       );
     `);
+
+    this.runMigrations();
+  }
+
+  /**
+   * Idempotent column-level migrations for existing databases.
+   * `CREATE TABLE IF NOT EXISTS` does not add new columns to a pre-existing
+   * table, so additive schema changes go here.
+   */
+  private runMigrations(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(rides)`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'sensors')) {
+      this.db.exec(`ALTER TABLE rides ADD COLUMN sensors TEXT`);
+    }
+    if (!cols.some((c) => c.name === 'total_laps')) {
+      this.db.exec(`ALTER TABLE rides ADD COLUMN total_laps INTEGER DEFAULT 0`);
+    }
+    if (!cols.some((c) => c.name === 'zone_sustain_pct')) {
+      this.db.exec(`ALTER TABLE rides ADD COLUMN zone_sustain_pct REAL`);
+    }
+  }
+
+  /**
+   * Finalise any ride that still has `ended_at = NULL` at startup. These are
+   * "orphans" — recordings that were interrupted by a hard process exit
+   * (force-kill, power loss, uncaught exception) before stopRecording could
+   * fire. The samples table is intact, so we can rebuild the summary from
+   * it. Rides with no samples at all are deleted, since they have no
+   * recoverable signal.
+   */
+  private recoverOrphanRides(): void {
+    const orphans = this.db.prepare(
+      `SELECT id, started_at FROM rides WHERE ended_at IS NULL`,
+    ).all() as { id: number; started_at: number }[];
+    if (orphans.length === 0) return;
+
+    for (const ride of orphans) {
+      const samples = this.db.prepare(
+        `SELECT elapsed_ms, hr, power_w, cadence, speed_kmh
+         FROM ride_samples WHERE ride_id = ? ORDER BY elapsed_ms`,
+      ).all(ride.id) as {
+        elapsed_ms: number;
+        hr: number | null;
+        power_w: number | null;
+        cadence: number | null;
+        speed_kmh: number | null;
+      }[];
+
+      if (samples.length === 0) {
+        this.db.prepare(`DELETE FROM rides WHERE id = ?`).run(ride.id);
+        console.log(`[db] dropped empty orphan ride ${ride.id}`);
+        continue;
+      }
+
+      let hrSum = 0, hrCount = 0, hrMax = 0;
+      let pwrSum = 0, pwrCount = 0, pwrMax = 0;
+      let cadSum = 0, cadCount = 0;
+      let spdSum = 0, spdCount = 0, spdMax = 0;
+      let distanceM = 0;
+      let lastT = 0;
+      let lastSpeed = 0;
+      for (const s of samples) {
+        if (s.hr != null) {
+          hrSum += s.hr; hrCount++;
+          if (s.hr > hrMax) hrMax = s.hr;
+        }
+        if (s.power_w != null) {
+          pwrSum += s.power_w; pwrCount++;
+          if (s.power_w > pwrMax) pwrMax = s.power_w;
+        }
+        if (s.cadence != null) {
+          cadSum += s.cadence; cadCount++;
+        }
+        if (s.speed_kmh != null) {
+          spdSum += s.speed_kmh; spdCount++;
+          if (s.speed_kmh > spdMax) spdMax = s.speed_kmh;
+        }
+        // Integrate distance using last-known speed across the interval —
+        // matches the live recorder's left-Riemann approach so recovered
+        // and live-finalised rides are computed the same way.
+        if (lastT > 0) {
+          const dtH = (s.elapsed_ms - lastT) / 3_600_000;
+          distanceM += lastSpeed * dtH * 1000;
+        }
+        lastT = s.elapsed_ms;
+        if (s.speed_kmh != null) lastSpeed = s.speed_kmh;
+      }
+
+      const lastElapsedMs = samples[samples.length - 1].elapsed_ms;
+      this.endRide(ride.id, {
+        endedAt: ride.started_at + lastElapsedMs,
+        durationMs: lastElapsedMs,
+        distanceM: Math.round(distanceM),
+        avgHr: hrCount > 0 ? hrSum / hrCount : undefined,
+        maxHr: hrMax > 0 ? hrMax : undefined,
+        avgPowerW: pwrCount > 0 ? pwrSum / pwrCount : undefined,
+        maxPowerW: pwrMax > 0 ? pwrMax : undefined,
+        avgCadence: cadCount > 0 ? cadSum / cadCount : undefined,
+        avgSpeed: spdCount > 0 ? spdSum / spdCount : undefined,
+        maxSpeed: spdMax > 0 ? spdMax : undefined,
+      });
+      console.log(
+        `[db] recovered orphan ride ${ride.id}: ${(lastElapsedMs / 1000).toFixed(1)}s, ${samples.length} samples`,
+      );
+    }
   }
 
   // ── Rides CRUD ──
 
   createRide(opts: CreateRideOpts): number {
     const stmt = this.db.prepare(`
-      INSERT INTO rides (started_at, route_id, route_name)
-      VALUES (?, ?, ?)
+      INSERT INTO rides (started_at, route_id, route_name, sensors)
+      VALUES (?, ?, ?, ?)
     `);
-    const result = stmt.run(opts.startedAt, opts.routeId ?? null, opts.routeName ?? null);
+    const sensorsJson = opts.sensors && opts.sensors.length > 0
+      ? JSON.stringify(opts.sensors)
+      : null;
+    const result = stmt.run(
+      opts.startedAt,
+      opts.routeId ?? null,
+      opts.routeName ?? null,
+      sensorsJson,
+    );
     return result.lastInsertRowid as number;
   }
 
@@ -133,7 +253,9 @@ export class RideDatabase {
         max_hr      = ?,
         max_power_w = ?,
         max_speed   = ?,
-        total_coins = ?
+        total_coins = ?,
+        total_laps  = ?,
+        zone_sustain_pct = ?
       WHERE id = ?
     `);
     stmt.run(
@@ -148,6 +270,8 @@ export class RideDatabase {
       summary.maxPowerW ?? null,
       summary.maxSpeed ?? null,
       summary.totalCoins ?? 0,
+      summary.totalLaps ?? 0,
+      summary.zoneSustainPct ?? null,
       rideId,
     );
   }
@@ -311,6 +435,15 @@ export class RideDatabase {
   // ── Helpers ──
 
   private mapRide(row: any): Ride {
+    let sensors: DetectedSensor[] | undefined;
+    if (row.sensors) {
+      try {
+        const parsed = JSON.parse(row.sensors);
+        if (Array.isArray(parsed) && parsed.length > 0) sensors = parsed;
+      } catch {
+        // Ignore corrupt rows; legacy rides simply have no sensor info.
+      }
+    }
     return {
       id: row.id,
       startedAt: row.started_at,
@@ -325,9 +458,12 @@ export class RideDatabase {
       maxPowerW: row.max_power_w ?? undefined,
       maxSpeed: row.max_speed ?? undefined,
       totalCoins: row.total_coins ?? 0,
+      totalLaps: row.total_laps ?? 0,
+      zoneSustainPct: row.zone_sustain_pct ?? undefined,
       routeId: row.route_id ?? undefined,
       routeName: row.route_name ?? undefined,
       notes: row.notes ?? undefined,
+      sensors,
     };
   }
 

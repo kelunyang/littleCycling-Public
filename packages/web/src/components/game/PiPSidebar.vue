@@ -44,6 +44,15 @@
       </div>
     </div>
 
+    <button
+      class="pip-sidebar__pause"
+      :class="{ 'pip-sidebar__pause--paused': gameStore.isPaused }"
+      @click="emit('pause')"
+    >
+      <font-awesome-icon :icon="gameStore.isPaused ? 'play' : 'pause'" />
+      {{ gameStore.isPaused ? 'RESUME' : 'PAUSE' }}
+    </button>
+
     <button class="pip-sidebar__stop" @click="emit('stop')">
       <font-awesome-icon icon="stop" />
       STOP
@@ -53,7 +62,11 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
-import { getHrZone } from '@littlecycling/shared';
+import {
+  getHrZone,
+  estimateVirtualSpeedFromPower,
+  estimateVirtualCadenceFromPower,
+} from '@littlecycling/shared';
 import { useGameStore } from '@/stores/gameStore';
 import { useSensorStore } from '@/stores/sensorStore';
 import { useSettingsStore } from '@/stores/settingsStore';
@@ -63,7 +76,7 @@ const props = defineProps<{
   distanceTraveled: number;
 }>();
 
-const emit = defineEmits<{ stop: [] }>();
+const emit = defineEmits<{ stop: []; pause: [] }>();
 
 const gameStore = useGameStore();
 const sensorStore = useSensorStore();
@@ -74,10 +87,17 @@ const ZONE_COLORS = ['var(--zone-1)', 'var(--zone-2)', 'var(--zone-3)', 'var(--z
 const hr = computed(() => sensorStore.hr?.heartRate ?? null);
 const speed = computed(() => {
   const v = sensorStore.sc?.speed;
-  return v != null ? v.toFixed(1) : null;
+  if (v != null) return v.toFixed(1);
+  if (sensorStore.pwr) return estimateVirtualSpeedFromPower(sensorStore.pwr.power).toFixed(1);
+  return null;
 });
 const power = computed(() => sensorStore.pwr?.power ?? null);
-const cadence = computed(() => sensorStore.sc?.cadence ?? null);
+const cadence = computed(() => {
+  const v = sensorStore.sc?.cadence;
+  if (v != null) return v;
+  if (sensorStore.pwr) return Math.round(estimateVirtualCadenceFromPower(sensorStore.pwr.power));
+  return null;
+});
 
 const currentZone = computed(() => {
   const heartRate = hr.value;
@@ -116,7 +136,7 @@ function formatDuration(ms: number): string {
   gap: 4px;
   padding: 8px 10px;
   background: rgba(5, 8, 16, 0.85);
-  border-left: 1px solid var(--hud-border);
+  border-left: 1.5px solid var(--hud-border);
   pointer-events: auto;
   box-sizing: border-box;
 }
@@ -204,26 +224,52 @@ function formatDuration(ms: number): string {
   transition: width 0.3s ease;
 }
 
-.pip-sidebar__stop {
+.pip-sidebar__stop,
+.pip-sidebar__pause {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
   padding: 6px 12px;
   margin-top: 4px;
-  background: rgba(255, 45, 107, 0.15);
-  color: var(--hud-magenta);
-  border: 1px solid rgba(255, 45, 107, 0.4);
   font-family: var(--font-display);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 2px;
   cursor: pointer;
   transition: background 0.2s;
+}
+
+.pip-sidebar__stop {
+  background: rgba(255, 45, 107, 0.15);
+  color: var(--hud-magenta);
+  border: 1.5px solid rgba(255, 45, 107, 0.4);
   text-shadow: 0 0 8px rgba(255, 45, 107, 0.5);
 }
 
 .pip-sidebar__stop:hover {
   background: rgba(255, 45, 107, 0.25);
+}
+
+.pip-sidebar__pause {
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--hud-cyan);
+  border: 1.5px solid rgba(var(--accent-rgb), 0.4);
+  text-shadow: 0 0 8px rgba(var(--accent-rgb), 0.5);
+}
+
+.pip-sidebar__pause:hover {
+  background: rgba(var(--accent-rgb), 0.22);
+}
+
+.pip-sidebar__pause--paused {
+  background: rgba(255, 215, 0, 0.18);
+  color: #ffd700;
+  border-color: rgba(255, 215, 0, 0.55);
+  text-shadow: 0 0 8px rgba(255, 215, 0, 0.55);
+}
+
+.pip-sidebar__pause--paused:hover {
+  background: rgba(255, 215, 0, 0.28);
 }
 </style>

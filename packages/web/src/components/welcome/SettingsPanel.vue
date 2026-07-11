@@ -457,7 +457,7 @@ async function generateAllVariants() {
   align-items: center;
   justify-content: space-between;
   padding: 16px 20px;
-  border-bottom: 1px solid var(--hud-border-bright);
+  border-bottom: 1.5px solid var(--hud-border-bright);
   position: relative;
 }
 
@@ -483,7 +483,7 @@ async function generateAllVariants() {
   color: var(--hud-cyan);
   text-transform: uppercase;
   letter-spacing: 2px;
-  text-shadow: 0 0 10px rgba(0,229,255,0.3);
+  text-shadow: 0 0 10px rgba(var(--accent-rgb), 0.3);
 }
 
 .settings-panel__header :deep(.el-button) {
@@ -503,14 +503,14 @@ async function generateAllVariants() {
 }
 
 fieldset {
-  border: 1px solid var(--hud-border);
+  border: 1.5px solid var(--hud-border);
   border-radius: 0;
   clip-path: var(--clip-panel-sm);
   padding: 12px 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  background: rgba(0,229,255,0.02);
+  background: rgba(var(--accent-rgb), 0.02);
 }
 
 legend {
@@ -553,11 +553,11 @@ label {
   text-transform: uppercase;
   color: var(--hud-cyan);
   border-color: var(--hud-border);
-  background: rgba(0, 229, 255, 0.05);
+  background: rgba(var(--accent-rgb), 0.05);
 }
 
 .tpl-btn:hover {
-  background: rgba(0, 229, 255, 0.15);
+  background: rgba(var(--accent-rgb), 0.15);
   border-color: var(--hud-cyan);
 }
 
@@ -566,7 +566,7 @@ label {
   flex-direction: column;
   gap: 8px;
   padding: 10px;
-  border: 1px solid var(--hud-border);
+  border: 1.5px solid var(--hud-border);
   margin-bottom: 8px;
 }
 

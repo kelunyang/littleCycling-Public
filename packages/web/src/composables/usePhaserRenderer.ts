@@ -22,6 +22,7 @@ import type { TerrainChunkManager2D } from '@/game/phaser/terrain-builder';
 import type { PhaserCoinLayer } from '@/game/phaser/phaser-coin-layer';
 import type { PhaserStyleStrategy } from '@/game/phaser/phaser-style-strategy';
 import type { CyclistSpriteUpdateFn } from '@/game/phaser/cyclist-sprite';
+import { detectPhaserZone, type ZoneType as PhaserZoneType } from '@/game/phaser/phaser-zone-detector';
 import { useSettingsStore } from '@/stores/settingsStore';
 
 /** Matches PX_PER_METER in phaser2d-scene.ts — inlined to avoid pulling in the full scene module. */
@@ -47,6 +48,11 @@ export function usePhaserRenderer() {
 
   let routePoints: RoutePoint[] = [];
   let cumulativeDists: number[] = [];
+
+  // Re-evaluate environment zone every N meters to drive glasses ambient effects.
+  const ZONE_CHECK_INTERVAL_M = 25;
+  let lastZoneDistM = -Infinity;
+  let lastZone: PhaserZoneType = 'open';
 
   async function init(opts: PhaserRendererInitOptions): Promise<void> {
     routePoints = opts.points;
@@ -86,6 +92,12 @@ export function usePhaserRenderer() {
 
     // Weather system
     weatherSystem = new WeatherSys(scene, styleStrategy);
+
+    // Bind route origin so weather can compute sun/moon position from real
+    // time + lat/lon (matches useTerrainRenderer.ts behavior).
+    if (routePoints.length > 0) {
+      weatherSystem.setLocation(routePoints[0].lat, routePoints[0].lon);
+    }
 
     // Cyclist sprite
     cyclistSprite = createCyclistSprite(scene, styleStrategy);
@@ -145,6 +157,19 @@ export function usePhaserRenderer() {
     // Pass water feature positions to scene for shimmer animation
     if (chunkManager) {
       gameInstance.scene.setWaterFeatures(chunkManager.getWaterFeatures());
+
+      // Zone detection — re-classify periodically to feed the glasses pipeline.
+      if (Math.abs(distanceM - lastZoneDistM) >= ZONE_CHECK_INTERVAL_M || lastZoneDistM < 0) {
+        lastZoneDistM = distanceM;
+        const nearby = chunkManager.getNearbyFeatures(distanceM);
+        if (nearby.length > 0) {
+          const zone = detectPhaserZone(distanceM, nearby);
+          if (zone !== lastZone) {
+            lastZone = zone;
+            gameInstance.scene.setEnvironmentZone(zone);
+          }
+        }
+      }
     }
   }
 
@@ -206,11 +231,28 @@ export function usePhaserRenderer() {
     if (gameInstance) {
       gameInstance.bridge.weather = opts.type;
       gameInstance.bridge.sunElevation = opts.sunElevation;
+      // Drive lens-mark weather and auto-lens via the scene.
+      gameInstance.scene.setMarksWeather(opts.type as 'sunny' | 'cloudy' | 'rainy' | 'snowy');
     }
+    // sunElevation/sunAzimuth here act as fallbacks; once setLocation has
+    // been called the weather system overrides them per-frame from real time.
     weatherSystem?.setState({
       type: opts.type,
       sunElevation: opts.sunElevation,
+      ...(opts.sunAzimuth !== undefined ? { sunAzimuth: opts.sunAzimuth } : {}),
     });
+  }
+
+  function setWind(speedKmh: number, directionDeg: number, gust = 1): void {
+    weatherSystem?.setWind({ speedKmh, directionDeg, gust });
+    if (gameInstance) {
+      gameInstance.scene.setWindMagnitude(Math.min(2, speedKmh / 30) * gust);
+    }
+  }
+
+  function triggerLightning(intensityMul = 1): void {
+    weatherSystem?.triggerLightning(intensityMul);
+    gameInstance?.scene.triggerLightningFlash();
   }
 
   function setCloudsEnabled(enabled: boolean): void {
@@ -254,22 +296,25 @@ export function usePhaserRenderer() {
     coinLayer?.clearCoins();
   }
 
-  // ── No-ops for Three.js-specific features ──
+  // ── Cycling-glasses bridge (Phaser PostFX pipeline + lens-marks) ──
 
   function triggerCoinGlow(): void {
-    // No glasses effect in 2D mode
+    gameInstance?.scene.triggerCoinGlow();
   }
 
-  function setGlassesLens(_lens: string): void {
-    // No glasses in 2D mode
+  function setGlassesLens(lens: string): void {
+    // gameStore.GlassesLens narrows to clear|dark|red|yellow|auto — pass through.
+    gameInstance?.scene.setLens(lens as 'clear' | 'dark' | 'red' | 'yellow' | 'auto');
   }
 
-  function updatePhysiology(_zone: number | null, _speed: number): void {
-    // No glasses physiology in 2D mode
+  function updatePhysiology(zone: number | null, speed: number): void {
+    gameInstance?.scene.updatePhysiology(zone, speed);
   }
 
   function addLensMark(_pos: { x: number; y: number }): void {
-    // No glasses in 2D mode
+    // Position is screen-space in the Three.js path; here we pick a random
+    // spot via the marks manager. Default to a generic dust mark.
+    gameInstance?.scene.addLensMark('dust');
   }
 
   function setCameraOptions(_opts: Record<string, any>): void {
@@ -341,6 +386,8 @@ export function usePhaserRenderer() {
     resize,
     setDarkened,
     setWeather,
+    setWind,
+    triggerLightning,
     setCloudsEnabled,
     triggerCoinGlow,
     setGlassesLens,

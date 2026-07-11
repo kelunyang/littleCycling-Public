@@ -119,7 +119,7 @@ onMounted(fetchRides);
 
 :deep(.el-collapse-item__header) {
   background: transparent;
-  border-bottom: 1px solid var(--hud-border);
+  border-bottom: 1.5px solid var(--hud-border);
   color: var(--hud-cyan);
   font-family: var(--font-display);
   font-size: 11px;
@@ -144,7 +144,7 @@ onMounted(fetchRides);
   max-height: 200px;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: rgba(0,229,255,0.3) transparent;
+  scrollbar-color: rgba(var(--accent-rgb), 0.3) transparent;
 }
 
 .ride-history__empty {
@@ -160,8 +160,8 @@ onMounted(fetchRides);
   align-items: center;
   justify-content: space-between;
   padding: 8px 10px;
-  background: rgba(0,229,255,0.02);
-  border: 1px solid var(--hud-border);
+  background: rgba(var(--accent-rgb), 0.02);
+  border: 1.5px solid var(--hud-border);
   clip-path: var(--clip-panel-sm);
   font-size: 11px;
 }
@@ -199,7 +199,7 @@ onMounted(fetchRides);
 }
 
 .ride-history__actions :deep(.el-button--primary) {
-  filter: drop-shadow(0 0 6px rgba(0,229,255,0.5));
+  filter: drop-shadow(0 0 6px rgba(var(--accent-rgb), 0.5));
   border-color: var(--hud-cyan);
 }
 </style>

@@ -47,7 +47,7 @@
             <span class="summary__label">
               <font-awesome-icon icon="coins" /> COINS
             </span>
-            <span class="summary__value summary__value--gold">{{ gameStore.coins }}</span>
+            <span class="summary__value summary__value--gold">{{ coins }}</span>
           </div>
           <div class="summary__stat">
             <span class="summary__label">
@@ -59,7 +59,7 @@
             <span class="summary__label">
               <font-awesome-icon icon="flag" /> LAPS
             </span>
-            <span class="summary__value">{{ gameStore.laps }}</span>
+            <span class="summary__value">{{ laps }}</span>
           </div>
           <div class="summary__stat">
             <span class="summary__label">
@@ -146,23 +146,45 @@ import { useRouter } from 'vue-router';
 import type { WorkoutSegment, Ride } from '@littlecycling/shared';
 import { workoutGrade, WORKOUT_PROFILES_MAP } from '@littlecycling/shared';
 import { useGameStore } from '@/stores/gameStore';
+import { useGameStateStore } from '@/stores/gameStateStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useComparisonStore } from '@/stores/comparisonStore';
 import { useRouteStore } from '@/stores/routeStore';
-import type { GameStats } from '@/composables/useGameLoop';
 import { renderRadarChart, type RadarData } from '@/composables/useRideCharts';
 
 const props = defineProps<{
-  elapsedMs: number;
-  distanceTraveled: number;
-  stats: GameStats;
   workoutSegments: WorkoutSegment[];
 }>();
 
 const router = useRouter();
 const gameStore = useGameStore();
+const gameStateStore = useGameStateStore();
 const settingsStore = useSettingsStore();
 const comparisonStore = useComparisonStore();
+
+// ── Server-authoritative summary (P7) ──
+// Every number displayed here comes from /api/live/stop (the same values
+// persisted to the ride record). Until that response lands (it arrives just
+// after the dialog opens), fall back to the live game_state mirrors — also
+// server-produced, so the numbers can only get more precise, never change
+// source.
+const summary = computed(() => gameStore.rideSummary);
+
+const coins = computed(() => summary.value?.totalCoins ?? gameStore.coins);
+const laps = computed(() => summary.value?.totalLaps ?? gameStore.laps);
+const elapsedMs = computed(() => summary.value?.durationMs ?? gameStateStore.elapsed);
+const distanceKm = computed(() =>
+  (((summary.value?.gameDistanceM ?? gameStateStore.cumulativeDistance) || 0) / 1000).toFixed(1),
+);
+
+/** Display-rounded stats, shaped like the old client GameStats. */
+const stats = computed(() => ({
+  avgHr: Math.round(summary.value?.avgHr ?? 0),
+  avgSpeed: Math.round((summary.value?.avgSpeed ?? 0) * 10) / 10,
+  avgPower: Math.round(summary.value?.avgPowerW ?? 0),
+  avgCadence: Math.round(summary.value?.avgCadence ?? 0),
+  zoneSustainPct: summary.value?.zoneSustainPct ?? 0,
+}));
 
 const routeStore = useRouteStore();
 const compareRide = computed(() => comparisonStore.compareRide);
@@ -214,15 +236,22 @@ function buildRadarData(
   };
 }
 
+// Redraw once the stop response lands (the dialog usually opens first).
+watch(summary, async () => {
+  if (gameStore.state !== 'ended') return;
+  await nextTick();
+  drawRadar();
+});
+
 function drawRadar() {
   if (!radarRef.value) return;
 
   const current = buildRadarData(
-    props.stats.avgPower,
-    props.stats.avgSpeed,
-    props.stats.avgHr,
-    props.stats.avgCadence,
-    props.stats.zoneSustainPct,
+    stats.value.avgPower,
+    stats.value.avgSpeed,
+    stats.value.avgHr,
+    stats.value.avgCadence,
+    stats.value.zoneSustainPct,
   );
 
   let pb: RadarData | null = null;
@@ -238,8 +267,6 @@ function drawRadar() {
 
   renderRadarChart(radarRef.value, current, pb, 320, 320);
 }
-
-const distanceKm = ((props.distanceTraveled / 1000) || 0).toFixed(1);
 
 const hasWorkout = computed(() => props.workoutSegments.length > 0);
 
@@ -285,8 +312,8 @@ function handleReturn() {
   --el-dialog-bg-color: rgba(10, 14, 26, 0.95);
   --el-dialog-border-radius: 0;
   max-width: 960px;
-  border: 1px solid var(--hud-border-bright);
-  box-shadow: var(--hud-glow-cyan), inset 0 0 60px rgba(0, 229, 255, 0.03);
+  border: 1.5px solid var(--hud-border-bright);
+  box-shadow: var(--hud-glow-cyan), inset 0 0 60px rgba(var(--accent-rgb), 0.03);
   backdrop-filter: blur(8px);
 }
 
@@ -319,7 +346,7 @@ function handleReturn() {
   font-size: 20px;
   font-weight: 800;
   color: var(--hud-cyan);
-  text-shadow: 0 0 20px rgba(0, 229, 255, 0.5);
+  text-shadow: 0 0 20px rgba(var(--accent-rgb), 0.5);
   letter-spacing: 4px;
   white-space: nowrap;
   margin: 0;
@@ -384,7 +411,7 @@ function handleReturn() {
 
 .summary__radar-dot--cyan {
   background: #00e5ff;
-  box-shadow: 0 0 6px rgba(0, 229, 255, 0.5);
+  box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.5);
 }
 
 .summary__radar-dot--gold {
@@ -423,8 +450,8 @@ function handleReturn() {
   flex-direction: column;
   gap: 4px;
   padding: 12px;
-  background: rgba(0, 229, 255, 0.04);
-  border: 1px solid var(--hud-border);
+  background: rgba(var(--accent-rgb), 0.04);
+  border: 1.5px solid var(--hud-border);
   clip-path: var(--clip-panel-sm);
 }
 
@@ -446,7 +473,7 @@ function handleReturn() {
   font-size: 18px;
   font-weight: 700;
   color: var(--hud-text-bright);
-  text-shadow: 0 0 8px rgba(0, 229, 255, 0.3);
+  text-shadow: 0 0 8px rgba(var(--accent-rgb), 0.3);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.5px;
 }
@@ -491,7 +518,7 @@ function handleReturn() {
   letter-spacing: 1.5px;
   margin-bottom: 10px;
   padding-bottom: 6px;
-  border-bottom: 1px solid var(--hud-border);
+  border-bottom: 1.5px solid var(--hud-border);
 }
 
 .summary__workout-grade {
@@ -499,7 +526,7 @@ function handleReturn() {
   font-size: 18px;
   font-weight: 800;
   color: var(--hud-text-bright);
-  text-shadow: 0 0 10px rgba(0, 229, 255, 0.5);
+  text-shadow: 0 0 10px rgba(var(--accent-rgb), 0.5);
 }
 
 .summary__workout-segments {
@@ -509,7 +536,7 @@ function handleReturn() {
   max-height: 160px;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: rgba(0, 229, 255, 0.3) transparent;
+  scrollbar-color: rgba(var(--accent-rgb), 0.3) transparent;
 }
 
 .summary__workout-seg {
@@ -518,8 +545,8 @@ function handleReturn() {
   gap: 8px;
   padding: 4px 8px;
   font-size: 11px;
-  background: rgba(0, 229, 255, 0.02);
-  border: 1px solid var(--hud-border);
+  background: rgba(var(--accent-rgb), 0.02);
+  border: 1.5px solid var(--hud-border);
 }
 
 .summary__workout-seg-color {
@@ -551,9 +578,9 @@ function handleReturn() {
   align-items: center;
   gap: 8px;
   padding: 12px 28px;
-  background: rgba(0, 229, 255, 0.1);
+  background: rgba(var(--accent-rgb), 0.1);
   color: var(--hud-cyan);
-  border: 1px solid var(--hud-border-bright);
+  border: 1.5px solid var(--hud-border-bright);
   clip-path: var(--clip-panel-sm);
   font-family: var(--font-display);
   font-size: 13px;
@@ -561,12 +588,12 @@ function handleReturn() {
   letter-spacing: 2px;
   cursor: pointer;
   transition: background 0.2s, box-shadow 0.2s;
-  text-shadow: 0 0 8px rgba(0, 229, 255, 0.4);
+  text-shadow: 0 0 8px rgba(var(--accent-rgb), 0.4);
   align-self: flex-end;
 }
 
 .summary__btn:hover {
-  background: rgba(0, 229, 255, 0.2);
+  background: rgba(var(--accent-rgb), 0.2);
   box-shadow: var(--hud-glow-cyan);
 }
 </style>

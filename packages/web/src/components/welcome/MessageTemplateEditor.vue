@@ -170,7 +170,7 @@ async function saveVariant(typeId: string): Promise<void> {
   align-items: center;
   justify-content: space-between;
   padding: 16px 20px;
-  border-bottom: 1px solid var(--hud-border-bright);
+  border-bottom: 1.5px solid var(--hud-border-bright);
   position: relative;
 }
 
@@ -195,7 +195,7 @@ async function saveVariant(typeId: string): Promise<void> {
   color: var(--hud-cyan);
   text-transform: uppercase;
   letter-spacing: 2px;
-  text-shadow: 0 0 10px rgba(0,229,255,0.3);
+  text-shadow: 0 0 10px rgba(var(--accent-rgb), 0.3);
 }
 
 .tpl-editor__header :deep(.el-button) {
@@ -221,7 +221,7 @@ async function saveVariant(typeId: string): Promise<void> {
 }
 
 .tpl-editor__hint code {
-  background: rgba(0, 229, 255, 0.1);
+  background: rgba(var(--accent-rgb), 0.1);
   padding: 1px 4px;
   border-radius: 2px;
   color: var(--hud-cyan);
@@ -229,10 +229,10 @@ async function saveVariant(typeId: string): Promise<void> {
 }
 
 .tpl-card {
-  border: 1px solid var(--hud-border);
+  border: 1.5px solid var(--hud-border);
   clip-path: var(--clip-panel-sm);
   padding: 12px 16px;
-  background: rgba(0,229,255,0.02);
+  background: rgba(var(--accent-rgb), 0.02);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -268,7 +268,7 @@ async function saveVariant(typeId: string): Promise<void> {
 .tpl-card__placeholders {
   font-size: 10px;
   color: var(--hud-yellow, #fcee09);
-  font-family: monospace;
+  font-family: 'Consolas', 'Courier New', 'Noto Sans TC', monospace;
 }
 
 .tpl-card__variants {

@@ -38,6 +38,15 @@ export interface AppConfig {
   sound: {
     enabled: boolean;  // master sound on/off toggle
   };
+  recording: {
+    /**
+     * Persist raw sensor frames to data/sessions/ride-{id}-{ts}.jsonl.
+     * Required if you ever want to replay or repair a ride from raw
+     * frames (e.g. after fixing a parser bug). Default on; turn off to
+     * save disk if you don't need the audit trail.
+     */
+    persistRawFrames: boolean;
+  };
   llm: LlmProvider[];
   debug: boolean; // enable verbose console logging for terrain, MVT, weather, etc.
 }
@@ -67,6 +76,9 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   sound: {
     enabled: true,
+  },
+  recording: {
+    persistRawFrames: true,
   },
   llm: [],
   debug: false,

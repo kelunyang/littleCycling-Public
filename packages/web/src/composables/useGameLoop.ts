@@ -1,25 +1,16 @@
 import { ref, onUnmounted } from 'vue';
-import { COIN_TICK_INTERVAL, getHrZone } from '@littlecycling/shared';
+import {
+  estimateVirtualSpeedFromPower,
+  estimateVirtualCadenceFromPower,
+} from '@littlecycling/shared';
 import { useGameStore } from '@/stores/gameStore';
 import { useSensorStore } from '@/stores/sensorStore';
-import { useSettingsStore } from '@/stores/settingsStore';
+import { useGameStateStore } from '@/stores/gameStateStore';
 
 interface GameLoopDeps {
   ballTick: (dtMs: number) => void;
   updateBallVisual: () => void;
   updateCamera: () => void;
-  coinTick: () => void;
-}
-
-export interface GameStats {
-  avgHr: number;
-  avgSpeed: number;
-  avgPower: number;
-  maxHr: number;
-  maxSpeed: number;
-  maxPower: number;
-  avgCadence: number;
-  zoneSustainPct: number; // Z2+Z3 time as percentage of total (0-100)
 }
 
 export interface TimeSeriesSample {
@@ -33,47 +24,96 @@ export interface TimeSeriesSample {
 /** Interval between time-series samples (ms) */
 const SAMPLE_INTERVAL = 1000;
 
+/**
+ * Render loop: rAF (or ~10fps setTimeout when the tab is hidden) driving the
+ * server-frame interpolation + renderer updates, plus DISPLAY-ONLY sampling
+ * (live max/min chips, the pinned HUD chart's time series, FPS counter).
+ *
+ * Ride statistics are NOT computed here (P7): everything that persists —
+ * averages, maxima, zone sustain, coins, laps — is accumulated by the server
+ * simulation and returned by /api/live/stop. Per-frame sampling was the bug
+ * this migration killed (background tabs sample 6× less than foreground),
+ * so nothing sampled in this loop may ever be saved.
+ */
 export function useGameLoop(deps: GameLoopDeps) {
   const gameStore = useGameStore();
   const sensorStore = useSensorStore();
-  const settingsStore = useSettingsStore();
+  const gameStateStore = useGameStateStore();
 
   const elapsedMs = ref(0);
   const isRunning = ref(false);
-  const stats = ref<GameStats>({
-    avgHr: 0, avgSpeed: 0, avgPower: 0,
-    maxHr: 0, maxSpeed: 0, maxPower: 0,
-    avgCadence: 0, zoneSustainPct: 0,
-  });
 
-  // Time-series data for pinned charts
+  // Time-series data for pinned charts (display-only)
   const timeSeries = ref<TimeSeriesSample[]>([]);
   let lastSampleMs = 0;
 
   // FPS counter (updated ~1/sec)
   const fps = ref(0);
+  const fpsMax = ref(0);
+  const fpsMin = ref<number | null>(null);
   let fpsFrames = 0;
   let fpsLastTime = 0;
 
+  // Live max/min refs exposed to HUD. MIN stays null until we see a sample > 0
+  // (so a disconnected sensor reading 0 doesn't lock MIN to 0).
+  const hrMax = ref(0);
+  const hrMin = ref<number | null>(null);
+  const speedMax = ref(0);
+  const speedMin = ref<number | null>(null);
+  const cadenceMax = ref(0);
+  const cadenceMin = ref<number | null>(null);
+  const powerMax = ref(0);
+  const powerMin = ref<number | null>(null);
+
   let rafId: number | null = null;
   let stId: ReturnType<typeof setTimeout> | null = null;
-  let coinTimerId: ReturnType<typeof setInterval> | null = null;
   let lastTime = 0;
   let tabHidden = false;
 
-  // Running averages
-  let sumHr = 0, sumSpeed = 0, sumPower = 0, sampleCount = 0;
-  let maxHr = 0, maxSpeed = 0, maxPower = 0;
-  let sumCadence = 0, cadenceCount = 0;
-  let zoneSustainTicks = 0, hrTotalTicks = 0;
+  // Authoritative elapsed time. Mirrors the server's wall-clock `elapsed`
+  // (delivered on every sensor frame), interpolated with performance.now()
+  // between frames so the timer ticks smoothly at display rate. This is the
+  // SAME clock the server writes to the ride record, so the on-screen timer
+  // equals the saved durationMs — and it's immune to rAF throttling, GPU
+  // stutter, PiP, and backgrounding (which previously deflated a 56-min ride
+  // to 25 min). Falls back to a local wall-clock when no recording is active
+  // (free-roam / recording unavailable).
+  function computeElapsedMs(nowPerf: number): number {
+    const anchor = sensorStore.serverElapsedMs;
+    if (anchor != null) {
+      return anchor + (nowPerf - sensorStore.serverElapsedPerfNow);
+    }
+    return gameStore.startedAt > 0 ? Date.now() - gameStore.startedAt : elapsedMs.value;
+  }
 
   function frame(now: number) {
     if (!isRunning.value) return;
 
-    const dt = lastTime === 0 ? 16 : Math.min(now - lastTime, 100); // cap at 100ms
+    if (gameStore.isPaused) {
+      // Physics freezes with the server sim while paused, but RENDERING must
+      // keep going: the start/pause overlays are translucent, and without
+      // per-frame renders they'd sit on whatever half-initialized frame the
+      // canvas last drew (post-FX garbage on first mount). The ball stays
+      // put on its own — the paused server stops advancing cumulativeDistance,
+      // so interpolation just re-samples the same spot. The clock also keeps
+      // running (方案甲: paused time is not deducted, matching the record).
+      elapsedMs.value = computeElapsedMs(now);
+      const dt = lastTime === 0 ? 16 : Math.min(now - lastTime, 100);
+      lastTime = now;
+      deps.ballTick(dt);
+      if (!tabHidden) {
+        deps.updateBallVisual();
+        deps.updateCamera();
+      }
+      scheduleNext();
+      return;
+    }
+
+    // dt drives interpolation stepping only — timekeeping doesn't depend on it.
+    const dt = lastTime === 0 ? 16 : Math.min(now - lastTime, 100);
     lastTime = now;
 
-    elapsedMs.value += dt;
+    elapsedMs.value = computeElapsedMs(now);
 
     // FPS tracking
     fpsFrames++;
@@ -81,9 +121,14 @@ export function useGameLoop(deps: GameLoopDeps) {
       fps.value = fpsFrames;
       fpsFrames = 0;
       fpsLastTime = now;
+      if (fps.value > fpsMax.value) fpsMax.value = fps.value;
+      // Skip first ~2s so a partially-counted opening second doesn't lock MIN low.
+      if (elapsedMs.value >= 2000) {
+        if (fpsMin.value == null || fps.value < fpsMin.value) fpsMin.value = fps.value;
+      }
     }
 
-    // Physics (always runs)
+    // Server-frame interpolation (always runs)
     deps.ballTick(dt);
 
     // Visual updates only when tab is visible (skip in background to save CPU)
@@ -92,33 +137,32 @@ export function useGameLoop(deps: GameLoopDeps) {
       deps.updateCamera();
     }
 
-    // Stats sampling
-    sampleCount++;
+    // Display-only sampling: live max/min chips + pinned-chart series. Never
+    // persisted — the server summary is the record of truth.
     const hr = sensorStore.hr?.heartRate ?? 0;
-    const speed = sensorStore.sc?.speed ?? 0;
-    const power = sensorStore.pwr?.power ?? 0;
+    // Power: real meter first; otherwise the server's trainer-curve estimate
+    // (game_state.powerW) so speed-only rigs still get a live power series.
+    const power = sensorStore.pwr?.power ?? gameStateStore.powerW;
+    // Speed: real wheel-speed sensor wins; otherwise derive from power so
+    // power-only setups still show a non-zero speed.
+    const speed = sensorStore.sc?.speed
+      ?? (sensorStore.pwr ? estimateVirtualSpeedFromPower(power) : 0);
+    // Cadence: real sensor wins; otherwise derive from power.
+    const cadence = sensorStore.sc?.cadence
+      ?? (sensorStore.pwr ? estimateVirtualCadenceFromPower(power) : 0);
 
-    sumHr += hr;
-    sumSpeed += speed;
-    sumPower += power;
-    if (hr > maxHr) maxHr = hr;
-    if (speed > maxSpeed) maxSpeed = speed;
-    if (power > maxPower) maxPower = power;
+    if (hr > hrMax.value) hrMax.value = hr;
+    if (hr > 0 && (hrMin.value == null || hr < hrMin.value)) hrMin.value = hr;
 
-    // Cadence accumulation
-    const cadence = sensorStore.sc?.cadence ?? 0;
+    if (speed > speedMax.value) speedMax.value = speed;
+    if (speed > 0 && (speedMin.value == null || speed < speedMin.value)) speedMin.value = speed;
+
+    if (power > powerMax.value) powerMax.value = power;
+    if (power > 0 && (powerMin.value == null || power < powerMin.value)) powerMin.value = power;
+
     if (cadence > 0) {
-      sumCadence += cadence;
-      cadenceCount++;
-    }
-
-    // Zone sustain tracking (Z2+Z3)
-    if (hr > 0) {
-      hrTotalTicks++;
-      const zone = getHrZone(hr, settingsStore.config.training.hrMax);
-      if (zone && (zone.zone === 2 || zone.zone === 3)) {
-        zoneSustainTicks++;
-      }
+      if (cadence > cadenceMax.value) cadenceMax.value = cadence;
+      if (cadenceMin.value == null || cadence < cadenceMin.value) cadenceMin.value = cadence;
     }
 
     // Time-series sampling (~1 sample/second)
@@ -128,7 +172,7 @@ export function useGameLoop(deps: GameLoopDeps) {
         t: Math.round(elapsedMs.value / 1000),
         hr,
         speed,
-        cadence: sensorStore.sc?.cadence ?? 0,
+        cadence,
         power,
       });
     }
@@ -180,19 +224,21 @@ export function useGameLoop(deps: GameLoopDeps) {
     isRunning.value = true;
     lastTime = 0;
     lastSampleMs = 0;
+    elapsedMs.value = 0;
     fpsFrames = 0;
     fpsLastTime = 0;
     fps.value = 0;
+    fpsMax.value = 0;
+    fpsMin.value = null;
+    hrMax.value = 0;     hrMin.value = null;
+    speedMax.value = 0;  speedMin.value = null;
+    cadenceMax.value = 0; cadenceMin.value = null;
+    powerMax.value = 0;  powerMin.value = null;
     timeSeries.value = [];
-    sumHr = sumSpeed = sumPower = sampleCount = 0;
-    maxHr = maxSpeed = maxPower = 0;
-    sumCadence = cadenceCount = 0;
-    zoneSustainTicks = hrTotalTicks = 0;
 
     tabHidden = document.hidden;
     document.addEventListener('visibilitychange', onVisibilityChange);
     scheduleNext();
-    coinTimerId = setInterval(() => deps.coinTick(), COIN_TICK_INTERVAL);
   }
 
   function stop() {
@@ -207,31 +253,19 @@ export function useGameLoop(deps: GameLoopDeps) {
       clearTimeout(stId);
       stId = null;
     }
-    if (coinTimerId !== null) {
-      clearInterval(coinTimerId);
-      coinTimerId = null;
-    }
-
-    // Finalize stats
-    if (sampleCount > 0) {
-      stats.value = {
-        avgHr: Math.round(sumHr / sampleCount),
-        avgSpeed: Math.round((sumSpeed / sampleCount) * 10) / 10,
-        avgPower: Math.round(sumPower / sampleCount),
-        maxHr,
-        maxSpeed: Math.round(maxSpeed * 10) / 10,
-        maxPower,
-        avgCadence: cadenceCount > 0 ? Math.round(sumCadence / cadenceCount) : 0,
-        zoneSustainPct: hrTotalTicks > 0
-          ? Math.round((zoneSustainTicks / hrTotalTicks) * 1000) / 10
-          : 0,
-      };
-    }
   }
 
   onUnmounted(() => {
     stop();
   });
 
-  return { elapsedMs, isRunning, stats, timeSeries, fps, start, stop };
+  return {
+    elapsedMs, isRunning, timeSeries,
+    fps, fpsMax, fpsMin,
+    hrMax, hrMin,
+    speedMax, speedMin,
+    cadenceMax, cadenceMin,
+    powerMax, powerMin,
+    start, stop,
+  };
 }

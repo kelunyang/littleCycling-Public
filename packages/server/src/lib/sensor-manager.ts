@@ -4,10 +4,10 @@
  * and await startScanner() — the correct incyclist-ant-plus API pattern.
  */
 
-import { HeartRateSensor, SpeedCadenceSensor, SpeedSensor, CadenceSensor } from 'incyclist-ant-plus';
-import type { HeartRateSensorState, SpeedCadenceSensorState, SpeedSensorState, CadenceSensorState } from 'incyclist-ant-plus';
+import { HeartRateSensor, SpeedCadenceSensor, SpeedSensor, CadenceSensor, BicyclePowerSensor } from 'incyclist-ant-plus';
+import type { HeartRateSensorState, SpeedCadenceSensorState, SpeedSensorState, CadenceSensorState, BicyclePowerSensorState } from 'incyclist-ant-plus';
 
-export type SensorProfile = 'HR' | 'SC' | 'SPD' | 'CAD';
+export type SensorProfile = 'HR' | 'SC' | 'SPD' | 'CAD' | 'PWR';
 
 export interface DetectedSensor {
   profile: string;
@@ -17,7 +17,7 @@ export interface DetectedSensor {
 export interface SensorDataEvent {
   profile: string;
   deviceId: number;
-  data: HeartRateSensorState | SpeedCadenceSensorState | SpeedSensorState | CadenceSensorState;
+  data: HeartRateSensorState | SpeedCadenceSensorState | SpeedSensorState | CadenceSensorState | BicyclePowerSensorState;
 }
 
 export interface SensorManagerOptions {
@@ -69,8 +69,10 @@ export class SensorManager {
 
     this.channel.attach(new CadenceSensor());
 
+    this.channel.attach(new BicyclePowerSensor());
+
     if (this.debug) {
-      console.log(`      [debug] Attached 4 sensor profiles to channel ${this.channel.channelNo}`);
+      console.log(`      [debug] Attached 5 sensor profiles to channel ${this.channel.channelNo}`);
     }
 
     // Listen for sensor detection — channel emits 'detected' (not 'detect')

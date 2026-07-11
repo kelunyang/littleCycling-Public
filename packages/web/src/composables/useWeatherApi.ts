@@ -13,6 +13,8 @@ interface OpenMeteoCurrentWeather {
   snowfall: number;          // cm
   temperature_2m: number;    // °C
   weather_code: number;
+  wind_speed_10m: number;    // km/h (Open-Meteo default unit)
+  wind_direction_10m: number; // degrees, meteorological
 }
 
 interface OpenMeteoResponse {
@@ -55,6 +57,9 @@ export function useWeatherApi() {
   const weatherType = ref<WeatherType>('sunny');
   const temperature = ref<number>(20);
   const cloudCover = ref<number>(0);
+  const windSpeedKmh = ref<number>(0);
+  const windDirectionDeg = ref<number>(0);
+  const weatherCode = ref<number>(0);
   let intervalId: ReturnType<typeof setInterval> | null = null;
 
   /**
@@ -63,7 +68,7 @@ export function useWeatherApi() {
    */
   async function fetchWeather(lat: number, lon: number): Promise<WeatherType> {
     try {
-      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=cloud_cover,precipitation,snowfall,temperature_2m,weather_code`;
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=cloud_cover,precipitation,snowfall,temperature_2m,weather_code,wind_speed_10m,wind_direction_10m`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`Weather API ${res.status}`);
 
@@ -72,6 +77,9 @@ export function useWeatherApi() {
 
       temperature.value = c.temperature_2m;
       cloudCover.value = c.cloud_cover;
+      windSpeedKmh.value = c.wind_speed_10m ?? 0;
+      windDirectionDeg.value = c.wind_direction_10m ?? 0;
+      weatherCode.value = c.weather_code ?? 0;
 
       const type = classifyWeather(c);
       weatherType.value = type;
@@ -79,6 +87,7 @@ export function useWeatherApi() {
         debugLog('weather', `${lat.toFixed(2)},${lon.toFixed(2)}: ${type}`, {
           cloud: c.cloud_cover, precip: c.precipitation,
           snow: c.snowfall, temp: c.temperature_2m, code: c.weather_code,
+          wind: c.wind_speed_10m, windDir: c.wind_direction_10m,
         });
       }
       return type;
@@ -120,6 +129,9 @@ export function useWeatherApi() {
     weatherType,
     temperature,
     cloudCover,
+    windSpeedKmh,
+    windDirectionDeg,
+    weatherCode,
     fetchWeather,
     startPolling,
     stopPolling,

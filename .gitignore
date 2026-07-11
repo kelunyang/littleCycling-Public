@@ -1,8 +1,10 @@
 node_modules/
 dist/
-recordings/*.jsonl
-!recordings/.gitkeep
+**/recordings/*
+!**/recordings/.gitkeep
 data/*.jsonl
+# data/sessions/ 刻意不 ignore：私有 repo 負責在機器間傳遞騎乘紀錄,
+# 個資過濾發生在 publish-public.sh(同步到公開 repo 前剝除)
 data/*.db
 data/*.db-shm
 data/*.db-wal
@@ -11,9 +13,12 @@ data/routes/*.json
 !data/routes/.gitkeep
 data/plans/*.json
 !data/plans/.gitkeep
+data/eurovelo-cache/
 Caddyfile
 caddy.exe
 
 # Prevent accidental .js commits in TS source
 packages/*/src/**/*.js
 packages/*/src/**/*.js.map
+.wsl-debug/
+.claude/

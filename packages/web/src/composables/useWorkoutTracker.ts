@@ -17,6 +17,10 @@ export interface WorkoutTrackerReturn {
 export function useWorkoutTracker(
   workoutSegments: Ref<WorkoutSegment[]>,
   elapsedMs: Ref<number>,
+  /** Effective watts (gameStateStore.powerW): real PWR meter when present,
+   *  otherwise the server's trainer-curve estimate. NEVER pass speed here —
+   *  comparing km/h against a watt target made on-target nearly impossible
+   *  (the historic bug this signature guards against). */
   currentPower: Ref<number>,
   currentHr?: Ref<number>,
 ): WorkoutTrackerReturn {

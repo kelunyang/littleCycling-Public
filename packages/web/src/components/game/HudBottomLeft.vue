@@ -88,7 +88,7 @@ function formatDuration(ms: number): string {
   clip-path: var(--clip-panel-sm);
   padding: 10px 14px;
   min-width: 220px;
-  border: 1px solid var(--hud-border);
+  border: 1.5px solid var(--hud-border);
 }
 
 
@@ -103,7 +103,7 @@ function formatDuration(ms: number): string {
   font-size: 13px;
   font-weight: 600;
   color: var(--hud-text-bright);
-  text-shadow: 0 0 6px rgba(0, 229, 255, 0.3);
+  text-shadow: 0 0 6px rgba(var(--accent-rgb), 0.3);
   font-variant-numeric: tabular-nums;
   letter-spacing: 1px;
 }
@@ -145,7 +145,7 @@ function formatDuration(ms: number): string {
   padding: 6px 14px;
   background: var(--hud-bg);
   clip-path: var(--clip-panel-sm);
-  border: 1px solid var(--hud-border);
+  border: 1.5px solid var(--hud-border);
   font-size: 12px;
   color: var(--hud-cyan);
 }
@@ -163,6 +163,6 @@ function formatDuration(ms: number): string {
   font-weight: 700;
   font-size: 14px;
   color: var(--hud-text-bright);
-  text-shadow: 0 0 6px rgba(0, 229, 255, 0.3);
+  text-shadow: 0 0 6px rgba(var(--accent-rgb), 0.3);
 }
 </style>

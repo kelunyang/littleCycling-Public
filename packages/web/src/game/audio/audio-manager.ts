@@ -129,11 +129,25 @@ export class AudioManager {
     this.ambient?.setWindSpeed(speedKmh);
   }
 
+  /** Environmental (weather-driven) wind, separate from speed-driven swoosh. */
+  updateAmbientWind(speedKmh: number): void {
+    if (!this._enabled || !this._isThreeJs) return;
+    this.ensureContext();
+    this.ambient?.setAmbientWind(speedKmh);
+  }
+
   setRain(on: boolean): void {
     if (!this._enabled && on) return;
     if (!this._isThreeJs) return;
     this.ensureContext();
     this.ambient?.setRain(on);
+  }
+
+  /** One-shot thunder rumble. distance 0..1 (0 = close/loud, 1 = far). */
+  playThunder(distance: number): void {
+    if (!this._enabled || !this._isThreeJs) return;
+    this.ensureContext();
+    this.ambient?.playThunder(distance);
   }
 
   /** Clean up all audio resources. */

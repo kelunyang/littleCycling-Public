@@ -1,236 +1,271 @@
 /**
- * EuroVelo catalog — fetches route/stage metadata from eurovelo.com,
- * provides GPX download URLs for each stage.
+ * EuroVelo catalog — fetches the full route GPX from eurovelo.com,
+ * parses stage list out of <trk><name> entries, and caches on disk
+ * with HTTP If-Modified-Since for incremental refresh.
  *
- * Data license: ODbL (Open Database License)
- * Attribution: "Contains information from EuroVelo GPX tracks, eurovelo.com, ODbL"
+ * Data license: ODbL — Open Database License
+ * Source: https://en.eurovelo.com (released as open data 2024-10-09)
  *
- * GPX download: https://en.eurovelo.com/route/get-gpx/{gpxId}
+ * GPX endpoint: GET https://en.eurovelo.com/route/get-gpx/{gpxId}
+ *   Returns a single GPX file containing one <trk> per stage,
+ *   each <name> formatted as "NN: Place A – Place B (Status Label)",
+ *   e.g. "(Certified)", "(Developed + Signed)", "(Undeveloped / Unknown)".
  */
 
-import type { RouteCatalog, CatalogRace, CatalogStage } from '@littlecycling/shared';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { DOMParser as LinkedomDOMParser } from 'linkedom';
+import {
+  calcRouteDistance,
+  calcElevationGain,
+} from '@littlecycling/shared';
+import type {
+  CatalogRace,
+  CatalogStage,
+  EuroVeloStageStatus,
+  RouteCatalog,
+  RoutePoint,
+} from '@littlecycling/shared';
+
+if (typeof globalThis.DOMParser === 'undefined') {
+  (globalThis as Record<string, unknown>).DOMParser = LinkedomDOMParser;
+}
 
 const BASE_URL = 'https://en.eurovelo.com';
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-const USER_AGENT = 'littleCycling/0.1 (personal cycling game)';
+const USER_AGENT = 'littleCycling/0.1 (+https://github.com/kelunyang/littleCycling)';
+const ATTRIBUTION =
+  'Contains information from EuroVelo GPX tracks (eurovelo.com), licensed under ODbL';
 
-/** Known EuroVelo routes. */
-const EUROVELO_ROUTES: { id: string; evNum: number; name: string }[] = [
-  { id: 'ev1',  evNum: 1,  name: 'Atlantic Coast Route' },
-  { id: 'ev2',  evNum: 2,  name: 'Capitals Route' },
-  { id: 'ev3',  evNum: 3,  name: 'Pilgrims Route' },
-  { id: 'ev4',  evNum: 4,  name: 'Central Europe Route' },
-  { id: 'ev5',  evNum: 5,  name: 'Via Romea Francigena' },
-  { id: 'ev6',  evNum: 6,  name: 'Atlantic – Black Sea' },
-  { id: 'ev7',  evNum: 7,  name: 'Sun Route' },
-  { id: 'ev8',  evNum: 8,  name: 'Mediterranean Route' },
-  { id: 'ev9',  evNum: 9,  name: 'Baltic – Adriatic' },
-  { id: 'ev10', evNum: 10, name: 'Baltic Sea Cycle Route' },
-  { id: 'ev11', evNum: 11, name: 'East Europe Route' },
-  { id: 'ev12', evNum: 12, name: 'North Sea Cycle Route' },
-  { id: 'ev13', evNum: 13, name: 'Iron Curtain Trail' },
-  { id: 'ev14', evNum: 14, name: 'Waters of Central Europe' },
-  { id: 'ev15', evNum: 15, name: 'Rhine Cycle Route' },
-  { id: 'ev17', evNum: 17, name: 'Rhone Cycle Route' },
-  { id: 'ev19', evNum: 19, name: 'Meuse Cycle Route' },
+interface RouteConfig {
+  id: string;
+  evNum: number;
+  gpxId: number;
+  name: string;
+}
+
+/** EuroVelo route → gpxId mapping (verified 2026-05 by probing each /evN page). */
+const ROUTES: RouteConfig[] = [
+  { id: 'ev1',  evNum: 1,  gpxId: 2,   name: 'Atlantic Coast Route' },
+  { id: 'ev2',  evNum: 2,  gpxId: 25,  name: 'Capitals Route' },
+  { id: 'ev3',  evNum: 3,  gpxId: 26,  name: 'Pilgrims Route' },
+  { id: 'ev4',  evNum: 4,  gpxId: 27,  name: 'Central Europe Route' },
+  { id: 'ev5',  evNum: 5,  gpxId: 28,  name: 'Via Romea Francigena' },
+  { id: 'ev6',  evNum: 6,  gpxId: 29,  name: 'Atlantic – Black Sea' },
+  { id: 'ev7',  evNum: 7,  gpxId: 30,  name: 'Sun Route' },
+  { id: 'ev8',  evNum: 8,  gpxId: 31,  name: 'Mediterranean Route' },
+  { id: 'ev9',  evNum: 9,  gpxId: 32,  name: 'Baltic – Adriatic' },
+  { id: 'ev10', evNum: 10, gpxId: 33,  name: 'Baltic Sea Cycle Route' },
+  { id: 'ev11', evNum: 11, gpxId: 34,  name: 'East Europe Route' },
+  { id: 'ev12', evNum: 12, gpxId: 35,  name: 'North Sea Cycle Route' },
+  { id: 'ev13', evNum: 13, gpxId: 1,   name: 'Iron Curtain Trail' },
+  { id: 'ev14', evNum: 14, gpxId: 512, name: 'Waters of Central Europe' },
+  { id: 'ev15', evNum: 15, gpxId: 36,  name: 'Rhine Cycle Route' },
+  { id: 'ev17', evNum: 17, gpxId: 37,  name: 'Rhone Cycle Route' },
+  { id: 'ev19', evNum: 19, gpxId: 135, name: 'Meuse Cycle Route' },
 ];
 
-interface CacheEntry {
-  catalog: RouteCatalog;
+interface RouteCacheEntry {
+  gpxId: number;
+  lastModified?: string;
   fetchedAt: number;
+  stages: CatalogStage[];
 }
 
-interface ParsedStage {
-  name: string;
-  slug: string;
+// Bumped to 2 when EuroVelo changed stage-status labels (2026-07):
+// version-1 caches were parsed with the old regex and hold empty stage
+// lists that a 304 revalidation would otherwise keep alive forever.
+const MANIFEST_VERSION = 2;
+
+interface Manifest {
+  version: typeof MANIFEST_VERSION;
+  routes: Record<string, RouteCacheEntry>;
 }
 
-export class EuroveloCatalog {
-  private cache: CacheEntry | null = null;
+export class EuroVeloCatalog {
+  private cacheDir: string;
+  private manifestPath: string;
+  private manifest: Manifest;
 
-  /** Get catalog (from cache if fresh, otherwise scrape). */
-  async getCatalog(): Promise<RouteCatalog> {
-    if (this.cache && Date.now() - this.cache.fetchedAt < CACHE_TTL_MS) {
-      return this.cache.catalog;
-    }
-    const catalog = await this.fetchAll();
-    this.cache = { catalog, fetchedAt: Date.now() };
-    return catalog;
+  constructor(dataDir: string) {
+    this.cacheDir = join(dataDir, 'eurovelo-cache');
+    mkdirSync(this.cacheDir, { recursive: true });
+    this.manifestPath = join(this.cacheDir, 'manifest.json');
+    this.manifest = this.loadManifest();
   }
 
-  /** Force refresh, bypassing cache. */
-  async refresh(): Promise<RouteCatalog> {
-    this.cache = null;
-    return this.getCatalog();
-  }
-
-  /** Find a stage in the cached catalog. */
-  async findStage(raceId: string, stageNum: number): Promise<{ race: CatalogRace; stage: CatalogStage } | null> {
-    const catalog = await this.getCatalog();
-    const race = catalog.races.find(r => r.id === raceId);
-    if (!race) return null;
-    const stage = race.stages.find(s => s.stage === stageNum);
-    if (!stage) return null;
-    return { race, stage };
-  }
-
-  /** Download GPX content for a given gpxId. */
-  async downloadGpx(gpxId: number): Promise<string> {
-    const url = `${BASE_URL}/route/get-gpx/${gpxId}`;
-    const res = await fetch(url, {
-      headers: { 'User-Agent': USER_AGENT },
-    });
-    if (!res.ok) {
-      throw new Error(`Failed to download GPX (gpxId=${gpxId}): HTTP ${res.status}`);
-    }
-    return res.text();
-  }
-
-  // ── Internal ──
-
-  private async fetchAll(): Promise<RouteCatalog> {
-    const races: CatalogRace[] = [];
-
-    // Fetch all routes in parallel (but limit concurrency to avoid hammering)
-    const results = await Promise.allSettled(
-      EUROVELO_ROUTES.map(cfg => this.fetchRoute(cfg)),
-    );
-
-    for (const result of results) {
-      if (result.status === 'fulfilled' && result.value.stages.length > 0) {
-        races.push(result.value);
-      } else if (result.status === 'rejected') {
-        console.error(`[eurovelo] Failed to fetch route:`, result.reason);
-      }
-    }
-
-    return { updatedAt: Date.now(), races };
-  }
-
-  private async fetchRoute(cfg: { id: string; evNum: number; name: string }): Promise<CatalogRace> {
-    const pageUrl = `${BASE_URL}/ev${cfg.evNum}`;
-    console.log(`[eurovelo] Fetching ${pageUrl}`);
-
-    const res = await fetch(pageUrl, {
-      headers: { 'User-Agent': USER_AGENT },
-    });
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status} for ${pageUrl}`);
-    }
-
-    const html = await res.text();
-    const stageLinks = this.parseRoutePageStages(html, cfg.evNum);
-
-    if (stageLinks.length === 0) {
-      console.log(`[eurovelo] No stages found for EV${cfg.evNum}`);
-      return { id: cfg.id, name: `EuroVelo ${cfg.evNum} — ${cfg.name}`, stages: [] };
-    }
-
-    // Fetch each stage page to get gpxId (in parallel)
-    const stageResults = await Promise.allSettled(
-      stageLinks.map((sl, idx) => this.fetchStagePage(cfg.evNum, sl, idx + 1)),
-    );
-
-    const stages: CatalogStage[] = [];
-    for (const result of stageResults) {
-      if (result.status === 'fulfilled' && result.value) {
-        stages.push(result.value);
-      }
-    }
-
+  /** List all 17 routes with their cached stage list (empty if not yet fetched). */
+  getCatalog(): RouteCatalog {
     return {
-      id: cfg.id,
-      name: `EuroVelo ${cfg.evNum} — ${cfg.name}`,
-      stages,
+      updatedAt: Date.now(),
+      attribution: ATTRIBUTION,
+      races: ROUTES.map((cfg) => this.toRace(cfg, this.manifest.routes[cfg.id])),
     };
   }
 
-  /** Parse the route page HTML to extract stage links from ev.routePageData or page structure. */
-  private parseRoutePageStages(html: string, evNum: number): ParsedStage[] {
-    const stages: ParsedStage[] = [];
+  /** Fetch a route's GPX (or revalidate via If-Modified-Since) and update cache. */
+  async fetchRoute(routeId: string): Promise<CatalogRace> {
+    const cfg = ROUTES.find((r) => r.id === routeId);
+    if (!cfg) throw new Error(`Unknown route: ${routeId}`);
 
-    // Strategy 1: Find stage links by href pattern /evN/slug
-    const linkPattern = new RegExp(`href="(?:${BASE_URL})?/ev${evNum}/([^"]+)"`, 'g');
-    const seen = new Set<string>();
-
-    let match;
-    while ((match = linkPattern.exec(html)) !== null) {
-      const slug = match[1];
-
-      // Skip non-stage pages
-      if (slug === 'stages' ||
-          slug === 'countries' ||
-          slug.startsWith('points-of-interest') ||
-          slug.match(/^[a-z]{2,3}$/) || // country codes like "france", "germany" are too short to be stage names but some could match
-          slug === 'route-planner' ||
-          slug.includes('unmissable') ||
-          slug.includes('news')) {
-        continue;
-      }
-
-      if (!seen.has(slug)) {
-        seen.add(slug);
-
-        // Convert slug to readable name
-        const name = slug
-          .replace(/-+$/, '')        // trailing dashes
-          .replace(/-/g, ' ')
-          .replace(/\b\w/g, c => c.toUpperCase());
-
-        stages.push({ name, slug });
-      }
+    const cached = this.manifest.routes[routeId];
+    const headers: Record<string, string> = { 'User-Agent': USER_AGENT };
+    if (cached?.lastModified && this.gpxExists(routeId)) {
+      headers['If-Modified-Since'] = cached.lastModified;
     }
 
-    // Strategy 2: Parse ev.routePageData for stage page URLs
-    if (stages.length === 0) {
-      const dataMatch = html.match(/ev\.routePageData\s*=\s*(\{[\s\S]*?\});/);
-      if (dataMatch) {
-        try {
-          // Extract page URLs from the data object
-          const pageUrlPattern = new RegExp(`/ev${evNum}/([^"]+)`, 'g');
-          let urlMatch;
-          while ((urlMatch = pageUrlPattern.exec(dataMatch[1])) !== null) {
-            const slug = urlMatch[1];
-            if (!seen.has(slug) && !slug.startsWith('points-of-interest')) {
-              seen.add(slug);
-              const name = slug.replace(/-+$/, '').replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-              stages.push({ name, slug });
-            }
-          }
-        } catch { /* ignore parse errors */ }
-      }
+    const url = `${BASE_URL}/route/get-gpx/${cfg.gpxId}`;
+    const res = await fetch(url, { headers });
+
+    if (res.status === 304 && cached) {
+      cached.fetchedAt = Date.now();
+      this.manifest.routes[routeId] = cached;
+      this.saveManifest();
+      return this.toRace(cfg, cached);
     }
 
-    return stages;
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} fetching ${url}`);
+    }
+
+    const gpxXml = await res.text();
+    const lastModified = res.headers.get('last-modified') ?? undefined;
+    const stages = parseGpxStages(gpxXml);
+
+    writeFileSync(this.gpxPath(routeId), gpxXml, 'utf-8');
+
+    const entry: RouteCacheEntry = {
+      gpxId: cfg.gpxId,
+      lastModified,
+      fetchedAt: Date.now(),
+      stages,
+    };
+    this.manifest.routes[routeId] = entry;
+    this.saveManifest();
+
+    return this.toRace(cfg, entry);
   }
 
-  /** Fetch a stage page and extract the GPX download ID. */
-  private async fetchStagePage(evNum: number, stage: ParsedStage, stageNum: number): Promise<CatalogStage | null> {
-    const url = `${BASE_URL}/ev${evNum}/${stage.slug}`;
+  /** Slice out a single stage's GPX as a self-contained, valid GPX 1.1 string. */
+  getStageGpx(routeId: string, stageNum: number): string | null {
+    const xml = this.readGpx(routeId);
+    if (!xml) return null;
 
-    try {
-      const res = await fetch(url, {
-        headers: { 'User-Agent': USER_AGENT },
-      });
-      if (!res.ok) return null;
-
-      const html = await res.text();
-
-      // Look for /route/get-gpx/NNN in the page
-      const gpxMatch = html.match(/\/route\/get-gpx\/(\d+)/);
-      if (!gpxMatch) return null;
-
-      const gpxId = parseInt(gpxMatch[1], 10);
-
-      return {
-        stage: stageNum,
-        name: stage.name,
-        distanceKm: 0,
-        elevGainM: 0,
-        gpxId,
-      };
-    } catch {
-      return null;
+    const trkRegex = /<trk\b[^>]*>[\s\S]*?<\/trk>/g;
+    let match: RegExpExecArray | null;
+    while ((match = trkRegex.exec(xml)) !== null) {
+      const block = match[0];
+      const nameMatch = block.match(/<name>\s*0*(\d+)\s*:/);
+      if (nameMatch && parseInt(nameMatch[1], 10) === stageNum) {
+        return [
+          '<?xml version="1.0" encoding="UTF-8"?>',
+          '<gpx creator="littleCycling" version="1.1" xmlns="http://www.topografix.com/GPX/1/1">',
+          block,
+          '</gpx>',
+          '',
+        ].join('\n');
+      }
     }
+    return null;
   }
+
+  private readGpx(routeId: string): string | null {
+    const path = this.gpxPath(routeId);
+    if (!existsSync(path)) return null;
+    return readFileSync(path, 'utf-8');
+  }
+
+  private gpxExists(routeId: string): boolean {
+    return existsSync(this.gpxPath(routeId));
+  }
+
+  private gpxPath(routeId: string): string {
+    return join(this.cacheDir, `${routeId}.gpx`);
+  }
+
+  private toRace(cfg: RouteConfig, entry: RouteCacheEntry | undefined): CatalogRace {
+    return {
+      id: cfg.id,
+      evNum: cfg.evNum,
+      name: `EuroVelo ${cfg.evNum} — ${cfg.name}`,
+      stages: entry?.stages ?? [],
+      fetchedAt: entry?.fetchedAt ?? null,
+    };
+  }
+
+  private loadManifest(): Manifest {
+    if (existsSync(this.manifestPath)) {
+      try {
+        const parsed = JSON.parse(readFileSync(this.manifestPath, 'utf-8')) as Manifest;
+        if (parsed.version === MANIFEST_VERSION) return parsed;
+      } catch {
+        // fall through to fresh manifest
+      }
+    }
+    return { version: MANIFEST_VERSION, routes: {} };
+  }
+
+  private saveManifest(): void {
+    writeFileSync(this.manifestPath, JSON.stringify(this.manifest, null, 2) + '\n', 'utf-8');
+  }
+}
+
+/** Parse stage metadata out of a full route GPX. */
+function parseGpxStages(xml: string): CatalogStage[] {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xml, 'application/xml');
+  const trks = doc.getElementsByTagName('trk');
+  const stages: CatalogStage[] = [];
+
+  for (let i = 0; i < trks.length; i++) {
+    const trk = trks[i];
+    const nameText = trk.getElementsByTagName('name')[0]?.textContent ?? '';
+    const m = nameText.trim().match(/^0*(\d+)\s*:\s*(.+?)\s*\(([^)]+)\)\s*$/);
+    if (!m) continue;
+
+    const stageNum = parseInt(m[1], 10);
+    const name = m[2].trim();
+    const status = parseStatus(m[3]);
+
+    const trkpts = trk.getElementsByTagName('trkpt');
+    const points: RoutePoint[] = [];
+    for (let j = 0; j < trkpts.length; j++) {
+      const pt = trkpts[j];
+      const lat = parseFloat(pt.getAttribute('lat') ?? '0');
+      const lon = parseFloat(pt.getAttribute('lon') ?? '0');
+      const eleEl = pt.getElementsByTagName('ele')[0];
+      const ele = eleEl ? parseFloat(eleEl.textContent ?? '0') : 0;
+      points.push({ lat, lon, ele });
+    }
+
+    stages.push({
+      stage: stageNum,
+      name,
+      status,
+      distanceKm: Math.round(calcRouteDistance(points) / 100) / 10,
+      elevGainM: Math.round(calcElevationGain(points)),
+    });
+  }
+
+  return stages;
+}
+
+/**
+ * Map the human-readable status label to our enum. Observed labels (2026-07):
+ * "Certified", "Developed + Signed", "Developed + Not Signed",
+ * "Partially Developed + Signed", "Partially Developed + Not Signed",
+ * "Undeveloped / Unknown".
+ */
+function parseStatus(raw: string): EuroVeloStageStatus {
+  const s = raw.trim().toLowerCase();
+  if (s.startsWith('certified')) return 'CERTIFIED';
+  if (s.startsWith('partially developed')) {
+    return s.includes('not signed')
+      ? 'PARTIALLY_DEVELOPED_UNSIGNED'
+      : 'PARTIALLY_DEVELOPED_SIGNED';
+  }
+  if (s.startsWith('developed')) {
+    return s.includes('not signed') ? 'DEVELOPED_UNSIGNED' : 'DEVELOPED_SIGNED';
+  }
+  if (s.startsWith('undeveloped')) return 'UNDEVELOPED';
+  return 'OTHER';
 }

@@ -10,6 +10,7 @@ import {
   faBolt,
   faCoins,
   faPlay,
+  faPause,
   faStop,
   faUpload,
   faRotate,
@@ -31,6 +32,10 @@ import {
   faSpinner,
   faTrophy,
   faMap,
+  faMapLocationDot,
+  faSliders,
+  faTowerBroadcast,
+  faMicrochip,
   faThumbtack,
   faCodeCompare,
   faFileExport,
@@ -51,6 +56,7 @@ import {
   faChartLine,
   faGaugeHigh,
   faArrowLeft,
+  faArrowRight,
   faUpRightFromSquare,
   faArrowTrendUp,
   faArrowTrendDown,
@@ -73,10 +79,26 @@ import {
   faCircleCheck,
   faPlus,
   faBug,
+  faScaleBalanced,
+  faCloudArrowDown,
+  // Random-event + workout-segment theme icons
+  faWind,
+  faCircleXmark,
+  faCloudShowersHeavy,
+  faGem,
+  faCarSide,
+  faFeather,
+  faMoon,
 } from '@fortawesome/free-solid-svg-icons';
-import { faGithub } from '@fortawesome/free-brands-svg-icons';
+import { faGithub, faBluetooth } from '@fortawesome/free-brands-svg-icons';
 
 import 'element-plus/theme-chalk/dark/css-vars.css';
+// Imperative Element Plus APIs (ElMessageBox, ElMessage, ElNotification) bypass
+// unplugin-vue-components, so their styles must be pulled in manually.
+import 'element-plus/es/components/message-box/style/css';
+import 'element-plus/es/components/message/style/css';
+import 'element-plus/es/components/notification/style/css';
+import 'element-plus/es/components/overlay/style/css';
 
 import App from './App.vue';
 import router from './router';
@@ -90,6 +112,7 @@ library.add(
   faBolt,
   faCoins,
   faPlay,
+  faPause,
   faStop,
   faUpload,
   faRotate,
@@ -111,6 +134,10 @@ library.add(
   faSpinner,
   faTrophy,
   faMap,
+  faMapLocationDot,
+  faSliders,
+  faTowerBroadcast,
+  faMicrochip,
   faThumbtack,
   faCodeCompare,
   faFileExport,
@@ -131,6 +158,7 @@ library.add(
   faChartLine,
   faGaugeHigh,
   faArrowLeft,
+  faArrowRight,
   faUpRightFromSquare,
   faArrowTrendUp,
   faArrowTrendDown,
@@ -153,7 +181,17 @@ library.add(
   faCircleCheck,
   faPlus,
   faBug,
+  faScaleBalanced,
+  faCloudArrowDown,
+  faWind,
+  faCircleXmark,
+  faCloudShowersHeavy,
+  faGem,
+  faCarSide,
+  faFeather,
+  faMoon,
   faGithub as unknown as import('@fortawesome/fontawesome-svg-core').IconDefinition,
+  faBluetooth as unknown as import('@fortawesome/fontawesome-svg-core').IconDefinition,
 );
 
 document.documentElement.classList.add('dark');

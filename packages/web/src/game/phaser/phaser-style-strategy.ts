@@ -31,6 +31,8 @@ export interface PhaserStyleStrategy {
     buildingColors: number[];
     treeTrunk: number;
     treeCanopy: number;
+    /** Multi-color canopy variants. renderTree picks one per seed for visual variety. */
+    treeCanopyColors: number[];
     waterFill: number;
     waterOutline: number;
     grassOverlay: number;
@@ -89,8 +91,15 @@ export interface PhaserStyleStrategy {
     x: number, y: number, w: number, h: number, seed: number,
   ): void;
 
-  /** Render a street lamp at road positions. */
+  /** Render the static parts of a street lamp (pole/arm/housing). */
   renderRoadLamp(
+    gfx: Phaser.GameObjects.Graphics,
+    x: number, y: number, seed: number,
+  ): void;
+
+  /** Render only the lamp's emissive glow (circles + light beam) on a
+   *  separate Graphics so it can be alpha-tweened independently. */
+  renderRoadLampGlow(
     gfx: Phaser.GameObjects.Graphics,
     x: number, y: number, seed: number,
   ): void;

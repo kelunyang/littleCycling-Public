@@ -37,11 +37,15 @@ export function parsePwrData(raw: Record<string, unknown>): PwrData {
     source: (raw.source as SensorSource) ?? 'ant',
   };
 
-  // Dual-sided power meter fields
+  // Dual-sided power meter fields (support both normalized and ANT+ raw field names)
   if (raw.LeftPower != null) result.leftPower = raw.LeftPower as number;
+  else if (raw.LeftPedalPower != null) result.leftPower = raw.LeftPedalPower as number;
   if (raw.RightPower != null) result.rightPower = raw.RightPower as number;
+  else if (raw.RightPedalPower != null) result.rightPower = raw.RightPedalPower as number;
   if (raw.LeftBalance != null) result.balance = raw.LeftBalance as number;
+  else if (raw.PedalPower != null) result.balance = raw.PedalPower as number;
   if (raw.Cadence != null) result.cadence = raw.Cadence as number;
+  else if (raw.CalculatedCadence != null) result.cadence = raw.CalculatedCadence as number;
 
   return result;
 }

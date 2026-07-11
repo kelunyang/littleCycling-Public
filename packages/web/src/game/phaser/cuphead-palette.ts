@@ -33,6 +33,13 @@ export const BUILDING_COLORS = [
 // ── Trees ──
 export const TREE_TRUNK  = 0x4a3a2a; // dark brown
 export const TREE_CANOPY = 0x5a7a3a; // olive green
+/** Vintage canopy variants for visual variety in forest stretches. */
+export const TREE_CANOPY_COLORS = [
+  0x5a7a3a, // olive green (base)
+  0x6a8a4a, // brighter olive
+  0x4a6a2a, // deep olive
+  0x7a8a5a, // dusty sage
+];
 
 // ── Water ──
 export const WATER_FILL    = 0x4a7a8a; // muted teal

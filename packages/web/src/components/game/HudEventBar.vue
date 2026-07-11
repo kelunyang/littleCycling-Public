@@ -15,6 +15,24 @@
         </span>
       </div>
 
+      <!-- Needle gauge: cadence events steer by rpm, power events by watts -->
+      <PowerGauge
+        v-if="targetCadence"
+        :target="targetCadence"
+        :current="currentCadence ?? 0"
+        :tolerance="0.15"
+        unit="rpm"
+        :color="activeEvent.color"
+      />
+      <PowerGauge
+        v-else-if="targetWatts > 0"
+        :target="targetWatts"
+        :current="currentWatts"
+        :tolerance="0.10"
+        unit="W"
+        :color="activeEvent.color"
+      />
+
       <!-- Progress bar -->
       <div class="event-bar__track">
         <div class="event-bar__fill" :style="fillStyle" />
@@ -35,6 +53,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import type { RandomEventDef } from '@littlecycling/shared';
+import PowerGauge from './PowerGauge.vue';
 
 const props = defineProps<{
   isEventActive: boolean;
@@ -44,6 +63,9 @@ const props = defineProps<{
   targetWatts: number;
   targetCadence: number | null;
   isOnTarget: boolean;
+  /** Effective watts (meter first, else server trainer-curve estimate). */
+  currentWatts: number;
+  currentCadence: number | null;
 }>();
 
 const barStyle = computed(() => {
@@ -67,7 +89,7 @@ const remainingText = computed(() => {
 .hud-event-bar {
   background: var(--hud-bg);
   clip-path: var(--clip-panel-sm);
-  border: 1px solid var(--event-color, var(--hud-cyan));
+  border: 1.5px solid var(--event-color, var(--hud-cyan));
   padding: 10px 14px;
   min-width: 240px;
   display: flex;
@@ -151,7 +173,7 @@ const remainingText = computed(() => {
 
 .event-bar__status--on {
   color: var(--hud-cyan);
-  text-shadow: 0 0 6px rgba(0, 229, 255, 0.4);
+  text-shadow: 0 0 6px rgba(var(--accent-rgb), 0.4);
 }
 
 /* Transition */

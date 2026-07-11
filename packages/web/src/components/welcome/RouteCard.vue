@@ -51,22 +51,21 @@ function formatDate(tsEpoch: number): string {
   display: flex;
   align-items: center;
   padding: 12px 16px;
-  border: 1px solid var(--hud-border);
-  clip-path: var(--clip-panel-sm);
+  border: 1.5px solid var(--hud-border);
+  border-radius: var(--card-radius-sm);
   cursor: pointer;
-  transition: border-color 0.2s, background 0.2s, filter 0.2s;
-  background: rgba(0,229,255,0.02);
+  transition: border-color 0.2s, background 0.2s, transform 0.15s, box-shadow 0.15s;
+  background: var(--accent-soft);
 }
 
 .route-card:hover {
-  background: rgba(0,229,255,0.05);
+  background: var(--accent-tint);
   border-color: var(--hud-border-bright);
 }
 
 .route-card--selected {
   border-color: var(--hud-cyan);
-  background: rgba(0,229,255,0.08);
-  filter: drop-shadow(0 0 6px rgba(0,229,255,0.5)) drop-shadow(0 0 20px rgba(0,229,255,0.15));
+  background: var(--accent-hover);
 }
 
 .route-card__info {

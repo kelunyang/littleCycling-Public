@@ -478,6 +478,16 @@ export function useTerrainRenderer() {
     currentWeatherType = config.type;
   }
 
+  /** Update wind state (drives particle/cloud drift). */
+  function setWind(speedKmh: number, directionDeg: number, gust = 1): void {
+    skyAndFog?.setWind(speedKmh, directionDeg, gust);
+  }
+
+  /** Trigger a lightning flash (skybox bolt + ~70% follow-up strike). */
+  function triggerLightning(intensityMul = 1): void {
+    skyAndFog?.triggerLightning(intensityMul);
+  }
+
   /** Set glasses lens mode. */
   function setGlassesLens(lens: GlassesLens): void {
     glassesEffect?.setLens(lens);
@@ -640,6 +650,8 @@ export function useTerrainRenderer() {
     render,
     setDarkened,
     setWeather,
+    setWind,
+    triggerLightning,
     setCloudsEnabled,
     triggerCoinGlow,
     setGlassesLens,

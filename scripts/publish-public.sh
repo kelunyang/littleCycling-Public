@@ -32,6 +32,18 @@ git worktree add "$WORK_DIR" public-main
 # 同步 main 的檔案到 worktree
 git --work-tree="$WORK_DIR" checkout main -- .
 
+# ── 個資過濾 ──
+# 原則：私有 repo 可以攜帶騎乘紀錄（機器間同步用），公開 repo 一律剝除。
+# 這裡刪掉 worktree 裡的個資檔後才 add -A，所以公開 repo 既收不到新檔，
+# 之前误发布的同路徑檔案也會在下次 publish 時被標成刪除、從公開 tip 移除。
+rm -rf "$WORK_DIR/data/sessions"
+find "$WORK_DIR" -path "*/recordings/*.jsonl" -delete
+rm -f "$WORK_DIR"/data/*.jsonl \
+      "$WORK_DIR"/data/*.db "$WORK_DIR"/data/*.db-shm "$WORK_DIR"/data/*.db-wal \
+      "$WORK_DIR"/data/config.json
+rm -rf "$WORK_DIR/plan"
+echo "Sanitized: sessions / recordings / db / config / plan stripped from public sync"
+
 # 在 worktree 中操作
 cd "$WORK_DIR"
 git add -A

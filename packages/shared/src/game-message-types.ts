@@ -84,6 +84,14 @@ export const GAME_MESSAGE_TYPES: Record<string, GameMessageType> = {
   'event-rest-stop-start':   { id: 'event-rest-stop-start',   baseTemplate: '補給站到了！放鬆騎 {seconds} 秒恢復體力',  icon: 'mug-hot',       color: 'var(--hud-cyan)',    priority: 5, durationMs: 4000, placeholders: ['seconds'] },
   'event-rest-stop-success': { id: 'event-rest-stop-success', baseTemplate: '補給完成！+{coins} 金幣',                  icon: 'trophy',        color: 'var(--hud-yellow)',  priority: 4, durationMs: 3000, placeholders: ['coins'] },
   'event-rest-stop-fail':    { id: 'event-rest-stop-fail',    baseTemplate: '太拼了…沒好好休息',                          icon: 'face-sad-tear', color: 'var(--hud-magenta)', priority: 3, durationMs: 3000, placeholders: [] },
+
+  // Wind coin storm
+  'event-wind-coin-storm-start':   { id: 'event-wind-coin-storm-start',   baseTemplate: '金幣風暴！{seconds} 秒內衝刺撿幣！', icon: 'wind',          color: 'var(--hud-yellow)',  priority: 5, durationMs: 4000, placeholders: ['seconds'] },
+  'event-wind-coin-storm-success': { id: 'event-wind-coin-storm-success', baseTemplate: '金幣風暴掃平！+{coins} 金幣',         icon: 'trophy',        color: 'var(--hud-yellow)',  priority: 4, durationMs: 3000, placeholders: ['coins'] },
+  'event-wind-coin-storm-fail':    { id: 'event-wind-coin-storm-fail',    baseTemplate: '風太強跟不上…金幣飛走了',              icon: 'face-sad-tear', color: 'var(--hud-magenta)', priority: 3, durationMs: 3000, placeholders: [] },
+
+  // Thunder
+  'event-thunder':             { id: 'event-thunder',             baseTemplate: '⚡ 雷擊！',                                icon: 'bolt',          color: 'var(--hud-yellow)',  priority: 4, durationMs: 1500, placeholders: [] },
 };
 
 /** Replace {key} placeholders with actual values */

@@ -7,6 +7,11 @@
  */
 
 import type { WorkoutSegment } from './workouts.js';
+import {
+  WIND_STORM_THRESHOLD_KMH,
+  WIND_STORM_DURATION_MS,
+  WIND_STORM_COIN_REWARD,
+} from './wind.js';
 
 // ── Types ──
 
@@ -32,6 +37,13 @@ export interface RandomEventDef {
   coinReward: number;            // bonus coins on success
   successThreshold: number;      // on-target time ratio required (0-1)
   visual: RandomEventVisual;
+  /** Minimum live wind speed (km/h) required for this event to be eligible. */
+  requiresWind?: number;
+}
+
+/** Optional context passed to pickRandomEvent for environmental gating. */
+export interface PickContext {
+  windSpeedKmh?: number;
 }
 
 // ── Event catalog ──
@@ -171,6 +183,20 @@ export const RANDOM_EVENTS: RandomEventDef[] = [
     successThreshold: 0.6,
     visual: { screenTint: '#00e676', screenTintOpacity: 0.08 },
   },
+  {
+    id: 'wind-coin-storm',
+    name: '金幣風暴',
+    icon: 'wind',
+    color: '#ffd166',
+    durationMs: WIND_STORM_DURATION_MS,
+    targetFtpPercent: 90,
+    weight: 6,
+    minElapsedMs: 120_000,
+    coinReward: WIND_STORM_COIN_REWARD,
+    successThreshold: 0.4,
+    requiresWind: WIND_STORM_THRESHOLD_KMH,
+    visual: { screenTint: '#ffd166', screenTintOpacity: 0.08 },
+  },
 ];
 
 /** Lookup map by event ID */
@@ -187,9 +213,14 @@ export const RANDOM_EVENTS_MAP: Record<string, RandomEventDef> =
 export function pickRandomEvent(
   elapsedMs: number,
   cooldownSet: Set<string>,
+  ctx?: PickContext,
 ): RandomEventDef | null {
+  const windKmh = ctx?.windSpeedKmh ?? 0;
   const eligible = RANDOM_EVENTS.filter(
-    (e) => elapsedMs >= e.minElapsedMs && !cooldownSet.has(e.id),
+    (e) =>
+      elapsedMs >= e.minElapsedMs
+      && !cooldownSet.has(e.id)
+      && (e.requiresWind == null || windKmh >= e.requiresWind),
   );
   if (eligible.length === 0) return null;
 

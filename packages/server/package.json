@@ -11,7 +11,8 @@
     "dev:all": "tsx src/dev-runner.tsx",
     "ble:test": "tsx src/ble-hr-test.ts",
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "npm run build && node --test \"test/*.test.mjs\""
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",

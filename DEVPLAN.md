@@ -104,6 +104,38 @@ npx tsx src/replay.tsx recordings/my-ride.jsonl
 npx tsx src/replay.tsx recordings/my-ride.jsonl --speed 2.0 --loop --port 8765
 ```
 
+> ⚠️ **注意（server-authoritative 遷移後）：** 這條舊路徑（`replay.tsx` 與
+> server 的 `/ws/replay` 端點，兩者都用 `ReplaySession`）只把**原始 `sensor`
+> 影格**直接串給前端,**不經過 `LiveSession`、不產生 `game_state`**。遷移後
+> 前端的遊戲世界靠伺服器算出的 `game_state` 驅動,所以用這條路徑播放時 HUD
+> 數值會動,但紅球/地形/金幣不會動。要用真實紀錄驅動**完整遊戲**,請改用下方
+> 的 `--replay` 感測來源。
+
+#### 用真實紀錄驅動遊戲模擬（`--replay` 感測來源）
+
+把錄製檔的感測影格照原始時序餵進 `LiveSession.handleAntData()`,走與真實
+ANT+ 及 `--mock` **完全相同**的路徑,因此伺服器會算出 `game_state`、金幣、
+心率區間、虛擬速度與 SQLite 樣本,重現整趟騎乘 —— 只是感測位元組來自檔案。
+這是拿真實資料做端到端測試的正確方式。
+
+**已建立的檔案：**
+- `packages/server/src/lib/replay-sensor.ts` — `ReplaySensorSource`
+  - 從錄製檔的 `session_start` 讀出真實感測器清單來 advertise（無 header 時
+    以前 500 筆 data 的 profile+deviceId 推導）
+  - 按 `elapsed` 差值原速播放,支援 `speed` 與 `loop`
+  - 透過 `onFrame` 回呼接進 `LiveSession`,與 `MockSensorSource` 對稱
+
+**Server flag（`server.ts`）：**
+```bash
+# 檔名依序在 <data-dir>/sessions、<data-dir>、cwd、絕對路徑尋找
+npx tsx src/server.ts --data-dir ../../data \
+  --replay ride-7-2026-07-10T07-28-59.jsonl --replay-loop
+#   [--replay-speed N]  倍速   [--replay-loop]  播完自動重頭
+```
+
+`--replay` 優先於 `--mock`。前端照常連 `/ws/live`(dev 下 `vite` 預設把
+`/api`、`/ws` 代理到 8765),整套遊戲即以真實紀錄重跑一遍。
+
 ---
 
 ### Phase 3: Ink 終端儀表板 ✅ 已完成
@@ -715,6 +747,17 @@ ride_samples (
   - **GameSummary 訓練結果**：顯示 workout 名稱 + 整體達標評等 + 各分段 target FTP% → 瓦數
   - **Welcome 頁面選擇器**（`StartChecklist.vue`）：el-select Workout Mode（6 選項含 Free Ride）+ 分段預覽色條 + 描述文字
   - **gameStore 整合**：`selectedWorkoutId` / `workoutSegments`，`startGame()` 時 `buildWorkoutSegments()` 展開，`reset()` 清空
+- **統一功率評測標準（PWR 優先，速度估算 fallback）** — 前後端所有「該踩幾瓦」的評測都吃同一個訊號源
+  - **Server 下發有效瓦數**：`game_state` 新增 `powerW`（有真實 PWR 感測器用實測瓦數；無 PWR 用輪速查訓練台功率曲線估算；感測器斷線歸零）+ `powerSource: 'meter' | 'estimated'`（標記來源，供 UI 顯示「估算功率」徽章）
+  - **修正歷史 bug**：舊前端把 `speedKmh`（km/h）直接當「現在功率」餵給 workout on-target 判定（±10% 瓦數容差），導致結構化訓練幾乎永遠 OFF TARGET；server 端隨機事件早已改用 `lastWatts`，此次把 workout 路徑一併統一
+  - **前端消費點全面切換**：`useWorkoutTracker`（on-target 判定）、`HudTopBar` POWER 欄位（無 PWR 時顯示估算瓦數而非速度）、`useGameLoop` 時間序列（speed-only 設定也有功率曲線圖）都改讀 `gameStateStore.powerW`
+- **訓練段落主題化 + 標尺儀錶 HUD** — 結構化訓練的每個分段以「事件」的敘事語言呈現，解決「單獨騎時不知道該踩幾瓦」
+  - **段落主題**（`shared/src/workouts.ts` `getSegmentTheme()`）：依分段名稱關鍵字（warm/cool/recovery/rest）與目標強度（%FTP）對應 8 種故事主題——晨間出發（暖身）/ 補給站（恢復）/ 順風巡航（≤79%）/ 逆風來襲（80-94%）/ 長坡爬升（95-109%）/ 警車追擊（110-139%）/ 終點衝刺（≥140%）/ 夕陽返家（緩和），每個主題含名稱、Font Awesome 圖示、主色、畫面 tint、風味提示語；純呈現層，不影響目標與評分
+  - **標尺儀錶**（`PowerGauge.vue`，通用元件）：水平標尺，目標值置中、±容差綠帶（功率 ±10%、踏頻 ±15%，與 server 判定一致）、現值指針（帶內變綠 glow）、量程 target ±40%、即時指引文字（▲ 再加 XW / ✓ 穩住節奏 / ▼ 收一點 XW）
+  - **HudWorkoutBar.vue**：訓練模式常駐中央底部面板——主題圖示+故事名+分段名、風味提示、PowerGauge、可選踏頻目標、分段倒數（撐過 M:SS）、ON/OFF TARGET 狀態、`powerSource === 'estimated'` 時顯示「估算功率」徽章；分段切換時以 `:key` 重播進場動畫
+  - **HudEventBar 同步升級**：隨機事件面板也插入 PowerGauge（踏頻事件顯示 rpm 標尺，其餘顯示瓦數標尺）
+  - **畫面色調**：`Hud.vue` 的 tint overlay 合併邏輯——進行中的隨機事件優先（短而強烈），否則套用當前訓練段落主題 tint（長而含蓄，opacity 0.05-0.10）
+  - **圖示補註冊**：`main.ts` 補上 `faWind` / `faCircleXmark` / `faCloudShowersHeavy` / `faGem` / `faCarSide` / `faFeather` / `faMoon`（隨機事件目錄既有圖示先前未註冊，運行時不渲染）
 - **HR Zone 指示器** — `HudTopBar.vue` HR 面板底部新增 5 個 `heart-pulse` 圖示，標記當前心率區間
   - 5 個 Font Awesome `heart-pulse` 圖示排成一行，每個使用對應 zone 的 CSS 變數色彩（`--zone-1` ~ `--zone-5`）
   - 當前 zone 的圖示 opacity 1 + `drop-shadow` glow，其餘 opacity 0.2
@@ -746,6 +789,12 @@ ride_samples (
   - **PB 端點**（`GET /api/rides/best?routeId=&hrMax=`）：按 `avg_power_w` 降序查同路線最佳紀錄 + 從 ride_samples 即時計算 Zone Sustain
   - **renderRadarChart()**（`useRideCharts.ts`）：5 頂點均勻分佈、3 圈同心五角刻度線、PB 金色多邊形 + 當前 cyan 多邊形、Orbitron 標籤
   - **GameSummary.vue 整合**：遊戲結束 fetch PB → d3 渲染 → 圖例（cyan THIS RIDE / gold PERSONAL BEST），無路線時不顯示，面板寬度 600px
+- **中央倒數計時 overlay**（`components/game/CountdownOverlay.vue`）— 在「訓練分段結束前」與「總訓練時間結束前」的最後 60 秒，於畫面正中央顯示大字倒數
+  - **兩種模式**：`NEXT PHASE IN`（分段即將結束，青色 + `flag` 圖示）/ `FINISH IN`（總時間即將結束，金色 + `flag-checkered` 圖示）；最後 10 秒轉紅並加強脈動（`data-urgent`）
+  - **觸發邏輯**（`GameView.vue` `activeCountdown` computed）：復用既有 `useWorkoutTracker.segmentRemainingMs` 與 `gameLoop.elapsedMs`，零新增資料管線；分段剩餘或 `targetDurationMs - elapsed` ≤ 60s 時觸發，兩者同時落窗時（profile 課表最後一段結束正好等於時間到）以「結束」為優先避免標籤打架；自由騎乘（無課表）只觸發 finish 倒數
+  - **非阻擋式**：`pointer-events: none` + 僅中央暈影,騎士仍看得見路面繼續踩踏;巨大數字每秒以 `:key` 重播 pop 動畫;僅在 `state==='playing' && !isPaused && hasStarted` 顯示（不蓋起始提示/暫停畫面）,時間到後 `state='ended'` 自然消失
+  - **PiP 相容**：放在 `.game-content` 內,子母畫面同步顯示;尊重 `prefers-reduced-motion`
+- **錄製時機修正（延後至通過起始提示）** — 過去 `StartBar.launchGame()` 在導航進遊戲「之前」就 `POST /api/live/start`,導致後端在「踩踏/Space 繼續」提示還沒通過時就進入 `recording`（建 ride、開 jsonl、啟動計時）。改為把 start body 暫存於 `gameStore.pendingStart`,由 GameView 的 `beginRide()` 在第一次 unpause（通過提示）時才真正呼叫;`beginInFlight` 旗標防重複 start,成功後對 Space/點擊路徑主動補送 `/api/live/resume`（sim 出生 `paused=true`,踩踏路徑靠 tick auto-start,無功率訊號的 Space 路徑需主動 resume 否則球卡死）;失敗以 `revertToPrompt` 還原提示供重試。附帶徹底解決 replay/mock 在提示期間把球推走的問題（提示前根本無 server sim）
 
 ---
 

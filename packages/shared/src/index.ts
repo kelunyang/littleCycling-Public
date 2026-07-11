@@ -18,16 +18,22 @@ export type {
   WsSessionStartMessage,
   WsSessionEndMessage,
   WsStatusMessage,
+  CoinDto,
+  GameEventDto,
+  WsGameStateMessage,
   WsMessage,
   LiveSessionState,
+  HostCapabilities,
   RoutePoint,
   SavedRoute,
+  EuroVeloStageStatus,
   CatalogStage,
   CatalogRace,
   RouteCatalog,
   GameState,
   HrZone,
   Ride,
+  RideSummaryDto,
   RideSample,
   ComparisonSample,
   ComparisonMetrics,
@@ -65,7 +71,12 @@ export {
 } from './power-curves.js';
 
 // Virtual power
-export { VirtualPowerEstimator } from './virtual-power.js';
+export {
+  VirtualPowerEstimator,
+  SPEED_FROM_POWER_FACTOR,
+  estimateVirtualSpeedFromPower,
+  estimateVirtualCadenceFromPower,
+} from './virtual-power.js';
 
 // HR zones
 export {
@@ -78,6 +89,15 @@ export {
 // Config
 export type { AppConfig, LlmProvider } from './config.js';
 export { DEFAULT_CONFIG } from './config.js';
+
+// Route geometry
+export type { InterpolatedPosition } from './route-geometry.js';
+export {
+  buildCumulativeDistances,
+  interpolateAlongRoute,
+  totalRouteDistance,
+  computeSmoothedBearing,
+} from './route-geometry.js';
 
 // GPX parser
 export {
@@ -94,6 +114,7 @@ export type {
   WorkoutProfile,
   SegmentInfo,
   SegmentResult,
+  SegmentTheme,
 } from './workouts.js';
 export {
   ZONE_COLORS,
@@ -101,6 +122,7 @@ export {
   WORKOUT_PROFILES_MAP,
   buildWorkoutSegments,
   getSegmentAtTime,
+  getSegmentTheme,
   totalWorkoutDuration,
   workoutGrade,
 } from './workouts.js';
@@ -131,13 +153,23 @@ export {
 } from './training-plan.js';
 
 // Random events
-export type { RandomEventDef, RandomEventVisual } from './random-events.js';
+export type { RandomEventDef, RandomEventVisual, PickContext } from './random-events.js';
 export {
   RANDOM_EVENTS,
   RANDOM_EVENTS_MAP,
   pickRandomEvent,
   buildEventSegment,
 } from './random-events.js';
+
+// Wind
+export type { WindSample } from './wind.js';
+export {
+  WIND_STORM_THRESHOLD_KMH,
+  WIND_STORM_DURATION_MS,
+  WIND_STORM_COIN_COUNT,
+  WIND_STORM_COIN_REWARD,
+  TAILWIND_COMBO_MULTIPLIER,
+} from './wind.js';
 
 // Sensor parser
 export {

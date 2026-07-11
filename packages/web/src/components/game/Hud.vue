@@ -4,8 +4,17 @@
       <HudTopBar
         :virtual-power="virtualPower"
         :pinned-metrics="chartPin.pinned.value"
-        :comparison="comparison"
         :fps="fps"
+        :fps-max="fpsMax"
+        :fps-min="fpsMin"
+        :hr-max="hrMax"
+        :hr-min="hrMin"
+        :speed-max="speedMax"
+        :speed-min="speedMin"
+        :cadence-max="cadenceMax"
+        :cadence-min="cadenceMin"
+        :power-max="powerMax"
+        :power-min="powerMin"
         :camera-pitch="cameraPitch"
         :camera-height="cameraHeight"
         @toggle-pin="chartPin.togglePin"
@@ -18,7 +27,7 @@
         <font-awesome-icon icon="up-right-from-square" />
         PIP
       </button>
-      <div v-if="!isPhaser" class="glasses-lens-picker">
+      <div class="glasses-lens-picker">
         <el-segmented v-model="gameStore.glassesLens" :options="lensOptions" size="small" />
       </div>
     </div>
@@ -46,13 +55,30 @@
         :ball-lat="ballLat"
         :ball-lon="ballLon"
         :ball-bearing="ballBearing"
+        :is-paused="gameStore.isPaused"
         @stop="emit('stop')"
+        @pause="emit('pause')"
       />
     </div>
 
-    <!-- Random event progress bar -->
+    <!-- Center-bottom challenge panel: themed workout segment (structured
+         training) or random event (freeride) — the sim never runs both. -->
     <div class="hud__event-bar">
+      <HudWorkoutBar
+        v-if="hasWorkout"
+        :theme="workoutTheme"
+        :segment-name="props.currentSegmentName"
+        :segment-index="props.currentSegmentIndex"
+        :target-watts="props.targetWatts"
+        :current-watts="props.currentWatts"
+        :power-source="props.powerSource"
+        :target-cadence="currentWorkoutSegment?.targetCadence"
+        :current-cadence="props.currentCadence"
+        :remaining-ms="props.segmentRemainingMs"
+        :is-on-target="props.isOnTarget"
+      />
       <HudEventBar
+        v-else
         :is-event-active="props.isEventActive"
         :active-event="props.activeEvent"
         :event-elapsed-ms="props.eventElapsedMs"
@@ -60,15 +86,17 @@
         :target-watts="props.eventTargetWatts"
         :target-cadence="props.eventTargetCadence"
         :is-on-target="props.isEventOnTarget"
+        :current-watts="props.currentWatts"
+        :current-cadence="props.currentCadence"
       />
     </div>
 
-    <!-- Event screen tint overlay -->
+    <!-- Screen tint overlay: random event first, else workout segment theme -->
     <div
       class="event-overlay"
       :style="{
-        backgroundColor: props.eventScreenTint ?? 'transparent',
-        opacity: props.eventScreenTint ? props.eventScreenTintOpacity : 0,
+        backgroundColor: activeTint ?? 'transparent',
+        opacity: activeTint ? activeTintOpacity : 0,
       }"
     />
 
@@ -79,23 +107,18 @@
       @typewriter-done="(ms: number) => emit('typewriterDone', ms)"
     />
 
-    <GameSummary
-      :elapsed-ms="elapsedMs"
-      :distance-traveled="distanceTraveled"
-      :stats="stats"
-      :workout-segments="props.workoutSegments"
-    />
+    <GameSummary :workout-segments="props.workoutSegments" />
   </div>
 </template>
 
 <script setup lang="ts">
-import type { RoutePoint, ComparisonMetrics, WorkoutSegment, RandomEventDef } from '@littlecycling/shared';
-import type { GameStats, TimeSeriesSample } from '@/composables/useGameLoop';
-import type { GameMessage } from '@/composables/useGameMessages';
 import { computed } from 'vue';
+import { getSegmentTheme } from '@littlecycling/shared';
+import type { RoutePoint, WorkoutSegment, RandomEventDef } from '@littlecycling/shared';
+import type { TimeSeriesSample } from '@/composables/useGameLoop';
+import type { GameMessage } from '@/composables/useGameMessages';
 import { useChartPin } from '@/composables/useChartPin';
 import { useGameStore } from '@/stores/gameStore';
-import { useSettingsStore } from '@/stores/settingsStore';
 import HudTopBar from './HudTopBar.vue';
 import HudCoins from './HudCoins.vue';
 import HudBottomLeft from './HudBottomLeft.vue';
@@ -105,6 +128,7 @@ import ZoneWarning from './ZoneWarning.vue';
 import GameBubble from './GameBubble.vue';
 import GameSummary from './GameSummary.vue';
 import HudEventBar from './HudEventBar.vue';
+import HudWorkoutBar from './HudWorkoutBar.vue';
 
 const props = defineProps<{
   routePoints: RoutePoint[];
@@ -116,15 +140,28 @@ const props = defineProps<{
   combo: number;
   redLine: boolean;
   virtualPower?: number;
-  comparison?: ComparisonMetrics;
-  stats: GameStats;
   timeSeries: TimeSeriesSample[];
   fps: number;
+  fpsMax: number;
+  fpsMin: number | null;
+  hrMax: number;
+  hrMin: number | null;
+  speedMax: number;
+  speedMin: number | null;
+  cadenceMax: number;
+  cadenceMin: number | null;
+  powerMax: number;
+  powerMin: number | null;
   workoutSegments: WorkoutSegment[];
   currentSegmentIndex: number;
   targetWatts: number;
   isOnTarget: boolean;
   currentSegmentName: string;
+  segmentRemainingMs: number;
+  /** Effective watts — real meter first, else server trainer-curve estimate. */
+  currentWatts: number;
+  powerSource: 'meter' | 'estimated';
+  currentCadence: number | null;
   pipSupported: boolean;
   cameraPitch: number;
   cameraHeight: number;
@@ -141,11 +178,37 @@ const props = defineProps<{
   eventScreenTintOpacity: number;
 }>();
 
-const emit = defineEmits<{ stop: []; togglePip: []; typewriterDone: [durationMs: number] }>();
+const emit = defineEmits<{ stop: []; pause: []; togglePip: []; typewriterDone: [durationMs: number] }>();
 
 const chartPin = useChartPin();
 const gameStore = useGameStore();
-const isPhaser = computed(() => useSettingsStore().config.map.renderMode === 'phaser');
+
+// ── Workout segment theming (narrative event skin) ──
+
+const hasWorkout = computed(() => props.workoutSegments.length > 0);
+
+const currentWorkoutSegment = computed<WorkoutSegment | null>(() => {
+  if (props.currentSegmentIndex < 0 || props.currentSegmentIndex >= props.workoutSegments.length) {
+    return null;
+  }
+  return props.workoutSegments[props.currentSegmentIndex];
+});
+
+const workoutTheme = computed(() =>
+  currentWorkoutSegment.value ? getSegmentTheme(currentWorkoutSegment.value) : null,
+);
+
+// Screen tint: an in-flight random event wins (short + loud); otherwise the
+// current workout segment's theme tint (long + subtle).
+const activeTint = computed<string | null>(() => {
+  if (props.eventScreenTint) return props.eventScreenTint;
+  return workoutTheme.value?.screenTint ?? null;
+});
+
+const activeTintOpacity = computed(() => {
+  if (props.eventScreenTint) return props.eventScreenTintOpacity;
+  return workoutTheme.value?.screenTintOpacity ?? 0;
+});
 
 const lensOptions = [
   { label: 'Clear', value: 'clear' },
@@ -188,7 +251,7 @@ const lensOptions = [
   padding: 8px 16px;
   background: rgba(0, 255, 255, 0.1);
   color: var(--hud-cyan);
-  border: 1px solid rgba(0, 255, 255, 0.3);
+  border: 1.5px solid rgba(0, 255, 255, 0.3);
   clip-path: var(--clip-panel-sm);
   font-family: var(--font-display);
   font-size: 11px;
@@ -208,7 +271,7 @@ const lensOptions = [
   background: var(--hud-bg);
   clip-path: var(--clip-panel-sm);
   padding: 4px;
-  border: 1px solid var(--hud-border);
+  border: 1.5px solid var(--hud-border);
 }
 
 .glasses-lens-picker :deep(.el-segmented) {

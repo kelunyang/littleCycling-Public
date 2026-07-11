@@ -55,6 +55,7 @@
           :rides="calendar.selectedDateRides.value"
           @back="calendar.clearDate()"
           @select-ride="calendar.openDetail"
+          @deleted="calendar.removeRide"
         />
       </div>
 
@@ -136,7 +137,7 @@ const planMarkers = computed(() => {
   align-items: center;
   justify-content: space-between;
   padding: 16px 20px;
-  border-bottom: 1px solid var(--hud-border-bright);
+  border-bottom: 1.5px solid var(--hud-border-bright);
   position: relative;
   flex-shrink: 0;
 }
@@ -162,7 +163,7 @@ const planMarkers = computed(() => {
   color: var(--hud-cyan);
   text-transform: uppercase;
   letter-spacing: 2px;
-  text-shadow: 0 0 10px rgba(0,229,255,0.3);
+  text-shadow: 0 0 10px rgba(var(--accent-rgb), 0.3);
 }
 
 .training-cal__nav {

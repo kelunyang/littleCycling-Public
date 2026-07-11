@@ -12,6 +12,7 @@ import { Sky } from 'three/addons/objects/Sky.js';
 import type { GameRenderer } from './game-renderer';
 import { getCelestialState, type CelestialState } from './sun-moon-calc';
 import { computeDayNightLighting } from './day-night-lighting';
+import { LightningBolt } from './lightning-bolt';
 
 export type WeatherType = 'sunny' | 'cloudy' | 'rainy' | 'snowy';
 
@@ -124,8 +125,32 @@ export class SkyAndFog {
   /** Latest celestial state (exposed for external consumers like player lights). */
   private _celestial: CelestialState | null = null;
 
+  /**
+   * Wind vector in scene-space metres/sec, with a gust amplitude factor.
+   * Direction follows particle flow (= meteorological wind dir + 180°).
+   */
+  private wind = { vx: 0, vz: 0, gust: 1 };
+
+  /** Lightning bolt sprite (created in init). */
+  private lightning: LightningBolt | null = null;
+
   constructor(gameRenderer: GameRenderer) {
     this.gameRenderer = gameRenderer;
+  }
+
+  /**
+   * Update wind state (used by particles + cloud drift).
+   * @param speedKmh meteorological wind speed
+   * @param directionDeg meteorological direction (0=N, where wind comes from)
+   * @param gust amplitude multiplier for visual swaying (1 = neutral)
+   */
+  setWind(speedKmh: number, directionDeg: number, gust = 1): void {
+    // Particles flow opposite to "wind from" direction.
+    const speedMs = (speedKmh / 3.6) * 0.6; // 0.6 visual compression
+    const rad = (directionDeg + 180) * DEG;
+    this.wind.vx = Math.sin(rad) * speedMs;
+    this.wind.vz = -Math.cos(rad) * speedMs;
+    this.wind.gust = Math.max(0.5, Math.min(2, gust));
   }
 
   /** Get current celestial state (null if day/night is disabled). */
@@ -165,6 +190,21 @@ export class SkyAndFog {
     // Ambient particles (always-on, any weather)
     this.createDust();
     this.createLeaves();
+
+    // Lightning bolt (always created; opacity-driven visibility)
+    this.lightning = new LightningBolt(this.gameRenderer.scene);
+  }
+
+  /** Trigger a lightning flash + 70% chance follow-up strike. */
+  triggerLightning(intensityMul = 1): void {
+    if (!this.lightning) return;
+    this.lightning.trigger(intensityMul);
+    if (Math.random() < 0.7) {
+      const delay = 80 + Math.random() * 60;
+      setTimeout(() => {
+        this.lightning?.trigger(intensityMul * 0.7);
+      }, delay);
+    }
   }
 
   /** Update weather type. The day/night system overrides sun position. */
@@ -214,6 +254,9 @@ export class SkyAndFog {
     // Ambient particles (always active)
     if (this.dustGeometry) this.animateDust(dt, cameraPosition);
     if (this.leafGeometry) this.animateLeaves(dt, cameraPosition);
+
+    // Lightning fade + reposition
+    this.lightning?.update(dt, cameraPosition, this.gameRenderer.camera.quaternion);
   }
 
   dispose(): void {
@@ -234,6 +277,8 @@ export class SkyAndFog {
     this.removeDust();
     this.removeLeaves();
     this.removeStars();
+    this.lightning?.dispose();
+    this.lightning = null;
   }
 
   // ── Day/Night core ──
@@ -635,12 +680,13 @@ export class SkyAndFog {
     this.cloudGroup.position.x = cameraPosition.x;
     this.cloudGroup.position.z = cameraPosition.z;
 
-    // Gentle drift for each cloud
+    // Gentle drift + wind transport (clouds drift ~2× ground particle speed)
+    const windScale = 2;
     for (const child of this.cloudGroup.children) {
       const mesh = child as THREE.Mesh;
       const offset = mesh.userData.driftOffset as number;
-      mesh.position.x += Math.sin(offset + performance.now() * 0.0003) * CLOUD_DRIFT_SPEED * dt;
-      mesh.position.z += Math.cos(offset + performance.now() * 0.0002) * CLOUD_DRIFT_SPEED * 0.5 * dt;
+      mesh.position.x += (Math.sin(offset + performance.now() * 0.0003) * CLOUD_DRIFT_SPEED       + this.wind.vx * windScale) * dt;
+      mesh.position.z += (Math.cos(offset + performance.now() * 0.0002) * CLOUD_DRIFT_SPEED * 0.5 + this.wind.vz * windScale) * dt;
 
       // Wrap around if drifted too far from center
       const halfArea = CLOUD_AREA / 2;
@@ -728,9 +774,9 @@ export class SkyAndFog {
 
     for (let i = 0; i < DUST_PARTICLE_COUNT; i++) {
       const idx = i * 3;
-      // Gentle horizontal drift (no vertical fall)
-      arr[idx] += Math.sin(this.dustTime * 0.3 + i * 1.7) * DUST_DRIFT_SPEED * dt;
-      arr[idx + 2] += Math.cos(this.dustTime * 0.4 + i * 2.3) * DUST_DRIFT_SPEED * 0.7 * dt;
+      // Gentle horizontal drift (no vertical fall) + wind transport
+      arr[idx]     += (Math.sin(this.dustTime * 0.3 + i * 1.7) * DUST_DRIFT_SPEED       * this.wind.gust + this.wind.vx) * dt;
+      arr[idx + 2] += (Math.cos(this.dustTime * 0.4 + i * 2.3) * DUST_DRIFT_SPEED * 0.7 * this.wind.gust + this.wind.vz) * dt;
       // Slight vertical bob
       arr[idx + 1] += Math.sin(this.dustTime * 0.2 + i * 3.1) * 0.1 * dt;
 
@@ -838,9 +884,9 @@ export class SkyAndFog {
       const idx = i * 3;
       // Slow fall
       arr[idx + 1] -= LEAF_FALL_SPEED * dt;
-      // Swaying horizontal drift
-      arr[idx] += Math.sin(this.leafTime * 0.6 + i * 2.1) * LEAF_DRIFT_SPEED * dt;
-      arr[idx + 2] += Math.cos(this.leafTime * 0.5 + i * 1.7) * LEAF_DRIFT_SPEED * 0.6 * dt;
+      // Swaying horizontal drift + wind transport (gust amplifies sway)
+      arr[idx]     += (Math.sin(this.leafTime * 0.6 + i * 2.1) * LEAF_DRIFT_SPEED       * this.wind.gust + this.wind.vx) * dt;
+      arr[idx + 2] += (Math.cos(this.leafTime * 0.5 + i * 1.7) * LEAF_DRIFT_SPEED * 0.6 * this.wind.gust + this.wind.vz) * dt;
 
       // Reset to top when below ground
       if (arr[idx + 1] < 0) {
@@ -1033,13 +1079,23 @@ export class SkyAndFog {
     const positions = this.rainGeometry.attributes.position as THREE.BufferAttribute;
     const arr = positions.array as Float32Array;
 
+    const half = RAIN_AREA / 2;
     for (let i = 0; i < RAIN_PARTICLE_COUNT; i++) {
-      arr[i * 3 + 1] -= RAIN_SPEED * dt; // fall down
-      if (arr[i * 3 + 1] < 0) {
-        arr[i * 3 + 1] = RAIN_AREA; // reset to top
-        arr[i * 3] = (Math.random() - 0.5) * RAIN_AREA;
-        arr[i * 3 + 2] = (Math.random() - 0.5) * RAIN_AREA;
+      const idx = i * 3;
+      arr[idx + 1] -= RAIN_SPEED * dt; // fall down
+      arr[idx]     += this.wind.vx * dt;
+      arr[idx + 2] += this.wind.vz * dt;
+
+      if (arr[idx + 1] < 0) {
+        arr[idx + 1] = RAIN_AREA; // reset to top
+        arr[idx]     = (Math.random() - 0.5) * RAIN_AREA;
+        arr[idx + 2] = (Math.random() - 0.5) * RAIN_AREA;
       }
+      // Wrap horizontally for wind-driven drift
+      if (arr[idx]     >  half) arr[idx]     -= RAIN_AREA;
+      if (arr[idx]     < -half) arr[idx]     += RAIN_AREA;
+      if (arr[idx + 2] >  half) arr[idx + 2] -= RAIN_AREA;
+      if (arr[idx + 2] < -half) arr[idx + 2] += RAIN_AREA;
     }
 
     positions.needsUpdate = true;
@@ -1107,13 +1163,14 @@ export class SkyAndFog {
     const positions = this.snowGeometry.attributes.position as THREE.BufferAttribute;
     const arr = positions.array as Float32Array;
 
+    const halfS = SNOW_AREA / 2;
     for (let i = 0; i < SNOW_PARTICLE_COUNT; i++) {
       const idx = i * 3;
       // Slow fall
       arr[idx + 1] -= SNOW_SPEED * dt;
-      // Horizontal drift (sin/cos for gentle swaying)
-      arr[idx] += Math.sin(this.snowTime * 0.5 + i) * SNOW_DRIFT_SPEED * dt;
-      arr[idx + 2] += Math.cos(this.snowTime * 0.7 + i * 0.3) * SNOW_DRIFT_SPEED * 0.5 * dt;
+      // Horizontal drift = small sin sway + wind transport
+      arr[idx]     += (Math.sin(this.snowTime * 0.5 + i)         * 0.6 * this.wind.gust + this.wind.vx) * dt;
+      arr[idx + 2] += (Math.cos(this.snowTime * 0.7 + i * 0.3)   * 0.4 * this.wind.gust + this.wind.vz) * dt;
 
       // Reset to top when below ground
       if (arr[idx + 1] < 0) {
@@ -1121,6 +1178,11 @@ export class SkyAndFog {
         arr[idx + 1] = SNOW_AREA;
         arr[idx + 2] = (Math.random() - 0.5) * SNOW_AREA;
       }
+      // Wrap on wind transport
+      if (arr[idx]     >  halfS) arr[idx]     -= SNOW_AREA;
+      if (arr[idx]     < -halfS) arr[idx]     += SNOW_AREA;
+      if (arr[idx + 2] >  halfS) arr[idx + 2] -= SNOW_AREA;
+      if (arr[idx + 2] < -halfS) arr[idx + 2] += SNOW_AREA;
     }
 
     positions.needsUpdate = true;

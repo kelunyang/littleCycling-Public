@@ -39,7 +39,7 @@ watch(
   padding: 8px 14px;
   background: var(--hud-bg);
   clip-path: var(--clip-panel-sm);
-  border: 1px solid rgba(252, 238, 9, 0.25);
+  border: 1.5px solid rgba(252, 238, 9, 0.25);
   pointer-events: auto;
   transition: transform 0.15s ease;
 }

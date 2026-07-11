@@ -15,7 +15,7 @@
 
 import type { RoutePoint } from '@littlecycling/shared';
 import { fetchFeaturesInWorker } from '@/game/terrain/mvt-worker-client';
-import { PX_PER_METER, ELEVATION_EXAGGERATION } from './phaser2d-scene';
+import { PX_PER_METER, type Phaser2DScene } from './phaser2d-scene';
 import type { PhaserStyleStrategy } from './phaser-style-strategy';
 
 // Re-export ProjectedFeature so existing consumers don't need to change imports
@@ -100,7 +100,7 @@ export interface WaterFeaturePos {
 }
 
 export class TerrainChunkManager2D {
-  private scene: Phaser.Scene;
+  private scene: Phaser2DScene;
   private strategy: PhaserStyleStrategy;
   private elevationProfile: ElevationSample[];
   private features: ProjectedFeature[];
@@ -113,7 +113,7 @@ export class TerrainChunkManager2D {
   private lastLampDistM = -Infinity;
 
   constructor(
-    scene: Phaser.Scene,
+    scene: Phaser2DScene,
     elevationProfile: ElevationSample[],
     features: ProjectedFeature[],
     strategy: PhaserStyleStrategy,
@@ -162,6 +162,20 @@ export class TerrainChunkManager2D {
     }
   }
 
+  /**
+   * Return all projected features within the chunk containing distanceM and
+   * the immediate neighbours — used by the cycling-glasses zone detector.
+   */
+  getNearbyFeatures(distanceM: number): ProjectedFeature[] {
+    const chunk = Math.floor(distanceM / CHUNK_SIZE_M);
+    const result: ProjectedFeature[] = [];
+    for (let i = chunk - 1; i <= chunk + 1; i++) {
+      const arr = this.featuresByChunk.get(i);
+      if (arr) result.push(...arr);
+    }
+    return result;
+  }
+
   private loadChunk(index: number) {
     const startDistM = index * CHUNK_SIZE_M;
     const endDistM = (index + 1) * CHUNK_SIZE_M;
@@ -181,7 +195,7 @@ export class TerrainChunkManager2D {
           this.renderBuilding(gfx, f, baselineY, elevRange);
           break;
         case 'tree':
-          this.renderTree(gfx, f, baselineY, elevRange);
+          this.renderTree(f, baselineY, elevRange, objects);
           break;
         case 'water': {
           const wp = this.renderWater(gfx, f, baselineY, elevRange);
@@ -192,7 +206,7 @@ export class TerrainChunkManager2D {
           this.renderGrass(gfx, f, baselineY, elevRange);
           break;
         case 'road':
-          this.renderRoadLamp(gfx, f, baselineY, elevRange);
+          this.renderRoadLamp(gfx, f, baselineY, elevRange, objects);
           break;
       }
     }
@@ -234,18 +248,38 @@ export class TerrainChunkManager2D {
     this.strategy.renderBuilding(gfx, x - widthPx / 2, groundY - heightPx, widthPx, heightPx, colorIndex, hash);
   }
 
-  /** Render a tree — delegates visual style to strategy. */
+  /** Render a tree — its own Graphics so it can sway via rotation tween. */
   private renderTree(
-    gfx: Phaser.GameObjects.Graphics,
     feature: ProjectedFeature,
     baselineY: number,
     elevRange: number,
+    objects: Phaser.GameObjects.GameObject[],
   ) {
     const groundY = this.getGroundY(feature.distanceM, baselineY, elevRange);
     const x = feature.distanceM * PX_PER_METER;
     const seed = Math.abs(Math.round(x * 7)) % 100;
 
-    this.strategy.renderTree(gfx, x, groundY, 0, seed);
+    const treeGfx = this.scene.add.graphics();
+    treeGfx.setDepth(15);
+    // Strategy draws relative to (0,0) — the tree base sits at the gfx origin
+    // so rotating around (0,0) sways the canopy naturally.
+    this.strategy.renderTree(treeGfx, 0, 0, 0, seed);
+    treeGfx.setPosition(x, groundY);
+
+    const swayAmp = 0.055 + (seed % 10) * 0.004; // ~3.2–5.3°
+    const duration = 1800 + (seed % 80) * 30;    // 1.8–4.2s
+    const delay = (seed * 67) % 1500;
+    this.scene.tweens.add({
+      targets: treeGfx,
+      rotation: { from: -swayAmp, to: swayAmp },
+      duration,
+      delay,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut',
+    });
+
+    objects.push(treeGfx);
   }
 
   /** Render water — delegates visual style to strategy. Returns position for shimmer. */
@@ -268,12 +302,14 @@ export class TerrainChunkManager2D {
   /** Minimum spacing between road lamps in meters. */
   private static readonly LAMP_MIN_SPACING_M = 80;
 
-  /** Render a street lamp at road positions — delegates visual style to strategy. */
+  /** Render a street lamp — static parts on chunk gfx, glow on its own
+   *  Graphics so it can pulse via an alpha tween. */
   private renderRoadLamp(
     gfx: Phaser.GameObjects.Graphics,
     feature: ProjectedFeature,
     baselineY: number,
     elevRange: number,
+    objects: Phaser.GameObjects.GameObject[],
   ) {
     // Skip if too close to previous lamp
     if (feature.distanceM - this.lastLampDistM < TerrainChunkManager2D.LAMP_MIN_SPACING_M) return;
@@ -284,6 +320,25 @@ export class TerrainChunkManager2D {
     const seed = Math.abs(Math.round(x * 17)) % 100;
 
     this.strategy.renderRoadLamp(gfx, x, groundY, seed);
+
+    const glowGfx = this.scene.add.graphics();
+    glowGfx.setDepth(15);
+    this.strategy.renderRoadLampGlow(glowGfx, 0, 0, seed);
+    glowGfx.setPosition(x, groundY);
+
+    const duration = 1500 + (seed % 70) * 25; // 1.5–3.2s
+    const delay = (seed * 41) % 1200;
+    this.scene.tweens.add({
+      targets: glowGfx,
+      alpha: { from: 0.55, to: 1.0 },
+      duration,
+      delay,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut',
+    });
+
+    objects.push(glowGfx);
   }
 
   /** Render grass/park — delegates visual style to strategy. */
@@ -300,27 +355,11 @@ export class TerrainChunkManager2D {
     this.strategy.renderGrass(gfx, x, groundY, 30, 4, seed);
   }
 
-  /** Get ground Y position for a given route distance. */
-  private getGroundY(distanceM: number, baselineY: number, elevRange: number): number {
-    // Binary search in elevation profile
-    let lo = 0;
-    let hi = this.elevationProfile.length - 1;
-    if (hi < 0) return baselineY;
-
-    while (lo < hi - 1) {
-      const mid = (lo + hi) >> 1;
-      if (this.elevationProfile[mid].distM <= distanceM) lo = mid;
-      else hi = mid;
-    }
-
-    const p0 = this.elevationProfile[lo];
-    const p1 = this.elevationProfile[hi];
-    const seg = p1.distM - p0.distM;
-    const t = seg > 0 ? (distanceM - p0.distM) / seg : 0;
-    const ele = p0.eleM + (p1.eleM - p0.eleM) * Math.max(0, Math.min(1, t));
-
-    const normalizedEle = (ele - this.minElevation) / elevRange;
-    return baselineY - normalizedEle * (baselineY * 0.6) * ELEVATION_EXAGGERATION / (elevRange > 500 ? 2 : 1);
+  /** Get ground Y position for a given route distance. Delegates to the host
+   *  scene so chunks always sit on the same terrain surface as the scene's own
+   *  drawTerrain — including any per-instance baseline override (Welcome). */
+  private getGroundY(distanceM: number, _baselineY: number, _elevRange: number): number {
+    return this.scene.getTerrainY(distanceM);
   }
 
   /** Get all currently loaded water feature positions (for shimmer animation). */
@@ -330,6 +369,21 @@ export class TerrainChunkManager2D {
       result.push(...waters);
     }
     return result;
+  }
+
+  /**
+   * Hot-swap the visual style strategy. Drops every loaded chunk so the next
+   * update() repaints them with the new style. Used by the Welcome backdrop
+   * when the user toggles plastic ↔ cuphead without rebuilding the scene.
+   */
+  setStrategy(newStrategy: PhaserStyleStrategy) {
+    this.strategy = newStrategy;
+    for (const chunk of this.chunks.values()) {
+      this.unloadChunk(chunk);
+    }
+    this.chunks.clear();
+    this.waterByChunk.clear();
+    this.lastLampDistM = -Infinity;
   }
 
   dispose() {

@@ -84,6 +84,25 @@ function clearDate() {
   selectedDateRides.value = [];
 }
 
+/**
+ * Drop a ride from the cached lists after the server has confirmed the
+ * delete. Decrements the dot count on the calendar so the user sees an
+ * immediate response without re-fetching the whole month.
+ */
+function removeRide(rideId: number) {
+  const target = selectedDateRides.value.find((r) => r.id === rideId);
+  selectedDateRides.value = selectedDateRides.value.filter((r) => r.id !== rideId);
+  if (target) {
+    const day = dayjs(target.startedAt).format('YYYY-MM-DD');
+    const current = dayCounts.value.get(day) ?? 0;
+    const next = Math.max(0, current - 1);
+    const updated = new Map(dayCounts.value);
+    if (next === 0) updated.delete(day);
+    else updated.set(day, next);
+    dayCounts.value = updated;
+  }
+}
+
 async function openDetail(ride: Ride) {
   detailRide.value = ride;
   detailOpen.value = true;
@@ -132,6 +151,7 @@ export function useCalendar() {
     close,
     selectDate,
     clearDate,
+    removeRide,
     openDetail,
     closeDetail,
     navigateMonth,

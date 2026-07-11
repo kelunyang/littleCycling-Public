@@ -99,14 +99,118 @@ export interface WsSessionEndMessage {
   totalRecords: number;
 }
 
+/**
+ * Host hardware capability snapshot — does this machine have a working
+ * ANT+ stick / Bluetooth adapter? Determined at startScan() time.
+ *
+ * 'unknown'      = not probed yet (or skipped, e.g. noBleHr)
+ * 'available'    = adapter opened / powered on
+ * 'unavailable'  = open/init failed; check accompanying message
+ */
+export interface HostCapabilities {
+  ant: 'unknown' | 'available' | 'unavailable';
+  ble: 'unknown' | 'available' | 'unavailable';
+  antMessage?: string;
+  bleMessage?: string;
+}
+
 export interface WsStatusMessage {
   type: 'status';
   state: LiveSessionState;
   sensors: DetectedSensor[];
   rideId: number | null;
+  capabilities: HostCapabilities;
 }
 
-export type WsMessage = WsSensorMessage | WsSessionStartMessage | WsSessionEndMessage | WsStatusMessage;
+// ── Game state (server-authoritative simulation) ──
+
+/**
+ * A coin placed in the world by the server simulation. `routeDistanceM` is
+ * the collision axis (distance along the route); lat/lon/ele are derived by
+ * the server via interpolateAlongRoute so clients render without re-deriving.
+ */
+export interface CoinDto {
+  /** Stable numeric id (monotonic per recording). Delta ops are idempotent per id. */
+  id: number;
+  routeDistanceM: number;
+  lat: number;
+  lon: number;
+  ele: number;
+}
+
+/**
+ * Dynamic state of an in-flight random event. Static presentation (tint,
+ * weather, darken, name) is looked up client-side from RANDOM_EVENTS_MAP by
+ * `id` — only what changes frame-to-frame crosses the wire.
+ */
+export interface GameEventDto {
+  id: string;
+  state: 'active' | 'result';
+  elapsedMs: number;     // time since event start
+  durationMs: number;
+  onTarget: boolean;
+  targetWatts: number;
+  /** Present only in 'result' state. */
+  success?: boolean;
+}
+
+/**
+ * Authoritative game state broadcast by the server simulation at ~20Hz.
+ *
+ * Interpolation contract (load-bearing — see plan/2026-summer.md):
+ * - Clients MUST interpolate in monotonic `cumulativeDistance` space and
+ *   derive position via interpolateAlongRoute(dist % totalDist). Never lerp
+ *   `distanceTraveled` (wraps to 0 each lap → teleport) or raw lat/lon.
+ * - `elapsed` is wall-clock ms since recordingStartTime — the same clock as
+ *   WsSensorMessage.elapsed and the ride's saved durationMs (方案甲: pause
+ *   does not stop it).
+ * - `coins` ops are deltas keyed by CoinDto.id and must be applied
+ *   idempotently; `reconcile`, when present, is the full authoritative coin
+ *   set and replaces client state (sent periodically and on reconnect).
+ */
+export interface WsGameStateMessage {
+  type: 'game_state';
+  tsEpoch: number;
+  elapsed: number;
+  /** Physics frozen (start prompt or manual pause). Clock keeps running. */
+  paused: boolean;
+  /** targetDurationMs reached — simulation frozen, awaiting /api/live/stop. */
+  ended: boolean;
+  position: { lat: number; lon: number; ele: number; bearing: number };
+  /** Monotonic meters since game start. THE interpolation axis. */
+  cumulativeDistance: number;
+  /** Wrapped per-lap distance (display only, derived from cumulativeDistance). */
+  distanceTraveled: number;
+  laps: number;
+  speedKmh: number;
+  /** Effective watts driving the sim — real power meter reading when present,
+   *  otherwise the trainer-curve estimate from wheel speed (staleness-adjusted
+   *  to 0). THE canonical power signal for ALL client-side evaluation
+   *  (workout on-target, HUD power display, time-series charts). Clients must
+   *  never substitute speedKmh for power. */
+  powerW: number;
+  /** Provenance of powerW — 'meter' when a real PWR sensor is the source,
+   *  'estimated' when derived from wheel speed via the trainer power curve.
+   *  Lets the UI label estimated power so riders know what the on-target
+   *  judgement is based on. */
+  powerSource: 'meter' | 'estimated';
+  steeringAngle: number;
+  /** HR zone number 1–5, null when no HR signal. redLine ≡ zone === 5. */
+  zone: number | null;
+  /** Coin combo multiplier (1–5). */
+  combo: number;
+  /** Player's authoritative coin total (self-healing scalar — not derivable from deltas). */
+  coinsTotal: number;
+  coins?: {
+    spawned: CoinDto[];
+    collected: { id: number; combo: number }[];
+    removed: number[];
+    reconcile?: CoinDto[];
+  };
+  event?: GameEventDto;
+}
+
+export type WsMessage = WsSensorMessage | WsSessionStartMessage | WsSessionEndMessage | WsStatusMessage | WsGameStateMessage;
 
 // ── GPX route ──
 
@@ -129,27 +233,39 @@ export interface SavedRoute {
   createdAt: number;    // tsEpoch when imported
 }
 
-// ── Route catalog (EuroVelo stages) ──
+// ── EuroVelo catalog ──
+
+export type EuroVeloStageStatus =
+  | 'CERTIFIED'
+  | 'DEVELOPED_SIGNED'
+  | 'DEVELOPED_UNSIGNED'
+  | 'PARTIALLY_DEVELOPED_SIGNED'
+  | 'PARTIALLY_DEVELOPED_UNSIGNED'
+  | 'UNDEVELOPED'
+  | 'OTHER';
 
 export interface CatalogStage {
-  stage: number;        // stage number (1-based)
-  name: string;         // e.g. "From Basel to Karlsruhe"
-  distanceKm: number;
-  elevGainM: number;
-  gpxId: number;        // EuroVelo GPX download ID for /route/get-gpx/{gpxId}
+  stage: number;        // 1..N within a route
+  name: string;         // e.g. "Nordkapp – Honningsvåg"
+  status: EuroVeloStageStatus;
+  distanceKm: number;   // rounded to 0.1 km
+  elevGainM: number;    // rounded to 1 m
 }
 
 export interface CatalogRace {
-  id: string;           // e.g. "ev15"
-  name: string;         // e.g. "EuroVelo 15 — Rhine Cycle Route"
-  year?: number;        // optional (EuroVelo routes are not year-based)
-  stages: CatalogStage[];
+  id: string;           // e.g. "ev1"
+  evNum: number;        // e.g. 1
+  name: string;         // e.g. "EuroVelo 1 — Atlantic Coast Route"
+  stages: CatalogStage[];           // empty until route is fetched on demand
+  fetchedAt: number | null;         // tsEpoch when stages were last fetched
 }
 
 export interface RouteCatalog {
-  updatedAt: number;    // tsEpoch ms — when this catalog was last updated
+  updatedAt: number;
+  attribution: string;  // ODbL attribution text shown in UI
   races: CatalogRace[];
 }
+
 
 // ── Ride history (SQLite) ──
 
@@ -167,9 +283,42 @@ export interface Ride {
   maxPowerW?: number;
   maxSpeed?: number;
   totalCoins: number;
+  totalLaps: number;
+  /** % of hr>0 time in Z2/Z3 (0-100). Present on server-sim rides (P7+). */
+  zoneSustainPct?: number;
   routeId?: string;
   routeName?: string;
   notes?: string;
+  /** Sensors that were active when recording started (for FIT device_info). */
+  sensors?: DetectedSensor[];
+}
+
+/**
+ * `/api/live/stop` response payload — the server-authoritative ride summary
+ * (P7). Every stat here is produced by the server (GameSimulation
+ * accumulators for game rides; sensor-frame accumulators for recording-only
+ * sessions) — the client displays it verbatim.
+ */
+export interface RideSummaryDto {
+  rideId: number;
+  sampleCount: number;
+  endedAt: number;
+  durationMs: number;
+  /** FIT/sensor distance integral (m) — the export truth. */
+  distanceM: number;
+  /** Sim game distance (m) — what the player rode on screen. */
+  gameDistanceM?: number;
+  avgPowerW?: number;
+  avgHr?: number;
+  avgCadence?: number;
+  avgSpeed?: number;
+  maxHr?: number;
+  maxPowerW?: number;
+  maxSpeed?: number;
+  totalCoins?: number;
+  totalLaps?: number;
+  /** % of hr>0 time in Z2/Z3 (0-100). */
+  zoneSustainPct?: number;
 }
 
 export interface RideSample {

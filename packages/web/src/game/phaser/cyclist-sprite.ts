@@ -40,10 +40,11 @@ function spriteKey(pose: CyclistPose) { return `__cyclist_${pose}__`; }
 function animKey(pose: CyclistPose) { return `pedal_${pose}`; }
 
 /**
- * Generate all pose spritesheets and create the animation defs.
- * Call once during scene.create().
+ * Bake every pose's spritesheet + animation into the scene's texture/anim
+ * managers. Idempotent — safe to call repeatedly only after first removing
+ * the existing keys (see rebuildCyclistTextures).
  */
-export function createCyclistSprite(scene: Phaser.Scene, strategy: PhaserStyleStrategy): Phaser.GameObjects.Sprite {
+function bakeCyclistTexturesForStrategy(scene: Phaser.Scene, strategy: PhaserStyleStrategy) {
   for (const pose of ALL_POSES) {
     const key = spriteKey(pose);
     if (!scene.textures.exists(key)) {
@@ -58,6 +59,14 @@ export function createCyclistSprite(scene: Phaser.Scene, strategy: PhaserStyleSt
       });
     }
   }
+}
+
+/**
+ * Generate all pose spritesheets and create the animation defs.
+ * Call once during scene.create().
+ */
+export function createCyclistSprite(scene: Phaser.Scene, strategy: PhaserStyleStrategy): Phaser.GameObjects.Sprite {
+  bakeCyclistTexturesForStrategy(scene, strategy);
 
   const sprite = scene.add.sprite(0, 0, spriteKey('normal'));
   sprite.setOrigin(0.5, 1);
@@ -68,6 +77,39 @@ export function createCyclistSprite(scene: Phaser.Scene, strategy: PhaserStyleSt
   (sprite as any)._currentPose = 'normal';
 
   return sprite;
+}
+
+/**
+ * Hot-swap the cyclist textures for a new strategy without recreating the
+ * sprite GameObject. Removes existing animations + spritesheet textures,
+ * re-bakes from the new strategy, and rebinds the sprite to the matching
+ * animation so its current frame stays seamless.
+ */
+export function rebuildCyclistTextures(
+  scene: Phaser.Scene,
+  strategy: PhaserStyleStrategy,
+  sprite?: Phaser.GameObjects.Sprite,
+): void {
+  for (const pose of ALL_POSES) {
+    if (scene.anims.exists(animKey(pose))) {
+      scene.anims.remove(animKey(pose));
+    }
+    const key = spriteKey(pose);
+    if (scene.textures.exists(key)) {
+      scene.textures.remove(key);
+    }
+    const srcKey = key + '_src';
+    if (scene.textures.exists(srcKey)) {
+      scene.textures.remove(srcKey);
+    }
+  }
+  bakeCyclistTexturesForStrategy(scene, strategy);
+
+  if (sprite) {
+    const currentPose = ((sprite as any)._currentPose as CyclistPose) ?? 'normal';
+    sprite.setTexture(spriteKey(currentPose), 0);
+    sprite.play(animKey(currentPose));
+  }
 }
 
 /**

@@ -4,13 +4,17 @@
  * Dynamic-imports Phaser for code-splitting (~1MB) and creates a
  * game instance whose loop is driven externally by useGameLoop.
  *
+ * Uses WebGL renderer so custom PostFX pipelines (cycling glasses +
+ * tunnel vision) can run as GLSL shaders. The pipelines are registered
+ * via the GameConfig.pipeline map before the game boots.
+ *
  * Phaser's internal rAF loop is paused via sleep() after the first
  * frame (postBoot fires before loop.start(), so sleep() must be
  * deferred). Each frame, the caller invokes tick() which calls
  * game.loop.tick() — one full Phaser frame without restarting rAF.
  */
 
-import type { Phaser2DScene, PhaserBridge } from './phaser2d-scene';
+import type { Phaser2DScene, PhaserBridge, PhaserSceneMode } from './phaser2d-scene';
 import type { PhaserStyleStrategy } from './phaser-style-strategy';
 
 export interface PhaserGameInstance {
@@ -22,6 +26,11 @@ export interface PhaserGameInstance {
   destroy(): void;
 }
 
+export interface PhaserGameOptions {
+  /** Defaults to 'game'. 'welcome' skips the cycling-glasses post-FX so the welcome backdrop stays clean. */
+  mode?: PhaserSceneMode;
+}
+
 /**
  * Create a Phaser game attached to the given canvas element.
  *
@@ -31,10 +40,13 @@ export interface PhaserGameInstance {
 export async function createPhaserGame(
   canvas: HTMLCanvasElement,
   strategy: PhaserStyleStrategy,
+  options: PhaserGameOptions = {},
 ): Promise<PhaserGameInstance> {
   // Dynamic import for code splitting
   const Phaser = await import('phaser');
   const { Phaser2DScene: SceneClass } = await import('./phaser2d-scene');
+  const { CyclingGlassesPipeline, CYCLING_GLASSES_PIPELINE_KEY } = await import('./cycling-glasses-pipeline');
+  const { TunnelVisionPipeline, TUNNEL_VISION_PIPELINE_KEY } = await import('./tunnel-vision-pipeline');
 
   // Shared bridge object — plain JS, not reactive
   const bridge: PhaserBridge = {
@@ -49,10 +61,10 @@ export async function createPhaserGame(
     moonPhase: 0,
   };
 
-  const scene = new SceneClass(bridge, strategy);
+  const scene = new SceneClass(bridge, strategy, options.mode ?? 'game');
 
   const game = new Phaser.Game({
-    type: Phaser.CANVAS,
+    type: Phaser.WEBGL,
     canvas,
     width: canvas.clientWidth,
     height: canvas.clientHeight,
@@ -63,7 +75,13 @@ export async function createPhaserGame(
       pixelArt: true,
       antialias: false,
     },
-    // No physics engine — ball movement is handled by useBallEngine
+    // Custom GLSL pipelines for the cycling-glasses look (lens tint, vignette,
+    // distortion, lens marks, zone ambient, coin glow) and tunnel vision blur.
+    pipeline: {
+      [CYCLING_GLASSES_PIPELINE_KEY]: CyclingGlassesPipeline,
+      [TUNNEL_VISION_PIPELINE_KEY]: TunnelVisionPipeline,
+    } as any,
+    // No physics engine — ball movement comes from the server simulation
     physics: {
       default: false as any,
     },
