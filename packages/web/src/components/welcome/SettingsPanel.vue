@@ -232,7 +232,14 @@
             </div>
             <label>
               API Key
-              <el-input v-model="provider.key" size="small" type="password" show-password placeholder="sk-..." @change="saveLlm" />
+              <el-input
+                v-model="provider.key"
+                size="small"
+                type="password"
+                show-password
+                :placeholder="provider.hasKey ? 'Saved — leave blank to keep' : 'sk-...'"
+                @change="saveLlm"
+              />
             </label>
             <label>
               Endpoint
@@ -358,7 +365,7 @@ const debugModel = computed({
 });
 
 function addLlm() {
-  config.value.llm.push({ name: '', key: '', endpoint: '', model: '', enabled: true });
+  config.value.llm.push({ id: crypto.randomUUID(), name: '', key: '', endpoint: '', model: '', enabled: true });
   saveLlm();
 }
 
@@ -373,7 +380,7 @@ function saveLlm() {
 
 // ── LLM Presets ──
 
-const LLM_PRESETS: Omit<LlmProvider, 'key' | 'enabled'>[] = [
+const LLM_PRESETS: Omit<LlmProvider, 'id' | 'key' | 'enabled' | 'hasKey'>[] = [
   { name: 'DeepSeek', endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
   { name: 'Gemini', endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai/', model: 'gemini-3.1-flash-lite-preview' },
   { name: 'Kimi', endpoint: 'https://api.moonshot.ai/v1', model: 'kimi-k2.5' },
@@ -381,8 +388,8 @@ const LLM_PRESETS: Omit<LlmProvider, 'key' | 'enabled'>[] = [
   { name: 'GLM', endpoint: 'https://api.z.ai/api/paas/v4/', model: 'glm-5' },
 ];
 
-function addPreset(preset: Omit<LlmProvider, 'key' | 'enabled'>) {
-  config.value.llm.push({ ...preset, key: '', enabled: false });
+function addPreset(preset: Omit<LlmProvider, 'id' | 'key' | 'enabled' | 'hasKey'>) {
+  config.value.llm.push({ ...preset, id: crypto.randomUUID(), key: '', enabled: false });
   saveLlm();
 }
 

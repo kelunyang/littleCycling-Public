@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "dev": "npm run dev:all -w packages/server",
-    "dev:no-caddy": "npm run dev:all -w packages/server -- --no-caddy",
+    "dev:caddy": "npm run dev:all -w packages/server -- --caddy",
     "build": "npm run build -w packages/shared && npm run build -w packages/server && npm run build -w packages/web",
     "record": "npm run record -w packages/server",
     "replay": "npm run replay -w packages/server",

@@ -42,7 +42,9 @@ rm -f "$WORK_DIR"/data/*.jsonl \
       "$WORK_DIR"/data/*.db "$WORK_DIR"/data/*.db-shm "$WORK_DIR"/data/*.db-wal \
       "$WORK_DIR"/data/config.json
 rm -rf "$WORK_DIR/plan"
-echo "Sanitized: sessions / recordings / db / config / plan stripped from public sync"
+# deploy.sh 描述私有↔公開的雙推流程，公開 repo 不該出現（publish-public.sh 本身留著即可）
+rm -f "$WORK_DIR/scripts/deploy.sh"
+echo "Sanitized: sessions / recordings / db / config / plan / deploy.sh stripped from public sync"
 
 # 在 worktree 中操作
 cd "$WORK_DIR"

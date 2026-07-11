@@ -36,16 +36,12 @@ littleCycling/
 | 圖示 | Font Awesome |
 | 時間處理 | dayjs |
 | 資料庫 | SQLite |
-| 反向代理 | Caddy |
+| 反向代理（選用） | Caddy |
 
 ## 環境需求
 
 - **Node.js >= 20**
-- **Caddy** — 反向代理，統一前後端與 WebSocket 入口（**必裝**，[安裝指南](https://caddyserver.com/docs/install)）。專案已提供 `Caddyfile.example`，複製後即可使用：
-  ```bash
-  cp Caddyfile.example Caddyfile
-  caddy run
-  ```
+- **Caddy**（**選用**）— 反向代理，統一前後端與 WebSocket 入口。**開發時不需要**：Vite dev server 已內建 proxy（`/api` 與 WebSocket 都轉發到後端 `:8765`），開 `http://localhost:5173` 即可。只有想要一個 production-like 的統一入口（`:3000`）時才需要，見「Caddy 反向代理（選用）」一節。
 - **ANT+ Stick**: Garmin ANT+ Stick 2（需安裝 WinUSB 驅動，透過 Zadig）
 - **執行環境**: ANT+ 相關功能須在 **Windows** 上執行（非 WSL），前端開發可在 WSL 進行
 
@@ -104,23 +100,25 @@ npm run preview -w packages/web
 
 ### 5. 一鍵啟動開發模式
 
-`npm run dev` 會同時啟動所有服務（shared watch + server + web + caddy），並顯示 Ink 儀表板：
+`npm run dev` 會同時啟動所有服務（shared watch + server + web），並顯示 Ink 儀表板。**預設不啟動 Caddy**（不需要）：
 
 ```bash
-# 一鍵啟動（含 Caddy 反向代理）
+# 一鍵啟動（不含 Caddy，開發推薦）
 npm run dev
 
-# 不啟動 Caddy
-npm run dev:no-caddy
+# 額外一起啟動 Caddy 反向代理（選用，:3000 統一入口）
+npm run dev:caddy
 ```
 
-儀表板會顯示每個服務的狀態（starting / ready / error），下方即時輸出所有服務的 log。按 `q` 停止所有服務。
+儀表板會顯示每個服務的狀態（starting / ready / error）、即時感測器數值，下方即時輸出所有服務的 log。按 **`Ctrl+C`** 停止所有服務。
 
-開啟 `http://localhost:3000` 即可使用（Caddy 統一入口）。
+開啟 `http://localhost:5173` 即可使用。一鍵模式會另起一個內部 dev proxy（`:8770`），Vite 的 `/api` 與 WebSocket 都經由它轉發到後端 live server（`:8765`）；**當你另外執行 `npm run replay`（`:8766`）時，dev proxy 會自動偵測並把 WebSocket 熱切換到 replay server**，不需重啟。若有加 `--caddy`，也可改開統一入口 `http://localhost:3000`。
 
-### 6. Caddy 反向代理
+### 6. Caddy 反向代理（選用）
 
-Caddy 將前端（:5173）和後端（:8765）統一代理到 `:3000`：
+開發時**不需要** Caddy——Vite dev server 已內建 proxy 統一前後端與 WebSocket。只有想要一個 production-like 的單一入口時才用它。
+
+啟動後 Caddy 將前端（:5173）和後端（:8765）統一代理到 `:3000`：
 
 - `/api/*`、`/ws/*` → 後端 Fastify（:8765）
 - 其餘請求 → 前端 Vite dev server（:5173）
@@ -152,17 +150,20 @@ npm run dev -w packages/shared
 # Terminal 2 — 啟動後端 server
 npm run server -w packages/server
 
-# Terminal 3 — 啟動前端 dev server
+# Terminal 3 — 啟動前端 dev server（開 http://localhost:5173 即可用）
 npm run dev -w packages/web
 
-# Terminal 4 — Caddy 反向代理
+# Terminal 4 —（選用）Caddy 反向代理，想要 :3000 統一入口時才需要
 caddy run --config Caddyfile.example
 ```
 
-如果沒有實體感測器，可以用 replay 模式代替 server：
+如果沒有實體感測器，可以用 replay 模式（回放內建 JSONL，`:8766`）。**最簡單的做法是用一鍵模式**：`npm run dev` 照常跑，另開一個 terminal 執行 `npm run replay`，dev proxy 會自動把 WebSocket 切到 replay。
+
+若堅持只手動起前端（不透過 dev proxy），Vite 預設連 `:8765`，必須明確指向 replay 的 `:8766`：
 
 ```bash
-npm run replay
+npm run replay                                  # Terminal A：replay server（:8766）
+VITE_WS_PORT=8766 npm run dev -w packages/web   # Terminal B：讓 Vite 連到 replay
 ```
 
 ### 路線匯入
@@ -236,31 +237,35 @@ npm run replay
 
 ### 沒有感測器的快速體驗路徑
 
-大多數使用者不會有 ANT+ stick 和自行車感測器。請引導他們使用 **Replay 模式**：
+大多數使用者不會有 ANT+ stick 和自行車感測器。請引導他們使用 **Replay 模式**。最可靠的方式是搭配一鍵開發模式（dev proxy 會自動把 WebSocket 切到 replay）：
 
 ```bash
 npm install
 npm run build
-npm run replay          # 會回放內建的錄製資料，不需要任何硬體
+npm run dev             # Terminal 1：一鍵啟動（shared + server + web + dev proxy）
 ```
 
-然後另開 terminal 啟動前端：
+另開一個 terminal 啟動 replay（會回放內建錄製資料，不需要任何硬體）：
 
 ```bash
-npm run dev -w packages/web
+npm run replay          # Terminal 2：dev proxy 偵測到 :8766 後自動切換 WebSocket
 ```
 
-開啟 `http://localhost:5173` 即可看到遊戲畫面（無 Caddy 時直接連 Vite dev server）。
+開啟 `http://localhost:5173` 即可看到遊戲畫面。
+
+> ⚠️ 不要用「`npm run replay` + 單獨 `npm run dev -w packages/web`」：replay 在 `:8766`，但單獨啟動的 Vite 預設連 `:8765`，會連不上。要嘛用上面的一鍵模式，要嘛手動指定 `VITE_WS_PORT=8766 npm run dev -w packages/web`。
 
 ### 使用的 Port
 
 | Port | 用途 | 服務 |
 |------|------|------|
-| 3000 | Caddy 反向代理統一入口 | Caddy |
-| 5173 | Vite 前端 dev server | packages/web |
-| 8765 | WebSocket server（感測器資料） | packages/server |
+| 5173 | Vite 前端 dev server（**開發預設入口**，proxy 含 /api 與 WebSocket） | packages/web |
+| 8765 | live server：WebSocket（感測器資料）+ REST API | packages/server |
+| 8766 | replay server（回放 JSONL，`npm run replay` 才啟動） | packages/server |
+| 8770 | 一鍵模式的 dev proxy（Vite → 這裡 → 8765 或 8766，自動切換） | dev-runner |
+| 3000 | Caddy 反向代理統一入口（**選用**，`--caddy` 才啟動） | Caddy |
 
-如果有 port 衝突，WebSocket port 可在 `data/config.json` 的 `server.wsPort` 修改。
+如果有 port 衝突，WebSocket（live）port 可在 `data/config.json` 的 `server.wsPort` 修改。
 
 ### `data/config.json`
 

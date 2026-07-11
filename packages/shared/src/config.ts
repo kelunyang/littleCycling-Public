@@ -5,11 +5,18 @@
 
 /** LLM provider configuration (OpenAI-compatible endpoints) */
 export interface LlmProvider {
+  id: string;                // stable id — used to preserve the stored key across edits
   name: string;              // display name, e.g. 'DeepSeek'
   key: string;               // API key
   endpoint: string;          // base URL, e.g. 'https://api.deepseek.com/v1'
   model: string;             // model ID, e.g. 'deepseek-chat'
   enabled: boolean;          // whether this provider is active
+  /**
+   * Transient, GET-only flag: signals whether a key is stored, WITHOUT
+   * exposing the value. Set by the server's redacted config read; never
+   * persisted to data/config.json.
+   */
+  hasKey?: boolean;
 }
 
 export interface AppConfig {
