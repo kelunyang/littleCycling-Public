@@ -32,7 +32,10 @@ export function useWebSocket() {
         // game timer keeps tracking real wall-clock (方案甲: pauses are not
         // deducted, matching the recorded ride duration).
         sensorStore.updateClock(msg.elapsed);
-        if (gameStore.isPaused) return;
+        // 只有「騎乘中途暫停」(pause overlay)才凍結即時感測讀數;start prompt 不凍結——
+        // 「踩踏即開始」的 watch 需要即時 power/cadence,而此時 currentRideId 仍為 null
+        // (延後錄製,尚未 POST /api/live/start)。凍結會讓踩踏永遠觸發不了 auto-start。
+        if (gameStore.isPaused && gameStore.currentRideId !== null) return;
         const { profile, data } = msg;
         if (profile === 'HR') {
           sensorStore.updateHr(parseHrData(data));

@@ -86,6 +86,12 @@ export const useGameStateStore = defineStore('gameState', () => {
   const elapsed = ref(0);
   /** Latest in-flight random event (null when idle/cooldown). */
   const event = ref<GameEventDto | null>(null);
+  /** ms the rider has been not-pedalling (0 when pedalling or paused). Drives
+   *  the scold bubble + auto-pause countdown bar. */
+  const idleMs = ref(0);
+  /** True when the sim auto-paused from 30s of no pedalling (vs manual pause).
+   *  Drives the "pedal to resume" prompt; server auto-resumes on pedalling. */
+  const autoPaused = ref(false);
   /** True once at least one game_state frame has arrived this game. */
   const hasFrames = ref(false);
 
@@ -131,6 +137,8 @@ export const useGameStateStore = defineStore('gameState', () => {
     coinsTotal.value = msg.coinsTotal;
     elapsed.value = msg.elapsed;
     event.value = msg.event ?? null;
+    idleMs.value = msg.idleMs ?? 0;
+    autoPaused.value = msg.autoPaused ?? false;
     hasFrames.value = true;
 
     if (msg.coins && coinOpsHandler) {
@@ -213,6 +221,8 @@ export const useGameStateStore = defineStore('gameState', () => {
     coinsTotal.value = 0;
     elapsed.value = 0;
     event.value = null;
+    idleMs.value = 0;
+    autoPaused.value = false;
     hasFrames.value = false;
     routePoints = [];
     cumulativeDists = [];
@@ -223,7 +233,7 @@ export const useGameStateStore = defineStore('gameState', () => {
   return {
     // outputs
     position, cumulativeDistance, distanceTraveled, laps, speedKmh, steeringAngle,
-    paused, ended, powerW, powerSource, zone, combo, coinsTotal, elapsed, event, hasFrames,
+    paused, ended, powerW, powerSource, zone, combo, coinsTotal, elapsed, event, idleMs, autoPaused, hasFrames,
     // actions
     setRoute, push, sample, reset, onCoinOps,
   };

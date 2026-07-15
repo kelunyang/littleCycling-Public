@@ -25,6 +25,14 @@ export interface TimeSeriesSample {
 const SAMPLE_INTERVAL = 1000;
 
 /**
+ * Render cadence while paused. The world still has to move behind the
+ * translucent overlays (see `frame`), but nobody is racing — and every one of
+ * those frames drags the full post-processing chain through the GPU at display
+ * rate. 15fps keeps the scene alive for a quarter of the cost.
+ */
+const PAUSED_FRAME_MS = 1000 / 15;
+
+/**
  * Render loop: rAF (or ~10fps setTimeout when the tab is hidden) driving the
  * server-frame interpolation + renderer updates, plus DISPLAY-ONLY sampling
  * (live max/min chips, the pinned HUD chart's time series, FPS counter).
@@ -43,9 +51,11 @@ export function useGameLoop(deps: GameLoopDeps) {
   const elapsedMs = ref(0);
   const isRunning = ref(false);
 
-  // Time-series data for pinned charts (display-only)
+  // Time-series data for pinned charts (display-only). Sampled on a REAL-TIME
+  // cadence (perf clock), not the game clock — so the live chart fills steadily
+  // even when elapsedMs advances irregularly (replay seeks, jumpy anchors).
   const timeSeries = ref<TimeSeriesSample[]>([]);
-  let lastSampleMs = 0;
+  let lastSampleAtPerf = 0;
 
   // FPS counter (updated ~1/sec)
   const fps = ref(0);
@@ -69,6 +79,7 @@ export function useGameLoop(deps: GameLoopDeps) {
   let stId: ReturnType<typeof setTimeout> | null = null;
   let lastTime = 0;
   let tabHidden = false;
+  let lastPausedRenderAt = 0;
 
   // Authoritative elapsed time. Mirrors the server's wall-clock `elapsed`
   // (delivered on every sensor frame), interpolated with performance.now()
@@ -93,21 +104,35 @@ export function useGameLoop(deps: GameLoopDeps) {
       // Physics freezes with the server sim while paused, but RENDERING must
       // keep going: the start/pause overlays are translucent, and without
       // per-frame renders they'd sit on whatever half-initialized frame the
-      // canvas last drew (post-FX garbage on first mount). The ball stays
-      // put on its own — the paused server stops advancing cumulativeDistance,
-      // so interpolation just re-samples the same spot. The clock also keeps
-      // running (方案甲: paused time is not deducted, matching the record).
-      elapsedMs.value = computeElapsedMs(now);
-      const dt = lastTime === 0 ? 16 : Math.min(now - lastTime, 100);
-      lastTime = now;
-      deps.ballTick(dt);
-      if (!tabHidden) {
-        deps.updateBallVisual();
-        deps.updateCamera();
+      // canvas last drew (post-FX garbage on first mount). It does NOT have to
+      // keep going at display rate though — the whole paused frame (clock,
+      // interpolation, render) runs behind the PAUSED_FRAME_MS gate; on the
+      // skipped rAF ticks there is nothing to recompute, since the paused
+      // server stops advancing cumulativeDistance and interpolation would just
+      // re-sample the same spot. The clock keeps running (方案甲: paused time
+      // is not deducted, matching the record) — 15 updates/sec reads smooth.
+      if (now - lastPausedRenderAt >= PAUSED_FRAME_MS) {
+        lastPausedRenderAt = now;
+        elapsedMs.value = computeElapsedMs(now);
+        const dt = lastTime === 0 ? 16 : Math.min(now - lastTime, 100);
+        lastTime = now;
+        deps.ballTick(dt);
+        if (!tabHidden) {
+          deps.updateBallVisual();
+          deps.updateCamera();
+        }
       }
+      // Keep the FPS window pinned to "now" while paused, so the first rollover
+      // after resume counts a fresh second — not a partial frame count spread
+      // over the whole pause span, which would lock fpsMin to a bogus low.
+      fpsFrames = 0;
+      fpsLastTime = now;
       scheduleNext();
       return;
     }
+    // Un-paused: let the next pause render immediately rather than waiting out
+    // a stale throttle window.
+    lastPausedRenderAt = 0;
 
     // dt drives interpolation stepping only — timekeeping doesn't depend on it.
     const dt = lastTime === 0 ? 16 : Math.min(now - lastTime, 100);
@@ -165,9 +190,12 @@ export function useGameLoop(deps: GameLoopDeps) {
       if (cadenceMin.value == null || cadence < cadenceMin.value) cadenceMin.value = cadence;
     }
 
-    // Time-series sampling (~1 sample/second)
-    if (elapsedMs.value - lastSampleMs >= SAMPLE_INTERVAL) {
-      lastSampleMs = elapsedMs.value;
+    // Time-series sampling (~1 sample per real second). Gated on the perf clock
+    // `now` (not elapsedMs) so the chart accrues points steadily regardless of
+    // how the game clock is advancing. The stored `t` is still game-elapsed
+    // seconds, which equals real seconds during a live ride.
+    if (now - lastSampleAtPerf >= SAMPLE_INTERVAL) {
+      lastSampleAtPerf = now;
       timeSeries.value.push({
         t: Math.round(elapsedMs.value / 1000),
         hr,
@@ -223,7 +251,8 @@ export function useGameLoop(deps: GameLoopDeps) {
     if (isRunning.value) return;
     isRunning.value = true;
     lastTime = 0;
-    lastSampleMs = 0;
+    lastSampleAtPerf = 0;
+    lastPausedRenderAt = 0;
     elapsedMs.value = 0;
     fpsFrames = 0;
     fpsLastTime = 0;

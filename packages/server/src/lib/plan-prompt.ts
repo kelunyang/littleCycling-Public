@@ -8,7 +8,7 @@
 
 // ── HR zone boundaries (standard 5-zone model) ──
 
-function hrZoneBoundaries(hrMax: number) {
+export function hrZoneBoundaries(hrMax: number) {
   return {
     z1: Math.round(hrMax * 0.6),
     z2: Math.round(hrMax * 0.7),
@@ -71,13 +71,13 @@ export function getSystemSuffix(): string {
 2. 間歇訓練必須將 work 和 rest 交替拆成獨立 segment，type 分別為 "interval_work" 和 "interval_rest"
 3. 休息日必須輸出 type 為 "rest" 的 session，segments 為空陣列
 4. 所有數值必須為整數
-5. 只輸出 JSON，不得有任何前言、後記或 markdown 標記
+5. 不得在 JSON 外包裹 markdown 圍欄（如 \`\`\`）；description 欄位內容可使用 Markdown
 6. day 欄位使用 1-based 的連續編號（第1天=1, 第2天=2, ...），不使用星期幾名稱
 
 【輸出 Schema】
 {
   "name": "課表名稱",
-  "description": "課表簡述",
+  "description": "課表說明（可用 Markdown）",
   "weeks": [
     {
       "week": 1,
@@ -115,4 +115,36 @@ export function getSystemSuffix(): string {
  */
 export function buildFullPrompt(userPrompt: string): string {
   return userPrompt + getSystemSuffix();
+}
+
+// ── Agentic system prompt（給 agent tool-use loop 用）──
+
+/**
+ * agentic 課表生成的 system prompt。
+ *
+ * 與舊的 getSystemSuffix 不同：不再要求用純文字輸出 JSON，而是引導模型先
+ * 用工具查騎手真實紀錄與 FTP 估算，再呼叫 submit_plan 提交。JSON 格式規則
+ * 與 schema 移進 submit_plan 的 description / parameters，這裡只保留訓練
+ * 規劃原則與工具使用指引。舊函數（getSystemSuffix / buildFullPrompt）保留
+ * 供 ?legacy fallback。
+ */
+export function buildAgentSystemPrompt(): string {
+  return `你是一位專業自行車訓練規劃師，精通心率區間訓練與週期化訓練理論。
+你的任務是根據騎手資訊與其真實訓練紀錄，規劃一份個人化的室內訓練台課表。
+
+【訓練規劃原則】
+- 第1-2週禁止安排任何間歇訓練，只能使用 warmup、steady、cooldown
+- 第3週起才能引入間歇，強度循序漸進
+- 間歇訓練的 work 段心率目標應達到 Zone 4
+- 恢復段（interval_rest）心率應回落至 Zone 2
+- 每週總訓練量（分鐘）應逐週遞增，第4週可略降作為恢復週
+- 休息日必須輸出 type 為 "rest" 的 session，segments 為空陣列
+
+【工具使用指引】
+- 你可以呼叫工具查詢騎手的真實訓練紀錄與設定，據此個人化課表，不要盲目規劃。
+- 建議流程：先 get_training_config 取得心率區間、FTP（與 W/kg）；再 list_recent_rides 了解近期訓練量與強度；必要時用 estimate_ftp 估算實際 FTP、get_ride_summary_stats 檢視單次訓練節奏。
+- 個人化訓練量與強度時，get_weekly_load_summary（近幾週次數/時數/TSS/區間分鐘）與 get_ftp_trend（FTP 走勢）能幫你把課表難度對齊騎手目前的體能與負荷，避免一開始就過量。
+- 查到足夠資訊後，直接呼叫 submit_plan 提交最終課表；不要用純文字輸出 JSON。
+- description 欄位可使用 Markdown（標題、粗體、條列）撰寫課表說明；週 focus 與 segment notes 維持純文字短句。
+- submit_plan 若回傳驗證錯誤，請依錯誤訊息修正後再次呼叫。`;
 }

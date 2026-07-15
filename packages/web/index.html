@@ -4,6 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>littleCycling</title>
+    <!-- Import map：讓 esm.sh 上的 md-editor-v3（?external=vue）把 `import "vue"`
+         導向本地 shim，共用 app 打包的同一份 Vue 實例（兩份 Vue 會壞 reactivity）。
+         Vite 會把 app 自己的 vue import 改寫掉，此 map 只會被 CDN 模組用到。 -->
+    <script type="importmap">{ "imports": { "vue": "/vue-cdn-shim.mjs" } }</script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <!-- Noto Sans TC：全主題共用的 CJK fallback。拉丁 display 字型不含中文字符，

@@ -58,6 +58,19 @@ export class ElevationSampler {
   }
 
   /**
+   * Synchronous elevation lookup — returns the value if the covering tile is
+   * already cached, else null (no fetch triggered). Lets a hot loop sample
+   * thousands of points without awaiting a microtask per point: prefetch the
+   * region once with prefetchBounds(), then sample synchronously.
+   */
+  getElevationSync(lat: number, lon: number): number | null {
+    const { tileX, tileY, pixelX, pixelY } = this.latLonToTilePixel(lat, lon);
+    const tile = this.cache.get(tileKey(this.zoom, tileX, tileY));
+    if (!tile) return null;
+    return this.sampleTile(tile, pixelX, pixelY);
+  }
+
+  /**
    * Get a grid of elevations over a geographic bounding box.
    * Returns a row-major Float32Array of size rows × cols.
    */

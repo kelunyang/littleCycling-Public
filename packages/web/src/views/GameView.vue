@@ -1,5 +1,5 @@
 <template>
-  <div class="game-view" :data-world-style="worldStyle" ref="gameViewRef">
+  <div class="game-view" :data-world-style="worldStyle" :data-hud-mode="hudMode" ref="gameViewRef">
     <!-- Game content wrapper — moved between main window and PiP window -->
     <div ref="gameContentRef" class="game-content">
       <MapContainer v-show="isMapLibre" ref="mapContainerRef" />
@@ -11,6 +11,14 @@
         :distance-traveled="ballDist"
         @stop="handleStop"
         @pause="handlePause"
+      />
+
+      <!-- Cold start: the terrain streams in over the network, and until this
+           existed the rider watched a black screen. Sits above everything and
+           holds the start prompt back until there is a world to ride into. -->
+      <LoadingIntroOverlay
+        v-if="loading.overlayVisible"
+        @dismiss="loading.hide()"
       />
 
       <div v-if="showStartPrompt" class="start-prompt" @click="handlePause">
@@ -31,6 +39,15 @@
       />
 
       <CountdownOverlay :countdown="activeCountdown" />
+
+      <!-- Debug-only live style tuning (blocks/paper strategy params) -->
+      <StyleTuningPanel
+        v-if="settingsStore.config.debug && isThreeJs"
+        :get-strategy="getTerrainStrategy"
+        :apply-post-params="applyTerrainStyleParams"
+        :rebuild-terrain="rebuildTerrainMeshes"
+        :world-style="worldStyle"
+      />
     </div>
 
     <!-- Normal HUD (hidden when PiP is active) -->
@@ -85,10 +102,13 @@
       :is-event-on-target="randomEvents.isEventOnTarget.value"
       :event-screen-tint="randomEvents.eventScreenTint.value"
       :event-screen-tint-opacity="randomEvents.eventScreenTintOpacity.value"
+      :idle-ms="gameStateStore.idleMs"
+      :auto-paused="gameStateStore.autoPaused"
       @stop="handleStop"
       @pause="handlePause"
       @toggle-pip="togglePiP"
       @typewriter-done="gameMessages.onTypewriterDone"
+      @continue="handleContinue"
     />
 
     <!-- Placeholder when game is in PiP window -->
@@ -123,6 +143,7 @@ import { useWebSocket } from '@/composables/useWebSocket';
 import { useCameraControl } from '@/composables/useCameraControl';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useSensorStore } from '@/stores/sensorStore';
+import { useLoadingStore } from '@/stores/loadingStore';
 import { useWorkoutTracker } from '@/composables/useWorkoutTracker';
 import { useGameMessages } from '@/composables/useGameMessages';
 import { useRandomEvents } from '@/composables/useRandomEvents';
@@ -139,6 +160,8 @@ import Hud from '@/components/game/Hud.vue';
 import PiPSidebar from '@/components/game/PiPSidebar.vue';
 import PauseOverlay from '@/components/game/PauseOverlay.vue';
 import CountdownOverlay from '@/components/game/CountdownOverlay.vue';
+import LoadingIntroOverlay from '@/components/game/LoadingIntroOverlay.vue';
+import StyleTuningPanel from '@/components/game/StyleTuningPanel.vue';
 import { notifyError } from '@/utils/notify';
 
 const router = useRouter();
@@ -146,6 +169,7 @@ const routeStore = useRouteStore();
 const gameStore = useGameStore();
 const settingsStore = useSettingsStore();
 const sensorStore = useSensorStore();
+const loading = useLoadingStore();
 const planStore = usePlanStore();
 
 // Redirect if not playing
@@ -159,8 +183,14 @@ const isMapLibre = computed(() => settingsStore.config.map.renderMode === 'mapli
 
 /** HUD theme follows the same world style picked from welcome. */
 const worldStyle = computed(
-  () => settingsStore.config.map.phaserStyle ?? 'plastic',
+  () => settingsStore.config.map.worldStyle ?? 'plastic',
 );
+
+/** Top-HUD text treatment follows the render mode, not the world style:
+ *  the flat Phaser 2D world gets embossed HUD text, every 3D-ish renderer
+ *  (Three.js / MapLibre) gets neon glow. Drives [data-hud-mode] overrides in
+ *  HudTopBar / HudCoins. */
+const hudMode = computed(() => (isPhaser.value ? '2d' : '3d'));
 
 const gameViewRef = ref<HTMLElement | null>(null);
 const gameContentRef = ref<HTMLElement | null>(null);
@@ -328,6 +358,11 @@ let terrainRenderer: TerrainRendererAPI | null = null;
 // Phaser 2D renderer (Excitebike mode)
 const phaserRenderer = usePhaserRenderer();
 
+// ── Debug style-tuning panel bridges (Three.js world-style strategy) ──
+const getTerrainStrategy = () => terrainRenderer?.getStrategy() ?? null;
+const applyTerrainStyleParams = () => terrainRenderer?.applyStyleParams();
+const rebuildTerrainMeshes = () => terrainRenderer?.rebuildTerrain();
+
 // Debug mode — enable global debug logger based on config
 setDebugEnabled(settingsStore.config.debug);
 
@@ -395,7 +430,10 @@ watch(
   () => [gameStateStore.zone, gameStateStore.combo] as const,
   ([z, c]) => {
     coinSystem.currentZone.value = z != null ? (HR_ZONES[z - 1] ?? null) : null;
-    coinSystem.redLine.value = z === 5;
+    // In workout mode, suppress the Zone-5 red-line warning (overlay, ball
+    // dimming, comic bubble, alarm) — structured intervals target Zone 5 on
+    // purpose. Coin rules (Z5 → 0 coins) run off getCoinsForHr, unaffected.
+    coinSystem.redLine.value = z === 5 && !gameStore.isWorkoutMode;
     coinSystem.comboMultiplier.value = c;
   },
 );
@@ -450,6 +488,8 @@ const gameLoop = useGameLoop({
     // Update checkpoint flags (fade passed ones)
     if (isThreeJs.value) {
       terrainRenderer!.updateCheckpointFlags(ballDist.value);
+    } else if (isPhaser.value) {
+      phaserRenderer.updateCheckpointFlags(ballDist.value);
     }
   },
   updateCamera: () => {
@@ -468,6 +508,9 @@ const gameLoop = useGameLoop({
       terrainRenderer!.setCameraOptions({
         pitchDeg: cameraControl.pitch.value,
         heightAboveM: cameraControl.height.value,
+        // 跟車 / 自由 — the HUD's segmented control (attaching and detaching the
+        // orbit input is a no-op unless the mode actually changed).
+        mode: gameStore.cameraMode,
       });
       terrainRenderer!.updateCamera(effectiveBearing, dt);
       terrainRenderer!.updatePhysiology(
@@ -481,6 +524,8 @@ const gameLoop = useGameLoop({
       const now = performance.now();
       const dt = lastFrameTime ? (now - lastFrameTime) / 1000 : 0;
       lastFrameTime = now;
+      // 跟車 / 自由 — same HUD switch as 3D (setCameraMode ignores no-op calls).
+      phaserRenderer.setCameraOptions({ mode: gameStore.cameraMode });
       phaserRenderer.updateCamera(effectiveBearing, dt);
       phaserRenderer.updatePhysiology(
         coinSystem.currentZone.value?.zone ?? null,
@@ -523,6 +568,7 @@ const gameMessages = useGameMessages({
   maxPower: computed(() => gameLoop.powerMax.value),
   isOnTarget: workoutTracker.isOnTarget,
   weatherType: weatherApi.weatherType,
+  idleMs: computed(() => gameStateStore.idleMs),
 });
 
 // Random events (freeride challenges) — presentation mapper over the
@@ -604,7 +650,28 @@ watch(() => gameLoop.elapsedMs.value, tryLightning);
 watch(
   () => workoutTracker.segmentChanged.value,
   (changed) => {
-    if (changed) audioManager.segmentChange();
+    if (!changed) return;
+    audioManager.segmentChange();
+    // An interval just ended — pull the camera up for a look at the world.
+    if (isThreeJs.value) terrainRenderer?.triggerCameraLift('peek');
+    else if (isPhaser.value) phaserRenderer.triggerCameraLift('peek');
+  },
+);
+
+// Run-in to the finish: rise and stay up, so the summary opens on a view of the
+// world rather than the back of a bike. Free rides (no target) never end, so
+// they never get a finale.
+const FINALE_LEAD_MS = 10_000;
+let finaleFired = false;
+watch(
+  () => gameLoop.elapsedMs.value,
+  (elapsedMs) => {
+    if (finaleFired || (!isThreeJs.value && !isPhaser.value)) return;
+    if (gameStore.state !== 'playing' || gameStore.targetDurationMs <= 0) return;
+    if (gameStore.targetDurationMs - elapsedMs > FINALE_LEAD_MS) return;
+    finaleFired = true;
+    if (isThreeJs.value) terrainRenderer?.triggerCameraLift('finale');
+    else phaserRenderer.triggerCameraLift('finale');
   },
 );
 
@@ -635,8 +702,11 @@ watch(
 );
 
 const hasStarted = ref(false);
+// Two prompts fighting for the same screen reads as a bug, so READY TO RIDE
+// waits for the loading overlay to be dismissed.
 const showStartPrompt = computed(
-  () => gameLoop.isRunning.value && gameStore.isPaused && !hasStarted.value,
+  () => gameLoop.isRunning.value && gameStore.isPaused && !hasStarted.value
+    && !loading.overlayVisible,
 );
 const showPauseOverlay = computed(
   () => gameLoop.isRunning.value && gameStore.isPaused && hasStarted.value && !pip.isActive.value,
@@ -651,6 +721,8 @@ const COUNTDOWN_WINDOW_MS = 60_000;
 const activeCountdown = computed<{ kind: 'segment' | 'finish'; seconds: number } | null>(() => {
   // Never over the start prompt or a pause; only during live play.
   if (gameStore.state !== 'playing' || gameStore.isPaused || !hasStarted.value) return null;
+  // Stopped-pedalling countdown owns the screen — don't stack a second big timer.
+  if (gameStateStore.idleMs > 0 || gameStateStore.autoPaused) return null;
   const totalRemaining = gameStore.targetDurationMs - gameLoop.elapsedMs.value;
   const segRemaining = workoutTracker.hasWorkout.value
     ? workoutTracker.segmentRemainingMs.value
@@ -668,7 +740,12 @@ const activeCountdown = computed<{ kind: 'segment' | 'finish'; seconds: number }
 watch(
   () => gameStore.isPaused,
   (paused) => {
-    if (!paused) hasStarted.value = true;
+    if (paused) return;
+    // First unpause = the rider sets off. Build the 2D world in around them
+    // now: any earlier and the animation plays behind the loading overlay /
+    // start prompt, where nobody sees it.
+    if (!hasStarted.value && isPhaser.value) phaserRenderer.playIntro();
+    hasStarted.value = true;
   },
 );
 
@@ -854,12 +931,50 @@ async function handleStop() {
   gameStore.endGame();
 }
 
+// CONTINUE from the summary: ride on into a fresh recording. finaliseRide()
+// already stopped the previous ride (currentRideId still points at it), so we
+// clear that id, rebuild the /api/live/start body (same shape StartBar uses),
+// and drop back to state 'playing' — which closes the summary and re-shows the
+// start prompt. The first unpause then runs beginRide() for a new ride row.
+// gameLoop.start() re-zeros elapsedMs/timeSeries; finaleFired is reset by the
+// 'playing' branch of the state watch below.
+function handleContinue() {
+  stopFinalised = false;
+  hasStarted.value = false;
+  gameStore.currentRideId = null;
+  gameStore.rideSummary = null;
+
+  const route = routeStore.activeRoute;
+  gameStore.pendingStart = {
+    routeId: route?.id,
+    routeName: route?.name,
+    game: route
+      ? {
+          ftp: settingsStore.config.training.ftp,
+          hrMax: settingsStore.config.training.hrMax,
+          trainerModel: settingsStore.config.sensor.trainerModel,
+          freeRoam: gameStore.freeRoam,
+          targetDurationMs: settingsStore.config.training.defaultDuration,
+          randomEventsEnabled: gameStore.randomEventsEnabled,
+          selectedWorkoutId: gameStore.selectedWorkoutId,
+        }
+      : undefined,
+  };
+
+  gameStore.startGame(settingsStore.config.training.defaultDuration);
+  gameLoop.start();
+}
+
 // Watch game state — the natural time-up path inside useGameLoop only
 // flips gameStore.state to 'ended', so we need to drive the server stop
 // and plan-completion bookkeeping from here for that case to land in DB.
 watch(
   () => gameStore.state,
   async (state) => {
+    if (state === 'playing') {
+      finaleFired = false; // a new ride gets its own finale
+      return;
+    }
     if (state === 'ended') {
       gameLoop.stop();
       await finaliseRide();
@@ -867,8 +982,56 @@ watch(
   },
 );
 
+/**
+ * Ceiling on how long the loading overlay may hold the rider. A hung tile
+ * server must not be able to lock someone out of their own ride — past this,
+ * the button unlocks and says so. The terrain keeps streaming in behind it.
+ */
+const LOADING_TIMEOUT_MS = 20_000;
+
+/** Preload the message pool without blocking the game loop; push the opening
+ *  lines once they're actually available. Failure is cosmetic — ride on. */
+async function preloadMessages(pushOpeningLines: () => void) {
+  loading.beginStage('messages');
+  try {
+    await gameMessages.preload();
+    loading.completeStage('messages');
+    pushOpeningLines();
+  } catch {
+    loading.failStage('messages', '旅程訊息載入失敗，本次騎乘不會有旁白');
+  }
+}
+
+/** The last stage: a frame has actually been painted, so there is something
+ *  behind the overlay worth showing. */
+function markFirstFrame() {
+  loading.beginStage('firstFrame');
+  requestAnimationFrame(() => loading.completeStage('firstFrame'));
+}
+
 onMounted(async () => {
   window.addEventListener('keydown', handleSpacebar);
+
+  // Up before anything awaits, so the black canvas is covered from frame one.
+  loading.reset(settingsStore.config.map.renderMode);
+
+  const unlockTimer = setTimeout(() => {
+    if (!loading.unlocked) {
+      loading.unlock('載入時間過長，部分場景仍在背景載入');
+    }
+  }, LOADING_TIMEOUT_MS);
+
+  const stopUnlockWatch = watch(
+    () => loading.allDone,
+    (done) => {
+      if (!done) return;
+      clearTimeout(unlockTimer);
+      loading.unlock();
+      stopUnlockWatch();
+    },
+    { immediate: true },
+  );
+  onUnmounted(() => clearTimeout(unlockTimer));
 
   void wakeLock.request();
 
@@ -886,7 +1049,12 @@ onMounted(async () => {
   if (isThreeJs.value) {
     // ── Three.js mode ──
     const canvas = threeCanvasRef.value;
-    if (!canvas || pts.length === 0) return;
+    if (!canvas || pts.length === 0) {
+      // Nothing will ever load — don't leave the rider staring at a locked
+      // button waiting for stages that will never run.
+      loading.unlock('沒有可用的路線資料');
+      return;
+    }
 
     // Dynamically import Three.js terrain renderer
     const { useTerrainRenderer } = await import('@/composables/useTerrainRenderer');
@@ -907,6 +1075,8 @@ onMounted(async () => {
       },
       corridorHalfWidth: mapConfig.viewRange,
       dayNightEnabled: mapConfig.dayNightEnabled,
+      // World style: 'plastic' → blocks, 'cuphead' → corrugated paper.
+      worldStyle: mapConfig.worldStyle,
     });
 
     // Set coin layer to terrain renderer
@@ -947,6 +1117,13 @@ onMounted(async () => {
       { immediate: true },
     );
 
+    // World style: switch the whole Three.js pipeline (blocks ⇄ paper) live.
+    // Skip immediate — init() already applied the initial style.
+    watch(
+      () => settingsStore.config.map.worldStyle,
+      (style) => { void terrainRenderer!.setWorldStyle(style); },
+    );
+
     // Snap camera immediately (dt = 0 for instant). gameStateStore.setRoute
     // already placed the ball at route distance 0.
     const startPos = gameStateStore.position;
@@ -964,18 +1141,27 @@ onMounted(async () => {
       { immediate: true },
     );
 
-    await gameMessages.preload();
-    if (terrainRenderer!.mvtFailed.value) {
-      gameMessages.pushMessage('mvt-failed');
-    }
-    gameMessages.pushMessage('terrain-ready');
+    // Messages come from the backend (and may go out to an LLM), so they used
+    // to hold the game loop hostage on a cold start. Kick it off and let the
+    // loop run; the greeting lands when it lands.
+    void preloadMessages(() => {
+      if (terrainRenderer!.mvtFailed.value) {
+        gameMessages.pushMessage('mvt-failed');
+      }
+      gameMessages.pushMessage('terrain-ready');
+      gameMessages.pushMessage('game-start');
+    });
+
     gameLoop.start();
     audioManager.gameStart();
-    gameMessages.pushMessage('game-start');
+    markFirstFrame();
   } else if (isPhaser.value) {
     // ── Phaser 2D Excitebike mode ──
     const canvas = phaserCanvasRef.value;
-    if (!canvas || pts.length === 0) return;
+    if (!canvas || pts.length === 0) {
+      loading.unlock('沒有可用的路線資料');
+      return;
+    }
 
     // Size canvas to viewport
     canvas.width = canvas.clientWidth;
@@ -1062,11 +1248,14 @@ onMounted(async () => {
       (failed) => { if (failed) gameMessages.pushMessage('mvt-failed'); },
     );
 
-    await gameMessages.preload();
-    gameMessages.pushMessage('terrain-ready');
+    void preloadMessages(() => {
+      gameMessages.pushMessage('terrain-ready');
+      gameMessages.pushMessage('game-start');
+    });
+
     gameLoop.start();
     audioManager.gameStart();
-    gameMessages.pushMessage('game-start');
+    markFirstFrame();
   } else {
     // ── MapLibre mode (legacy) ──
     // Dynamically import MapLibre composables
@@ -1105,12 +1294,14 @@ onMounted(async () => {
             });
           }
 
-          setTimeout(async () => {
-            await gameMessages.preload();
-            gameMessages.pushMessage('terrain-ready');
+          setTimeout(() => {
+            void preloadMessages(() => {
+              gameMessages.pushMessage('terrain-ready');
+              gameMessages.pushMessage('game-start');
+            });
             gameLoop.start();
             audioManager.gameStart();
-            gameMessages.pushMessage('game-start');
+            markFirstFrame();
           }, 500);
         }
       },
@@ -1314,36 +1505,45 @@ onUnmounted(() => {
   animation: none !important;
 }
 
-/* Plastic: chunky toy-like panels everywhere */
-.game-view[data-world-style="plastic"] .hud-top-bar,
+/* Plastic: chunky toy-like panels everywhere. The top HUD (metrics + coins)
+   opts out — it's now a borderless neon/emboss overlay (see HudTopBar/HudCoins). */
 .game-view[data-world-style="plastic"] .hud-bottom-left,
 .game-view[data-world-style="plastic"] .hud-bottom-right,
-.game-view[data-world-style="plastic"] .hud-coins,
 .game-view[data-world-style="plastic"] .hud-event-bar,
-.game-view[data-world-style="plastic"] .hud-customize,
 .game-view[data-world-style="plastic"] .pause-overlay__panel,
 .game-view[data-world-style="plastic"] .game-summary__panel,
 .game-view[data-world-style="plastic"] .pip-sidebar,
 .game-view[data-world-style="plastic"] .minimap {
   border-radius: 18px !important;
-  border: 2px solid #1a1140 !important;
-  box-shadow: 0 4px 0 #1a1140, 0 8px 14px rgba(255, 59, 141, 0.25) !important;
-  background: linear-gradient(180deg, rgba(255, 247, 251, 0.92) 0%, rgba(255, 229, 241, 0.92) 100%) !important;
+  border: 2px solid var(--pl-ink) !important;
+  box-shadow: 0 4px 0 var(--pl-ink), 0 8px 14px rgba(var(--pl-pink-rgb), 0.25) !important;
+  background: linear-gradient(180deg, rgba(var(--pl-paper-hi-rgb), 0.92) 0%, rgba(var(--pl-paper-rgb), 0.92) 100%) !important;
   text-shadow: none !important;
+}
+
+/* Bottom-left inner bars (time + lap) default to var(--hud-bg), which in
+   plastic is a dark navy — reads as a dirty grey slab on the candy card.
+   Go transparent so the panel's paper gradient (same tone the elevation
+   canvas paints) shows through; keep only a soft pink hairline. */
+.game-view[data-world-style="plastic"] .hud-bottom-left .hud-progress,
+.game-view[data-world-style="plastic"] .hud-bottom-left .hud-lap {
+  background: transparent !important;
+  border: 1.5px solid rgba(var(--pl-pink-rgb), 0.25) !important;
+  border-radius: 12px !important;
 }
 
 .game-view[data-world-style="plastic"] .hud-top-bar :is(.metric-value, .stat-value, .time-value),
 .game-view[data-world-style="plastic"] .hud-bottom-left .stat-value,
 .game-view[data-world-style="plastic"] .hud-bottom-right .stat-value,
 .game-view[data-world-style="plastic"] .hud-coins .coin-count {
-  color: #1a1140 !important;
-  text-shadow: 1px 1px 0 #ffea00 !important;
+  color: var(--pl-ink) !important;
+  text-shadow: 1px 1px 0 var(--pl-yellow) !important;
 }
 
 .game-view[data-world-style="plastic"] .hud-top-bar .metric-label,
 .game-view[data-world-style="plastic"] .hud-bottom-left .stat-label,
 .game-view[data-world-style="plastic"] .hud-bottom-right .stat-label {
-  color: #ff3b8d !important;
+  color: var(--pl-pink) !important;
   text-shadow: none !important;
 }
 
@@ -1354,44 +1554,52 @@ onUnmounted(() => {
 
 .game-view[data-world-style="plastic"] .pause-overlay__title,
 .game-view[data-world-style="plastic"] .game-summary__title {
-  color: #ff3b8d !important;
-  text-shadow: 3px 3px 0 #1a1140, 5px 5px 0 #00d8ff !important;
+  color: var(--pl-pink) !important;
+  text-shadow: 3px 3px 0 var(--pl-ink), 5px 5px 0 var(--pl-cyan) !important;
   letter-spacing: 1px !important;
 }
 
-/* Cuphead: paper-card panels with thick ink borders */
-.game-view[data-world-style="cuphead"] .hud-top-bar,
+/* Cuphead: paper-card panels with thick ink borders. Top HUD opts out (see above). */
 .game-view[data-world-style="cuphead"] .hud-bottom-left,
 .game-view[data-world-style="cuphead"] .hud-bottom-right,
-.game-view[data-world-style="cuphead"] .hud-coins,
 .game-view[data-world-style="cuphead"] .hud-event-bar,
-.game-view[data-world-style="cuphead"] .hud-customize,
 .game-view[data-world-style="cuphead"] .pause-overlay__panel,
 .game-view[data-world-style="cuphead"] .game-summary__panel,
 .game-view[data-world-style="cuphead"] .pip-sidebar,
 .game-view[data-world-style="cuphead"] .minimap {
   border-radius: 0 !important;
-  border: 3px solid #2a2420 !important;
-  box-shadow: 3px 3px 0 #2a2420 !important;
+  border: 3px solid var(--ck-ink) !important;
+  box-shadow: 3px 3px 0 var(--ck-ink) !important;
   background:
-    repeating-linear-gradient(0deg, rgba(42, 36, 32, 0.025) 0 2px, transparent 2px 4px),
-    rgba(232, 220, 192, 0.94) !important;
-  color: #2a2420 !important;
+    repeating-linear-gradient(0deg, rgba(var(--ck-ink-rgb), 0.025) 0 2px, transparent 2px 4px),
+    rgba(var(--ck-paper-rgb), 0.94) !important;
+  color: var(--ck-ink) !important;
   text-shadow: none !important;
+}
+
+/* Minimap opts out of the parchment panel skin in every themed world — it stays
+   a clean black tile (border from .minimap-container) so the route never washes
+   out against paper and stretching never shows a seam. */
+.game-view[data-world-style="plastic"] .minimap,
+.game-view[data-world-style="cuphead"] .minimap {
+  background: transparent !important;
+  box-shadow: none !important;
+  border: none !important;
+  border-radius: 0 !important;
 }
 
 .game-view[data-world-style="cuphead"] .hud-top-bar :is(.metric-value, .stat-value, .time-value),
 .game-view[data-world-style="cuphead"] .hud-bottom-left .stat-value,
 .game-view[data-world-style="cuphead"] .hud-bottom-right .stat-value,
 .game-view[data-world-style="cuphead"] .hud-coins .coin-count {
-  color: #2a2420 !important;
+  color: var(--ck-ink) !important;
   text-shadow: none !important;
 }
 
 .game-view[data-world-style="cuphead"] .hud-top-bar .metric-label,
 .game-view[data-world-style="cuphead"] .hud-bottom-left .stat-label,
 .game-view[data-world-style="cuphead"] .hud-bottom-right .stat-label {
-  color: #a0523c !important;
+  color: var(--ck-rust) !important;
   text-shadow: none !important;
   letter-spacing: 0.5px !important;
 }
@@ -1403,8 +1611,8 @@ onUnmounted(() => {
 
 .game-view[data-world-style="cuphead"] .pause-overlay__title,
 .game-view[data-world-style="cuphead"] .game-summary__title {
-  color: #a0523c !important;
-  text-shadow: 3px 3px 0 #2a2420, 6px 6px 0 #c4a035 !important;
+  color: var(--ck-rust) !important;
+  text-shadow: 3px 3px 0 var(--ck-ink), 6px 6px 0 var(--ck-gold) !important;
   letter-spacing: 1px !important;
   text-transform: none !important;
   font-weight: 700 !important;
@@ -1417,29 +1625,29 @@ onUnmounted(() => {
 }
 
 .game-view[data-world-style="plastic"] .start-prompt__panel {
-  border: 3px solid #1a1140 !important;
+  border: 3px solid var(--pl-ink) !important;
   border-radius: 22px !important;
-  background: linear-gradient(180deg, #fff7fb 0%, #ffe5f1 100%) !important;
-  box-shadow: 0 6px 0 #1a1140, 0 16px 30px rgba(255, 59, 141, 0.35) !important;
+  background: linear-gradient(180deg, var(--pl-paper-hi) 0%, var(--pl-paper) 100%) !important;
+  box-shadow: 0 6px 0 var(--pl-ink), 0 16px 30px rgba(var(--pl-pink-rgb), 0.35) !important;
 }
 
 .game-view[data-world-style="plastic"] .start-prompt__title {
-  color: #ff3b8d !important;
-  text-shadow: 2px 2px 0 #1a1140, 4px 4px 0 #00d8ff !important;
+  color: var(--pl-pink) !important;
+  text-shadow: 2px 2px 0 var(--pl-ink), 4px 4px 0 var(--pl-cyan) !important;
 }
 
 .game-view[data-world-style="cuphead"] .start-prompt__panel {
-  border: 4px double #2a2420 !important;
+  border: 4px double var(--ck-ink) !important;
   border-radius: 0 !important;
   background:
-    repeating-linear-gradient(0deg, rgba(42, 36, 32, 0.03) 0 2px, transparent 2px 4px),
-    #e8dcc0 !important;
-  box-shadow: 4px 4px 0 #2a2420 !important;
+    repeating-linear-gradient(0deg, rgba(var(--ck-ink-rgb), 0.03) 0 2px, transparent 2px 4px),
+    var(--ck-paper) !important;
+  box-shadow: 4px 4px 0 var(--ck-ink) !important;
 }
 
 .game-view[data-world-style="cuphead"] .start-prompt__title {
-  color: #a0523c !important;
-  text-shadow: 3px 3px 0 #2a2420, 5px 5px 0 #c4a035 !important;
+  color: var(--ck-rust) !important;
+  text-shadow: 3px 3px 0 var(--ck-ink), 5px 5px 0 var(--ck-gold) !important;
   letter-spacing: 1px !important;
   text-transform: none !important;
 }

@@ -23,20 +23,9 @@
 
     <div class="hud__top-right">
       <HudCoins :combo="combo" />
-      <button v-if="pipSupported" class="hud-pip" @click="emit('togglePip')">
-        <font-awesome-icon icon="up-right-from-square" />
-        PIP
-      </button>
-      <div class="glasses-lens-picker">
-        <el-segmented v-model="gameStore.glassesLens" :options="lensOptions" size="small" />
-      </div>
     </div>
 
     <div class="hud__bottom-left">
-      <HudChart
-        :samples="timeSeries"
-        :configs="chartPin.pinnedConfigs.value"
-      />
       <HudBottomLeft
         :elapsed-ms="elapsedMs"
         :route-points="routePoints"
@@ -50,19 +39,38 @@
     </div>
 
     <div class="hud__bottom-right">
+      <HudChart
+        :samples="timeSeries"
+        :configs="chartPin.pinnedConfigs.value"
+        :theme="chartTheme"
+      />
       <HudBottomRight
         :route-points="routePoints"
         :ball-lat="ballLat"
         :ball-lon="ballLon"
         :ball-bearing="ballBearing"
         :is-paused="gameStore.isPaused"
+        :idle-ms="props.idleMs"
+        :auto-paused="props.autoPaused"
+        :pip-supported="props.pipSupported"
         @stop="emit('stop')"
         @pause="emit('pause')"
+        @pip="emit('togglePip')"
       />
     </div>
 
     <!-- Center-bottom challenge panel: themed workout segment (structured
-         training) or random event (freeride) — the sim never runs both. -->
+         training) or random event (freeride) — the sim never runs both.
+         The stopped-pedalling countdown now lives on the PAUSE button, so this
+         slot no longer yields to it. -->
+    <!-- Camera view switch — top-centre, where the message bubble pops (the
+         bubble is transient, so it borrows the slot and the switch yields while
+         one is showing). 3D orbits the bike; 2D detaches the side-on camera so
+         it can be dragged and zoomed around the world. -->
+    <div v-if="showCameraMode" class="hud__camera-mode">
+      <HudCameraMode />
+    </div>
+
     <div class="hud__event-bar">
       <HudWorkoutBar
         v-if="hasWorkout"
@@ -107,7 +115,7 @@
       @typewriter-done="(ms: number) => emit('typewriterDone', ms)"
     />
 
-    <GameSummary :workout-segments="props.workoutSegments" />
+    <GameSummary :workout-segments="props.workoutSegments" @continue="emit('continue')" />
   </div>
 </template>
 
@@ -119,6 +127,7 @@ import type { TimeSeriesSample } from '@/composables/useGameLoop';
 import type { GameMessage } from '@/composables/useGameMessages';
 import { useChartPin } from '@/composables/useChartPin';
 import { useGameStore } from '@/stores/gameStore';
+import { useSettingsStore } from '@/stores/settingsStore';
 import HudTopBar from './HudTopBar.vue';
 import HudCoins from './HudCoins.vue';
 import HudBottomLeft from './HudBottomLeft.vue';
@@ -129,6 +138,7 @@ import GameBubble from './GameBubble.vue';
 import GameSummary from './GameSummary.vue';
 import HudEventBar from './HudEventBar.vue';
 import HudWorkoutBar from './HudWorkoutBar.vue';
+import HudCameraMode from './HudCameraMode.vue';
 
 const props = defineProps<{
   routePoints: RoutePoint[];
@@ -176,16 +186,36 @@ const props = defineProps<{
   isEventOnTarget: boolean;
   eventScreenTint: string | null;
   eventScreenTintOpacity: number;
+  // Idle (stopped-pedalling) auto-pause countdown
+  idleMs: number;
+  autoPaused: boolean;
 }>();
 
-const emit = defineEmits<{ stop: []; pause: []; togglePip: []; typewriterDone: [durationMs: number] }>();
+const emit = defineEmits<{ stop: []; pause: []; togglePip: []; typewriterDone: [durationMs: number]; continue: [] }>();
 
 const chartPin = useChartPin();
 const gameStore = useGameStore();
+const settingsStore = useSettingsStore();
+
+// Chart skin follows the world: neon for the 3D-ish renderers (Three.js /
+// MapLibre), the hand-drawn/plastic palette for the Phaser 2D world.
+const chartTheme = computed<'neon' | 'plastic' | 'cuphead'>(() => {
+  if (settingsStore.config.map.renderMode !== 'phaser') return 'neon';
+  return settingsStore.config.map.worldStyle ?? 'plastic';
+});
 
 // ── Workout segment theming (narrative event skin) ──
 
 const hasWorkout = computed(() => props.workoutSegments.length > 0);
+
+/** The camera switch only exists in 3D. It sits in the message bubble's spot,
+ *  so it steps aside while a bubble is actually up — nothing else hides it
+ *  (the old bottom-centre placement vanished whenever a workout was loaded,
+ *  which for this rider was always). */
+const showCameraMode = computed(() => {
+  const mode = settingsStore.config.map.renderMode;
+  return (mode === 'threejs' || mode === 'phaser') && !props.message;
+});
 
 const currentWorkoutSegment = computed<WorkoutSegment | null>(() => {
   if (props.currentSegmentIndex < 0 || props.currentSegmentIndex >= props.workoutSegments.length) {
@@ -210,13 +240,6 @@ const activeTintOpacity = computed(() => {
   return workoutTheme.value?.screenTintOpacity ?? 0;
 });
 
-const lensOptions = [
-  { label: 'Clear', value: 'clear' },
-  { label: 'Dark', value: 'dark' },
-  { label: 'Red', value: 'red' },
-  { label: 'Yellow', value: 'yellow' },
-  { label: 'Auto', value: 'auto' },
-];
 </script>
 
 <style scoped>
@@ -244,40 +267,6 @@ const lensOptions = [
   pointer-events: auto;
 }
 
-.hud-pip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 16px;
-  background: rgba(0, 255, 255, 0.1);
-  color: var(--hud-cyan);
-  border: 1.5px solid rgba(0, 255, 255, 0.3);
-  clip-path: var(--clip-panel-sm);
-  font-family: var(--font-display);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 2px;
-  cursor: pointer;
-  transition: background 0.2s, box-shadow 0.2s;
-  text-shadow: 0 0 8px rgba(0, 255, 255, 0.4);
-}
-
-.hud-pip:hover {
-  background: rgba(0, 255, 255, 0.2);
-  box-shadow: var(--hud-glow-cyan);
-}
-
-.glasses-lens-picker {
-  background: var(--hud-bg);
-  clip-path: var(--clip-panel-sm);
-  padding: 4px;
-  border: 1.5px solid var(--hud-border);
-}
-
-.glasses-lens-picker :deep(.el-segmented) {
-  --el-border-radius-base: 0;
-}
-
 .hud__bottom-left {
   position: absolute;
   bottom: 16px;
@@ -291,11 +280,24 @@ const lensOptions = [
   position: absolute;
   bottom: 16px;
   right: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
 }
 
 .hud__event-bar {
   position: absolute;
   bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+/* The message bubble's spot (GameBubble: top 76px, centred) — the bubble is
+   transient and the switch yields to it, so they never actually collide. */
+.hud__camera-mode {
+  position: absolute;
+  top: 76px;
   left: 50%;
   transform: translateX(-50%);
 }

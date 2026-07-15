@@ -16,7 +16,7 @@
 import Phaser from 'phaser';
 import type { WaterFeaturePos } from './terrain-builder';
 import { lerpColor } from './phaser-weather';
-import type { PhaserStyleStrategy } from './phaser-style-strategy';
+import { INTRO_DURATION_S, type PhaserStyleStrategy } from './phaser-style-strategy';
 import {
   CyclingGlassesPipeline,
   CYCLING_GLASSES_PIPELINE_KEY,
@@ -47,11 +47,32 @@ export interface PhaserBridge {
 /** Pixels per meter for the 2D world. */
 export const PX_PER_METER = 3;
 
-/** Minimum sky headroom (px) kept above the highest terrain point. */
-const TERRAIN_TOP_MARGIN_PX = 140;
-
-/** Vertical exaggeration factor for elevation. */
+/** Vertical pixels per meter of ELEVATION. Single source of truth shared by
+ *  eleToY and getTerrainSlope, so the drawn grade always equals the cyclist's
+ *  lean angle. Relative to PX_PER_METER (3) this is a 4/3 exaggeration. */
 export const ELEVATION_EXAGGERATION = 4;
+
+/** Opacity of a workout flag the rider has already ridden past. */
+const PASSED_FLAG_ALPHA = 0.25;
+
+/** Camera zoom when the cinematic lift is fully up. Hard floor 0.5 — all
+ *  screen-fixed layers are drawn with 2× overscan, which only covers the
+ *  widened view down to zoom 0.5. */
+const LIFT_ZOOM_MIN = 0.55;
+
+/** User wheel-zoom range (2D port of the 3D orbit camera's wheel zoom —
+ *  the camera stays locked on the rider, only the framing changes).
+ *  The floor shares LIFT_ZOOM_MIN's overscan constraint; the ceiling is
+ *  where the chunky 2D shapes stop flattering themselves. */
+const USER_ZOOM_MAX = 1.8;
+/** Multiplicative wheel sensitivity (zoom *= exp(-deltaY · this)). */
+const USER_ZOOM_WHEEL_SPEED = 0.0011;
+
+/** Seconds to ease the camera back onto the rider when leaving 自由 mode. */
+const REATTACH_S = 0.8;
+
+const easeInOutCubic = (t: number): number =>
+  t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 
 /** Cyclist screen position as fraction of viewport width from left.
  * 0.5 keeps the rider perfectly centered horizontally so the world scrolls
@@ -79,12 +100,20 @@ export class Phaser2DScene extends Phaser.Scene {
   // Graphics layers (initialized in create())
   private terrainGfx!: Phaser.GameObjects.Graphics;
   private overlayObj!: Phaser.GameObjects.GameObject | null;
+  /** Style backdrop between sky and terrain (plastic's neon grid); null for
+   *  styles that don't want one. Recreated on resize, like overlayObj. */
+  private backdropObj: Phaser.GameObjects.GameObject | null = null;
   private markerGfx!: Phaser.GameObjects.Graphics;
 
   // Independent layers — route line/markers (with Bloom) and text labels stay
   // off the main display list so they can be styled & filtered separately.
   private routeLayer!: Phaser.GameObjects.Layer;
   private textLayer!: Phaser.GameObjects.Layer;
+
+  // Per-km distance labels. Phaser Text can't batch (one canvas texture each)
+  // and Phaser does no frustum culling, so off-screen labels are hidden each
+  // frame to drop their texture-bind + draw-call.
+  private kmLabels: Phaser.GameObjects.Text[] = [];
 
   // Cycling-glasses post-processing
   private glassesPipeline: CyclingGlassesPipeline | null = null;
@@ -96,6 +125,9 @@ export class Phaser2DScene extends Phaser.Scene {
 
   // Speed/wind particle emitter (driven by ride speed, not weather wind)
   private windEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
+  /** Last rounded speed pushed into windEmitter — avoids reallocating the
+   *  speedX range object every frame when the speed hasn't meaningfully moved. */
+  private lastWindSpeed = NaN;
 
   // Environmental wind magnitude (0..2) — drives lens-mark spawn rate
   private windMagnitude = 0;
@@ -108,14 +140,60 @@ export class Phaser2DScene extends Phaser.Scene {
   // Terrain data (set externally after scene is ready)
   private elevationProfile: { distM: number; eleM: number }[] = [];
   private minElevation = 0;
-  private maxElevation = 100;
 
   // World dimensions
   private totalRouteDistPx = 0;
   private totalRouteDistM = 0;
 
+  /** START/FINISH label texts — tracked so drawStaticMarkers can destroy them
+   *  before redrawing (a resize re-lays the markers; untracked texts would be
+   *  left floating at the old ground height). */
+  private staticFlagTexts: Phaser.GameObjects.Text[] = [];
+
+  // Workout checkpoint flags (2D counterpart of CheckpointFlagManager)
+  private workoutFlagGfx!: Phaser.GameObjects.Graphics;
+  private workoutFlagFadedGfx!: Phaser.GameObjects.Graphics;
+  private workoutFlagTexts: Phaser.GameObjects.Text[] = [];
+  private workoutFlags: { distM: number; color: number; label: string }[] = [];
+  /** How many flags the rider has passed; -1 forces the next redraw. */
+  private passedFlagCount = -1;
+
   // Dirty flag — skip terrain redraw when camera hasn't moved
   private lastTerrainScrollX = NaN;
+  private lastTerrainScrollY = NaN;
+  private lastTerrainZoom = 1;
+
+  /** Smoothed camera scrollY (vertical follow). NaN = snap to target on the
+   *  next frame (first frame, lap wrap, teleport). */
+  private camScrollY = NaN;
+
+  /** Cinematic lift blend weight (0 = normal chase, 1 = fully pulled back).
+   *  Driven externally by usePhaserRenderer via setCameraLift(). */
+  private liftWeightNow = 0;
+
+  /** User-controlled zoom (mouse wheel), 1 = default framing. The cinematic
+   *  lift blends from this toward LIFT_ZOOM_MIN, so a peek/finale always
+   *  pulls back to the same wide shot no matter how far in the user is. */
+  private userZoom = 1;
+
+  /** 跟車 (third) or 自由 (orbit) — the 2D reading of the 3D camera modes.
+   *  Free mode detaches the camera: drag to pan the world, wheel to zoom, the
+   *  rider is free to ride out of shot. */
+  private cameraMode: 'third' | 'orbit' = 'third';
+  /** World-space camera centre while detached. */
+  private freeCenterX = 0;
+  private freeCenterY = 0;
+  /** Re-attach blend (0 → 1 over REATTACH_S) — going back to 跟車 eases the
+   *  camera home instead of teleporting it off the rider's panned-away view. */
+  private reattachT = 1;
+  private reattachFromX = 0;
+  private reattachFromY = 0;
+
+  // ── Entrance animation (plastic: blocks drop; cuphead: ink + wash) ──
+  /** Seconds since the intro started; INTRO_DURATION_S+ means "done". */
+  private introT = INTRO_DURATION_S;
+  /** World X the reveal sweeps out from (view's left edge at intro start). */
+  private introOriginX = 0;
 
   // Zone color filter overlay
   private zoneFilterGfx!: Phaser.GameObjects.Graphics;
@@ -153,11 +231,19 @@ export class Phaser2DScene extends Phaser.Scene {
     this.markerGfx.setDepth(50);
     this.routeLayer.add(this.markerGfx);
 
-    // Apply Bloom FX to the route layer so markers/flags get a soft glow.
-    // (color, offsetX, offsetY, blurStrength, strength, steps)
-    if (this.routeLayer.postFX) {
-      this.routeLayer.postFX.addBloom(0xffffff, 1, 1, 1, 1.2, 4);
-    }
+    // Workout checkpoint flags: ahead-of-rider on one layer, already-passed on
+    // a dimmed one, so fading a flag is a layer alpha, not a per-shape redraw.
+    this.workoutFlagGfx = this.add.graphics();
+    this.workoutFlagGfx.setDepth(50);
+    this.routeLayer.add(this.workoutFlagGfx);
+    this.workoutFlagFadedGfx = this.add.graphics();
+    this.workoutFlagFadedGfx.setDepth(49);
+    this.workoutFlagFadedGfx.setAlpha(PASSED_FLAG_ALPHA);
+    this.routeLayer.add(this.workoutFlagFadedGfx);
+
+    // Apply Bloom FX to the route layer so markers/flags get a soft glow —
+    // plastic only, fewer blur steps (see applyRouteBloom).
+    this.applyRouteBloom();
 
     // Water shimmer layer — above terrain features
     this.waterShimmerGfx = this.add.graphics();
@@ -167,6 +253,36 @@ export class Phaser2DScene extends Phaser.Scene {
     this.zoneFilterGfx = this.add.graphics();
     this.zoneFilterGfx.setScrollFactor(0);
     this.zoneFilterGfx.setDepth(950);
+
+    // Style backdrop (plastic's neon grid) — behind the terrain, over the sky.
+    this.backdropObj = this.strategy.drawBackdrop?.(this) ?? null;
+
+    // Wheel zoom (game only — the welcome backdrop lives on a scrollable
+    // page). 2D port of the orbit camera's wheel: framing changes, the
+    // camera never leaves the rider. Multiplicative so each notch feels
+    // equal at any zoom level.
+    if (this.mode === 'game') {
+      this.input.on(
+        'wheel',
+        (_p: unknown, _o: unknown, _dx: number, deltaY: number) => {
+          this.userZoom = Phaser.Math.Clamp(
+            this.userZoom * Math.exp(-deltaY * USER_ZOOM_WHEEL_SPEED),
+            LIFT_ZOOM_MIN,
+            USER_ZOOM_MAX,
+          );
+        },
+      );
+
+      // Drag to pan — only in 自由 mode (in 跟車 the camera is the rider's, and
+      // a drag that silently does nothing is better than one that fights them).
+      this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
+        if (this.cameraMode !== 'orbit' || !p.isDown) return;
+        const zoom = this.cameras.main.zoom;
+        // Screen delta → world delta: drag right, world moves right with you.
+        this.freeCenterX -= (p.x - p.prevPosition.x) / zoom;
+        this.freeCenterY -= (p.y - p.prevPosition.y) / zoom;
+      });
+    }
 
     // Style-specific overlay (CRT scanlines for plastic, film grain for cuphead, etc.)
     this.overlayObj = this.strategy.drawOverlay(this);
@@ -233,9 +349,12 @@ export class Phaser2DScene extends Phaser.Scene {
    */
   setElevationProfile(profile: { distM: number; eleM: number }[]) {
     this.elevationProfile = profile;
+    this.snapCamera(); // new anchor elevation — don't slide from the old one
+    // NOTE: the intro is NOT started here. Setting the profile happens while
+    // the loading overlay still covers the canvas, so the animation would play
+    // out unseen. GameView calls playIntro() when the rider actually sets off.
     if (profile.length > 0) {
       this.minElevation = Math.min(...profile.map((p) => p.eleM));
-      this.maxElevation = Math.max(...profile.map((p) => p.eleM));
       this.totalRouteDistM = profile[profile.length - 1].distM;
       this.totalRouteDistPx = this.totalRouteDistM * PX_PER_METER;
 
@@ -262,24 +381,103 @@ export class Phaser2DScene extends Phaser.Scene {
     const h = this.game.canvas.height;
 
     // ── Camera: follow cyclist ──
+    // X: rider pinned at CYCLIST_SCREEN_X. Y: smoothed so the rider settles at
+    // the ground baseline — climbing scrolls the whole world down instead of
+    // flattening the elevation into a fixed pixel span. Zoom: cinematic lift.
+    const cam = this.cameras.main;
     const worldX = distanceM * PX_PER_METER;
-    this.cameras.main.scrollX = worldX - w * CYCLIST_SCREEN_X;
+    const riderY = this.getTerrainY(distanceM);
+    const targetScrollY = riderY - h * this.groundBaselineFraction;
+    if (Number.isNaN(this.camScrollY)) this.camScrollY = targetScrollY;
+    this.camScrollY += (targetScrollY - this.camScrollY) * (1 - Math.exp(-dtSec * 4));
 
-    // ── Terrain (only redraw when camera moves) ──
-    const scrollX = this.cameras.main.scrollX;
-    if (Math.abs(scrollX - this.lastTerrainScrollX) >= 1 || Number.isNaN(this.lastTerrainScrollX)) {
+    // Lift blends from the user's zoom toward the fixed wide shot; the floor
+    // is the overscan hard limit either way.
+    const zoom = Phaser.Math.Clamp(
+      this.userZoom + (LIFT_ZOOM_MIN - this.userZoom) * this.liftWeightNow,
+      LIFT_ZOOM_MIN,
+      USER_ZOOM_MAX,
+    );
+    cam.setZoom(zoom);
+
+    // centerOn is zoom-safe (zoom anchors on the viewport centre); the lift
+    // also raises the view a little so the pull-back shows more sky.
+    const chaseX = worldX + (0.5 - CYCLIST_SCREEN_X) * w;
+    const chaseY = this.camScrollY + h * 0.5 - this.liftWeightNow * h * 0.1;
+
+    if (this.cameraMode === 'orbit') {
+      // 自由: the camera stays where the rider dragged it (see the pointer
+      // handlers). The rider keeps riding — out of frame if they like.
+      cam.centerOn(this.freeCenterX, this.freeCenterY);
+    } else if (this.reattachT < 1) {
+      // Easing home after 自由 → 跟車, so the world doesn't snap.
+      this.reattachT = Math.min(1, this.reattachT + dtSec / REATTACH_S);
+      const k = easeInOutCubic(this.reattachT);
+      cam.centerOn(
+        this.reattachFromX + (chaseX - this.reattachFromX) * k,
+        this.reattachFromY + (chaseY - this.reattachFromY) * k,
+      );
+    } else {
+      cam.centerOn(chaseX, chaseY);
+    }
+
+    // ── Style backdrop parallax ──
+    // The backdrop is screen-fixed; its texture scrolls at a fraction of the
+    // camera, which parallaxes without ever sliding the sprite off screen.
+    if (this.backdropObj instanceof Phaser.GameObjects.TileSprite) {
+      const parallax = (this.backdropObj.getData('parallax') as number | undefined) ?? 0;
+      if (parallax > 0) {
+        this.backdropObj.setTilePosition(cam.scrollX * parallax, cam.scrollY * parallax);
+      }
+    }
+
+    // ── Entrance animation ──
+    // Runs on a wall clock, not on camera movement — so it must bypass the
+    // terrain dirty flag below (the rider may still be standing still).
+    const introRunning = this.introT < INTRO_DURATION_S;
+    if (introRunning) this.introT += dtSec;
+
+    // ── Terrain (only redraw when camera moves — or while the intro plays) ──
+    const scrollX = cam.scrollX;
+    const scrollY = cam.scrollY;
+    if (
+      introRunning
+      || Math.abs(scrollX - this.lastTerrainScrollX) >= 1
+      || Math.abs(scrollY - this.lastTerrainScrollY) >= 1
+      || Math.abs(zoom - this.lastTerrainZoom) >= 0.001
+      || Number.isNaN(this.lastTerrainScrollX)
+    ) {
       this.lastTerrainScrollX = scrollX;
-      this.drawTerrain(w, h);
+      this.lastTerrainScrollY = scrollY;
+      this.lastTerrainZoom = zoom;
+      this.drawTerrain(h);
+
+      // Cull off-screen km labels alongside the terrain redraw (both are driven
+      // by camera movement). label.x is world-space; hide anything outside the
+      // view so Phaser skips its (unbatchable) text draw.
+      if (this.kmLabels.length > 0) {
+        const view = this.getViewRect();
+        const cullLeft = view.left - 100;
+        const cullRight = view.right + 100;
+        for (const lbl of this.kmLabels) {
+          lbl.setVisible(lbl.x >= cullLeft && lbl.x <= cullRight);
+        }
+      }
     }
 
     // ── Speed/wind particles ──
     const speed = this.bridge.speedKmh;
-    if (speed < 10) {
-      this.windEmitter.active = false;
-    } else {
-      this.windEmitter.active = true;
-      this.windEmitter.frequency = Math.max(10, 80 - speed);
-      this.windEmitter.speedX = { min: -(speed * 15 + 200), max: -(speed * 10 + 100) } as any;
+    const windActive = speed >= 10;
+    if (this.windEmitter.active !== windActive) this.windEmitter.active = windActive;
+    if (windActive) {
+      // Only reconfigure when the rounded speed changes — else this allocates a
+      // fresh speedX range object every frame.
+      const spd = Math.round(speed);
+      if (spd !== this.lastWindSpeed) {
+        this.lastWindSpeed = spd;
+        this.windEmitter.frequency = Math.max(10, 80 - spd);
+        this.windEmitter.speedX = { min: -(spd * 15 + 200), max: -(spd * 10 + 100) } as any;
+      }
     }
 
     // ── Water shimmer (every 3 frames) ──
@@ -398,9 +596,57 @@ export class Phaser2DScene extends Phaser.Scene {
   /**
    * Draw workout segment flags at the specified distances.
    */
+  /** Place the workout checkpoint flags. They live on their own two layers —
+   *  one at full strength, one dimmed — so passing one only costs a redraw of
+   *  the flags, not of every distance tick. */
   drawWorkoutFlags(segments: { distM: number; color: number; label: string }[]) {
-    for (const seg of segments) {
-      this.drawFlag(seg.distM, seg.color, seg.label);
+    this.workoutFlags = [...segments];
+    this.passedFlagCount = -1; // force the first redraw
+    this.updateWorkoutFlags(this.bridge.distanceM);
+  }
+
+  /**
+   * Fade the flags the rider has already ridden past (mirrors the 3D
+   * CheckpointFlagManager). Cheap to call every frame: it only redraws when
+   * the number of passed flags actually changes — once per interval.
+   */
+  updateWorkoutFlags(riderDistM: number) {
+    if (this.workoutFlags.length === 0) return;
+
+    const PASSED_MARGIN_M = 20;
+    let passed = 0;
+    for (const f of this.workoutFlags) {
+      if (riderDistM > f.distM + PASSED_MARGIN_M) passed++;
+    }
+    if (passed === this.passedFlagCount) return;
+    this.passedFlagCount = passed;
+
+    this.workoutFlagGfx.clear();
+    this.workoutFlagFadedGfx.clear();
+    for (const t of this.workoutFlagTexts) t.destroy();
+    this.workoutFlagTexts.length = 0;
+
+    for (const f of this.workoutFlags) {
+      const isPassed = riderDistM > f.distM + PASSED_MARGIN_M;
+      const gfx = isPassed ? this.workoutFlagFadedGfx : this.workoutFlagGfx;
+      const text = this.drawFlag(f.distM, f.color, f.label, gfx);
+      if (isPassed) text.setAlpha(PASSED_FLAG_ALPHA);
+      this.workoutFlagTexts.push(text);
+    }
+  }
+
+  /**
+   * (Re)apply the route-layer bloom. Neon glow suits the plastic style; the
+   * cuphead hand-drawn ink should stay matte, so it gets no bloom at all. Fewer
+   * blur steps (2 vs the former 4) roughly halves the per-frame blur-chain cost.
+   */
+  private applyRouteBloom() {
+    const fx = this.routeLayer.postFX;
+    if (!fx) return;
+    fx.clear();
+    if (this.strategy.style === 'plastic') {
+      // (color, offsetX, offsetY, blurStrength, strength, steps)
+      fx.addBloom(0xffffff, 1, 1, 1, 1.2, 2);
     }
   }
 
@@ -419,7 +665,9 @@ export class Phaser2DScene extends Phaser.Scene {
     if (this.zoneFilterAlpha < 0.005) return;
 
     this.zoneFilterGfx.fillStyle(this.currentZoneColor, this.zoneFilterAlpha);
-    this.zoneFilterGfx.fillRect(0, 0, w, h);
+    // 2× overscan: zoom also scales scrollFactor(0) layers, so a screen-sized
+    // rect would shrink and expose its edges during the camera lift.
+    this.zoneFilterGfx.fillRect(-w * 0.5, -h * 0.5, w * 2, h * 2);
   }
 
   /** Draw animated shimmer highlights on water surfaces. */
@@ -427,8 +675,9 @@ export class Phaser2DScene extends Phaser.Scene {
     this.waterShimmerGfx.clear();
     if (this.waterFeatures.length === 0) return;
 
-    const camLeft = this.cameras.main.scrollX - 50;
-    const camRight = camLeft + this.game.canvas.width + 100;
+    const view = this.getViewRect();
+    const camLeft = view.left - 50;
+    const camRight = view.right + 50;
     const time = this.waterShimmerFrame * 0.15;
 
     for (const wf of this.waterFeatures) {
@@ -452,45 +701,103 @@ export class Phaser2DScene extends Phaser.Scene {
     }
   }
 
-  /**
-   * Pixel span used to draw the full elevation range.
+  /** Map elevation → scene Y. Single source of truth shared by the terrain
+   *  surface, markers, coins and the cyclist so they always agree.
    *
-   * The historical scale (baselineY·0.6·EXAGGERATION, halved for >500 m
-   * ranges) can exceed the viewport: a route riding near its own high point
-   * (e.g. one that STARTS at its summit) put the surface — and the cyclist
-   * on it — hundreds of px above the screen top, leaving only the terrain
-   * fill visible as a wall of paper. Clamp to the headroom that actually
-   * exists between the baseline and the top margin so the surface always
-   * stays on screen.
-   */
-  private eleScalePx(baselineY: number): number {
-    const elevRange = Math.max(this.maxElevation - this.minElevation, 10);
-    const desired = (baselineY * 0.6) * ELEVATION_EXAGGERATION / (elevRange > 500 ? 2 : 1);
-    return Math.min(desired, Math.max(baselineY - TERRAIN_TOP_MARGIN_PX, 0));
+   *  Fixed scale (ELEVATION_EXAGGERATION px per elevation metre), anchored so
+   *  the route's lowest point sits on the baseline. The old global min/max
+   *  normalisation squeezed a whole route's climbing into <1 px/m — the rider
+   *  leaned into a grade the terrain barely showed. Keeping the surface on
+   *  screen is now the vertical camera follow's job, not this mapping's. */
+  eleToY(eleM: number, baselineY: number): number {
+    return baselineY - (eleM - this.minElevation) * ELEVATION_EXAGGERATION;
   }
 
-  /** Map elevation → scene Y. Single source of truth shared by the terrain
-   *  surface, markers, coins and the cyclist so they always agree. */
-  eleToY(eleM: number, baselineY: number): number {
-    const elevRange = Math.max(this.maxElevation - this.minElevation, 10);
-    const normalizedEle = (eleM - this.minElevation) / elevRange;
-    return baselineY - normalizedEle * this.eleScalePx(baselineY);
+  /** Camera view rectangle in world coordinates, zoom-aware. Computed from
+   *  the values set this frame (cam.worldView lags until the next preRender). */
+  private getViewRect(): { left: number; right: number; top: number; bottom: number } {
+    const cam = this.cameras.main;
+    const w = this.game.canvas.width;
+    const h = this.game.canvas.height;
+    const viewW = w / cam.zoom;
+    const viewH = h / cam.zoom;
+    const left = cam.scrollX + (w - viewW) / 2;
+    const top = cam.scrollY + (h - viewH) / 2;
+    return { left, right: left + viewW, top, bottom: top + viewH };
+  }
+
+  /** Set the cinematic lift blend weight (0..1) — pulls the camera back via
+   *  zoom. Driven per-frame by usePhaserRenderer from a CameraLift. */
+  setCameraLift(weight: number) {
+    this.liftWeightNow = Math.max(0, Math.min(1, weight));
+  }
+
+  /** Programmatic zoom set (wheel input normally drives this; exposed so
+   *  setCameraOptions / future HUD controls can too). Clamped to the same
+   *  range as the wheel. */
+  setUserZoom(zoom: number) {
+    this.userZoom = Phaser.Math.Clamp(zoom, LIFT_ZOOM_MIN, USER_ZOOM_MAX);
+  }
+
+  /** 跟車 ('third') / 自由 ('orbit'). Detaching hands the camera to the mouse;
+   *  re-attaching eases it back onto the rider (REATTACH_S). No-op if the mode
+   *  hasn't actually changed — this is called every frame from the game loop. */
+  setCameraMode(mode: 'third' | 'orbit') {
+    if (mode === this.cameraMode) return;
+    const cam = this.cameras.main;
+    const centre = cam.worldView;
+
+    if (mode === 'orbit') {
+      // Take over from wherever the chase camera currently is.
+      this.freeCenterX = centre.centerX;
+      this.freeCenterY = centre.centerY;
+      this.input.setDefaultCursor('grab');
+    } else {
+      this.input.setDefaultCursor('default');
+      // Ease home from wherever the rider left the camera.
+      this.reattachFromX = centre.centerX;
+      this.reattachFromY = centre.centerY;
+      this.reattachT = 0;
+      // The vertical follow was frozen while detached; restart it from here so
+      // it doesn't also try to catch up from a stale value.
+      this.camScrollY = cam.scrollY;
+    }
+    this.cameraMode = mode;
+  }
+
+  /** (Re)start the entrance animation from the rider's current position. */
+  replayIntro() {
+    this.introT = 0;
+    this.introOriginX = this.getViewRect().left;
+    this.lastTerrainScrollX = NaN; // force the first intro frame to draw
+  }
+
+  /** Seconds since the entrance animation started (>= INTRO_DURATION_S when
+   *  it is over). Styles time their own stages off this. */
+  getIntroT(): number {
+    return this.introT;
+  }
+
+  /** Drop the smoothed vertical follow and snap to the target next frame.
+   *  Call on discontinuous jumps (lap wrap, replay seek) so the camera does
+   *  not visibly slide between the two elevations. */
+  snapCamera() {
+    this.camScrollY = NaN;
   }
 
   /** Draw terrain from elevation profile — delegates visual style to strategy. */
-  private drawTerrain(w: number, h: number) {
+  private drawTerrain(h: number) {
     this.terrainGfx.clear();
 
     if (this.elevationProfile.length < 2) return;
 
     const baselineY = h * this.groundBaselineFraction;
 
-    // Determine visible range in world X
-    const camLeft = this.cameras.main.scrollX;
-    const camRight = camLeft + w;
+    // Determine visible range in world X (zoom-aware)
+    const view = this.getViewRect();
     const margin = 50;
-    const visLeft = camLeft - margin;
-    const visRight = camRight + margin;
+    const visLeft = view.left - margin;
+    const visRight = view.right + margin;
 
     // Build point array for the visible terrain surface
     const points: { x: number; y: number }[] = [];
@@ -504,9 +811,14 @@ export class Phaser2DScene extends Phaser.Scene {
     if (points.length === 0) return;
 
     // Seed from camera position for deterministic wobble in hand-drawn styles
-    const seed = Math.abs(Math.round(camLeft * 0.1)) % 10000;
+    const seed = Math.abs(Math.round(view.left * 0.1)) % 10000;
 
-    this.strategy.drawTerrainSurface(this.terrainGfx, points, h, seed);
+    // Fill down to the actual view bottom — with vertical follow and zoom the
+    // camera bottom is no longer the canvas height.
+    const intro = this.introT < INTRO_DURATION_S
+      ? { t: this.introT, originX: this.introOriginX }
+      : undefined;
+    this.strategy.drawTerrainSurface(this.terrainGfx, points, view.bottom + 8, seed, intro);
   }
 
   /**
@@ -532,7 +844,12 @@ export class Phaser2DScene extends Phaser.Scene {
     const t = segLen > 0 ? (distanceM - p0.distM) / segLen : 0;
     const ele = p0.eleM + (p1.eleM - p0.eleM) * Math.max(0, Math.min(1, t));
 
-    return this.eleToY(ele, baselineY);
+    const y = this.eleToY(ele, baselineY);
+    // Land on the surface the style draws, not the mathematical one (the
+    // Tetris style quantises to block rows). The camera also follows this
+    // stepped value — its exponential smoothing turns the steps into an
+    // arcade-appropriate gentle bob.
+    return this.strategy.snapGroundY ? this.strategy.snapGroundY(y) : y;
   }
 
   /**
@@ -562,6 +879,11 @@ export class Phaser2DScene extends Phaser.Scene {
   /** Draw static markers: start/finish flags, distance ticks. */
   private drawStaticMarkers() {
     this.markerGfx.clear();
+    // Reset any labels from a prior call (setElevationProfile + every resize).
+    for (const lbl of this.kmLabels) lbl.destroy();
+    this.kmLabels.length = 0;
+    for (const t of this.staticFlagTexts) t.destroy();
+    this.staticFlagTexts.length = 0;
     if (this.elevationProfile.length < 2) return;
 
     const markerColor = this.strategy.palette.markerTick;
@@ -588,20 +910,28 @@ export class Phaser2DScene extends Phaser.Scene {
         label.setAlpha(0.6);
         label.setDepth(50);
         this.textLayer.add(label);
+        this.kmLabels.push(label);
       }
     }
 
-    this.drawFlag(0, 0x76ff03, 'START');
-    this.drawFlag(this.totalRouteDistM, 0xff3366, 'FINISH');
+    this.staticFlagTexts.push(this.drawFlag(0, 0x76ff03, 'START'));
+    this.staticFlagTexts.push(this.drawFlag(this.totalRouteDistM, 0xff3366, 'FINISH'));
   }
 
-  /** Draw a flag at a given route distance — delegates to strategy. */
-  private drawFlag(distM: number, color: number, label: string) {
+  /** Draw a flag at a given route distance — delegates to strategy.
+   *  `gfx` defaults to the static marker layer (START/FINISH); workout flags
+   *  pass their own layer so they can be faded once ridden past. */
+  private drawFlag(
+    distM: number,
+    color: number,
+    label: string,
+    gfx: Phaser.GameObjects.Graphics = this.markerGfx,
+  ): Phaser.GameObjects.Text {
     const x = distM * PX_PER_METER;
     const groundY = this.getTerrainY(distM);
     const seed = Math.abs(Math.round(distM * 7)) % 10000;
 
-    this.strategy.drawFlag(this.markerGfx, x, groundY, color, label, seed);
+    this.strategy.drawFlag(gfx, x, groundY, color, label, seed);
 
     // Label text above the flag
     const markerFont = this.strategy.getMarkerFont();
@@ -614,6 +944,7 @@ export class Phaser2DScene extends Phaser.Scene {
     text.setOrigin(0.5, 1);
     text.setDepth(50);
     this.textLayer.add(text);
+    return text;
   }
 
   /** Move the ground/sky boundary. Welcome lowers this so the visible green
@@ -630,13 +961,35 @@ export class Phaser2DScene extends Phaser.Scene {
     return this.groundBaselineFraction;
   }
 
-  /** Handle resize — recreate overlay and reset terrain dirty flag. */
-  onResize(w: number, h: number) {
+  /** 'game' or 'welcome' — style strategies use this to skip effects the game
+   *  mode already gets from the glasses PostFX (e.g. cuphead's iris vignette,
+   *  which would double up with the pipeline's own). */
+  get sceneMode(): PhaserSceneMode {
+    return this.mode;
+  }
+
+  /** Handle resize — recreate overlay/backdrop and reset terrain dirty flag.
+   *  Everything positioned off the ground line must re-lay: the baseline is a
+   *  fraction of the canvas height, so a resize MOVES the ground. */
+  onResize(_w: number, _h: number) {
     // Destroy old overlay and recreate via strategy
     if (this.overlayObj) {
       this.overlayObj.destroy();
     }
     this.overlayObj = this.strategy.drawOverlay(this);
+
+    this.backdropObj?.destroy();
+    this.backdropObj = this.strategy.drawBackdrop?.(this) ?? null;
+
+    // Re-seat ground-anchored one-shot drawings (km ticks, START/FINISH,
+    // workout flags). Chunk scenery is the chunk manager's problem — the
+    // renderer calls its reload() alongside this.
+    if (this.mode === 'game' && this.elevationProfile.length >= 2) {
+      this.drawStaticMarkers();
+      this.passedFlagCount = -1; // force the flag layers to redraw
+      this.updateWorkoutFlags(this.bridge.distanceM);
+    }
+
     this.lastTerrainScrollX = NaN;
   }
 
@@ -651,11 +1004,17 @@ export class Phaser2DScene extends Phaser.Scene {
   setStrategy(newStrategy: PhaserStyleStrategy) {
     this.strategy = newStrategy;
 
-    // Rebuild overlay (CRT scanlines / film grain)
+    // Route bloom is style-dependent (plastic glows, cuphead doesn't).
+    this.applyRouteBloom();
+
+    // Rebuild overlay (CRT scanlines / film grain) + backdrop (neon grid)
     if (this.overlayObj) {
       this.overlayObj.destroy();
     }
     this.overlayObj = this.strategy.drawOverlay(this);
+
+    this.backdropObj?.destroy();
+    this.backdropObj = this.strategy.drawBackdrop?.(this) ?? null;
 
     // Rebuild wind emitter — its texture color comes from the strategy
     const initW = Number(this.game.config.width);

@@ -107,31 +107,20 @@ const PRESETS: WelcomePreset[] = [
   },
 ];
 
+/** The scene maps elevation at a fixed ELEVATION_EXAGGERATION (4 px/m). The
+ *  presets' natural 40–170 m ranges would turn into 160–680 px hills that
+ *  swallow the sky and parallax mountains on the welcome screen; scale them
+ *  down so visible hills stay in the ~50–200 px band the backdrop was tuned
+ *  for (the road still follows curves instead of looking pancake-flat). */
+const SYNTHETIC_ELE_SCALE = 0.3;
+
 function buildSyntheticProfile(): { distM: number; eleM: number }[] {
   const preset = PRESETS[Math.floor(Math.random() * PRESETS.length)];
   const profile: { distM: number; eleM: number }[] = [];
   for (let d = 0; d <= SYNTHETIC_PROFILE_LENGTH_M; d += SYNTHETIC_PROFILE_STEP_M) {
-    profile.push({ distM: d, eleM: preset(d) });
+    profile.push({ distM: d, eleM: preset(d) * SYNTHETIC_ELE_SCALE });
   }
-  // The scene's terrain shader has a vertical-exaggeration baked in (× 4) that
-  // amplifies hills aggressively when elevRange < 500 m. With our naturally small
-  // synthetic ranges (40–170 m) that pushes the surface above the top of the canvas,
-  // hiding sky and parallax mountains. Inflate elevRange via an out-of-view
-  // phantom high point so normalisedEle stays small enough to keep the surface
-  // mostly near the baseline (≈ 75 % down) while still letting visible hills
-  // rise ~80–200 px so the road follows curves instead of looking pancake-flat.
-  // Clamp to ≥ 600 m so the scene's `elevRange > 500 ? 2 : 1` divisor stays at 2.
-  const actualMin = Math.min(...profile.map((p) => p.eleM));
-  const actualMax = Math.max(...profile.map((p) => p.eleM));
-  const actualRange = actualMax - actualMin;
-  // Multiplier 10 + clamp 600 keeps the per-preset variation in the
-  // ~70–100 px band, so combined with WELCOME_GROUND_BASELINE = 0.90 the
-  // visible ground band lands roughly in the 16–19 % of canvas height range.
-  const phantomMax = actualMin + Math.max(actualRange * 10, 600);
-  // distM = -100 sits left of the rider's starting position (≥ ~520 m in world),
-  // so drawTerrain's left-cull (visLeft = scrollX − 50) skips this phantom every
-  // frame and it never appears in the polygon — it only contributes to elevRange.
-  return [{ distM: -100, eleM: phantomMax }, ...profile];
+  return profile;
 }
 
 /** Sprinkle scenery along the synthetic route. Real game mode pulls features
@@ -278,6 +267,10 @@ export function useWelcomeBackdrop(
 
     const profile = buildSyntheticProfile();
     gameInstance.scene.setElevationProfile(profile);
+    // Nothing covers the welcome canvas, so the world can build itself in the
+    // moment it appears (blocks drop / ink and watercolour go down). In game
+    // mode this waits for the rider to set off — see GameView.playIntro().
+    gameInstance.scene.replayIntro();
 
     weatherSystem = new PhaserWeatherSystem(gameInstance.scene, strategy);
     const initialWeather = resolveWeather();
@@ -345,6 +338,9 @@ export function useWelcomeBackdrop(
     gameInstance.game.scale.resize(w, h);
     gameInstance.scene.onResize(w, h);
     weatherSystem.onResize(w, h);
+    // The ground line moved with the canvas height; drop the chunks so the
+    // scenery re-lands on it (the next rAF tick's update() reloads them).
+    chunkManager?.reload();
   }
 
   function startLoop() {

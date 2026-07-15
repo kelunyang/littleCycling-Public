@@ -20,6 +20,8 @@ export interface PendingStart {
     targetDurationMs: number;
     randomEventsEnabled: boolean;
     selectedWorkoutId: string;
+    /** 今日課表訓練時帶上,讓後端把 ride 標記為 plan:<planId>:<day>。 */
+    planRef?: { planId: string; day: number };
   };
 }
 
@@ -55,6 +57,44 @@ export function resolveFrameColor(mode: FrameColorMode): string {
   }
 }
 
+/**
+ * Swatch colour for each lens, so UI can *show* the lens the rider picked.
+ *
+ * Mirror of LENS_PRESETS[].tint / WEATHER_TO_LENS in
+ * game/terrain/cycling-glasses-effect.ts — kept as a copy on purpose: that
+ * module pulls in three.js, and the welcome screen must not drag the 3D bundle
+ * in just to tint an icon. Change the tints there → change them here.
+ */
+const LENS_SWATCH: Record<Exclude<GlassesLens, 'auto' | 'clear'>, string> = {
+  dark: rgb(0.4 * 255, 0.4 * 255, 0.45 * 255),
+  red: rgb(1.0 * 255, 0.3 * 255, 0.2 * 255),
+  yellow: rgb(1.0 * 255, 0.92 * 255, 0.3 * 255),
+};
+
+const WEATHER_TO_LENS: Record<string, Exclude<GlassesLens, 'auto'>> = {
+  sunny: 'dark',
+  cloudy: 'red',
+  rainy: 'yellow',
+  snowy: 'yellow',
+};
+
+/**
+ * The colour the glasses read as. `clear` has no tint of its own, so what you
+ * see through it is the frame — fall back to the frame colour rather than
+ * painting the icon white and losing it against a pale card. `auto` resolves
+ * through the weather, defaulting to sunny (same as the effect's initial preset)
+ * when no weather is known yet.
+ */
+export function resolveLensColor(
+  lens: GlassesLens,
+  weather: string | null,
+  frameColor: string,
+): string {
+  const resolved = lens === 'auto' ? WEATHER_TO_LENS[weather ?? 'sunny'] ?? 'dark' : lens;
+  if (resolved === 'clear') return frameColor;
+  return LENS_SWATCH[resolved];
+}
+
 export const useGameStore = defineStore('game', () => {
   const gameStateStore = useGameStateStore();
 
@@ -76,6 +116,13 @@ export const useGameStore = defineStore('game', () => {
   const pendingStart = ref<PendingStart | null>(null);
   const weatherOverride = ref<string | null>(null);
   const cloudsEnabled = ref(false);
+  /**
+   * 3D camera view. Session-only, like the demos' toggle — it is how you are
+   * looking at the ride right now, not a setting worth persisting.
+   *  'third' = 跟車 (chase), 'orbit' = 自由 (drag to rotate, wheel to zoom).
+   */
+  const cameraMode = ref<'third' | 'orbit'>('third');
+
   const glassesLens = ref<GlassesLens>('auto');
   const glassesFrameColorMode = ref<FrameColorMode>('black');
   const glassesFrameColor = ref(resolveFrameColor('black'));
@@ -89,9 +136,18 @@ export const useGameStore = defineStore('game', () => {
   const workoutSegments = ref<WorkoutSegment[]>([]);
   const isRandomEvent = ref(false);
   const randomEventsEnabled = ref(true);
+  /** Welcome-screen switch: only when on does Start open the comparison-ride picker. */
+  const comparePickerEnabled = ref(false);
   const isPaused = ref(false);
 
   const isPlaying = computed(() => state.value === 'playing');
+  /**
+   * True when a structured workout / training plan is active (any segments
+   * loaded). Used to suppress the HR Zone-5 warning during training: hard
+   * intervals (VO2max/Tabata) intentionally push into Zone 5, so the red-line
+   * alarm would fire the whole time. Coin rules are unaffected.
+   */
+  const isWorkoutMode = computed(() => workoutSegments.value.length > 0);
 
   /** Plan segments injected from an active training plan (set before startGame). */
   const planDaySegments = ref<PlanSegment[]>([]);
@@ -143,15 +199,17 @@ export const useGameStore = defineStore('game', () => {
     planDaySegments.value = [];
     isRandomEvent.value = false;
     randomEventsEnabled.value = true;
+    comparePickerEnabled.value = false;
     isPaused.value = false;
   }
 
   return {
     state, coins, laps, rideSummary, startedAt, targetDurationMs, freeRoam, currentRideId, pendingStart, weatherOverride, cloudsEnabled,
+    cameraMode,
     glassesLens, glassesFrameColor, glassesFrameColorMode, glassesFrameMaterial,
-    selectedWorkoutId, workoutSegments, planDaySegments, isRandomEvent, randomEventsEnabled,
+    selectedWorkoutId, workoutSegments, planDaySegments, isRandomEvent, randomEventsEnabled, comparePickerEnabled,
     isPaused,
-    isPlaying, startGame, endGame, togglePause, reset,
+    isPlaying, isWorkoutMode, startGame, endGame, togglePause, reset,
     setFrameColorMode,
   };
 });

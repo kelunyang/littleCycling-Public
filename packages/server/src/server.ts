@@ -29,10 +29,13 @@ import rideApi from './routes/ride-api.js';
 import messageApi from './routes/message-api.js';
 import debugApi from './routes/debug-api.js';
 import planApi from './routes/plan-api.js';
+import analysisApi from './routes/analysis-api.js';
 import llmApi from './routes/llm-api.js';
+import llmProvidersApi from './routes/llm-providers-api.js';
 import catalogApi from './routes/catalog-api.js';
 import { DebugWriter } from './lib/debug-writer.js';
-import { PlanStore } from './lib/plan-store.js';
+import { migratePlanFilesToDb } from './lib/plan-file-migration.js';
+import { checkForUpdate } from './lib/update-checker.js';
 
 // ── Parse CLI args ──
 
@@ -107,8 +110,6 @@ routeStore.autoImport().then((count) => {
   console.warn('[auto-import] Error during auto-import:', err);
 });
 
-const planStore = new PlanStore(resolve(dataDir, 'plans'));
-
 const euroveloCatalog = new EuroVeloCatalog(dataDir);
 
 const relay = new WsRelay();
@@ -117,6 +118,30 @@ const relay = new WsRelay();
 
 const dbPath = resolve(dataDir, 'littlecycling.db');
 const db = new RideDatabase(dbPath);
+
+// ── One-time migration: LLM providers config.json → SQLite ──
+// Old configs kept providers (incl. plaintext API keys) in config.json's `llm[]`.
+// They now live in SQLite. On first boot after the upgrade, move any legacy
+// providers into the DB (only if the DB table is still empty), then re-save the
+// config to strip the stale `llm[]` key from config.json.
+const legacyLlm = configStore.takeLegacyLlm();
+if (legacyLlm.length > 0) {
+  if (db.countLlmProviders() === 0) {
+    db.replaceLlmProviders(legacyLlm);
+    console.log(`[migrate] moved ${legacyLlm.length} LLM provider(s) from config.json into SQLite`);
+  } else {
+    console.log(`[migrate] config.json had ${legacyLlm.length} legacy LLM provider(s) but SQLite already has some — dropping from config.json`);
+  }
+  configStore.save({}); // rewrite config.json without the `llm[]` key
+}
+
+// ── One-time migration: 課表 JSON 檔 data/plans/*.json → SQLite ──
+// 課表本體原本存成 JSON 檔（PlanStore），現改存 `plans` 表。啟動時把任何殘留
+// 的舊檔搬進 DB 並改名為 .migrated（天然冪等，重啟不重覆）。
+const migratedPlans = migratePlanFilesToDb(db, resolve(dataDir, 'plans'));
+if (migratedPlans > 0) {
+  console.log(`[migrate] moved ${migratedPlans} plan file(s) from data/plans into SQLite`);
+}
 
 // ── Debug writer ──
 
@@ -131,7 +156,22 @@ const liveSession = new LiveSession({
 
 // ── Build Fastify server ──
 
-const fastify = Fastify({ logger: false });
+const fastify = Fastify({
+  logger: false,
+  // debug:預設的 clientErrorHandler 只回 400 {"message":"Client Error"},
+  // 完全不說原因。這裡把底層解析錯誤(HPE_* 錯誤碼,如 HPE_HEADER_OVERFLOW
+  // = header 超過 Node 16KB 上限)log 出來,再回同樣的 400。
+  clientErrorHandler(err, socket) {
+    const code = (err as NodeJS.ErrnoException).code ?? 'unknown';
+    console.error(`[server] client error: ${code} — ${err.message}`);
+    if (socket.writable) {
+      socket.end(
+        'HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n' +
+        `{"error":"Bad Request","message":"Client Error","code":"${code}","statusCode":400}`,
+      );
+    }
+  },
+});
 
 await fastify.register(fastifyCors, { origin: true });
 await fastify.register(fastifyMultipart, { limits: { fileSize: 50 * 1024 * 1024 } }); // 50 MB
@@ -146,8 +186,10 @@ await fastify.register(liveApi, { liveSession, routeStore });
 await fastify.register(rideApi, { db });
 await fastify.register(messageApi, { db });
 await fastify.register(debugApi, { debugWriter });
-await fastify.register(planApi, { planStore, db, configStore });
-await fastify.register(llmApi, { db, configStore });
+await fastify.register(planApi, { db, configStore, routeStore });
+await fastify.register(analysisApi, { db, configStore, routeStore });
+await fastify.register(llmApi, { db });
+await fastify.register(llmProvidersApi, { db });
 await fastify.register(catalogApi, { routeStore, catalog: euroveloCatalog });
 
 // ── WebSocket: live sensor relay ──
@@ -220,6 +262,13 @@ try {
   console.log(`  REST    http://localhost:${port}/api/rides`);
   console.log(`  WS      ws://localhost:${port}/ws/live`);
   console.log(`  WS      ws://localhost:${port}/ws/replay?file=<name>`);
+
+  // Check for a newer public release (git HEAD vs public repo tip); persist the
+  // result into config.json so the Welcome screen can prompt a `git pull`.
+  // Fire-and-forget — never blocks startup, sanely no-ops if git/network is absent.
+  checkForUpdate(process.cwd(), configStore.get().update)
+    .then((update) => configStore.save({ update }))
+    .catch((err) => console.warn('Update check failed:', err));
 } catch (err) {
   console.error('Failed to start server:', err);
   process.exit(1);

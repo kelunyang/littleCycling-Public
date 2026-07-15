@@ -23,6 +23,10 @@ import type { PhaserCoinLayer } from '@/game/phaser/phaser-coin-layer';
 import type { PhaserStyleStrategy } from '@/game/phaser/phaser-style-strategy';
 import type { CyclistSpriteUpdateFn } from '@/game/phaser/cyclist-sprite';
 import { detectPhaserZone, type ZoneType as PhaserZoneType } from '@/game/phaser/phaser-zone-detector';
+// Pure state + curve, no Three.js — shared with the 3D renderer so both modes
+// lift the camera on the same cues (interval end, run-in to the finish).
+import { CameraLift, type LiftKind } from '@/game/terrain/camera-lift';
+import { INTRO_DURATION_S } from '@/game/phaser/phaser-style-strategy';
 import { useSettingsStore } from '@/stores/settingsStore';
 
 /** Matches PX_PER_METER in phaser2d-scene.ts — inlined to avoid pulling in the full scene module. */
@@ -54,15 +58,24 @@ export function usePhaserRenderer() {
   let lastZoneDistM = -Infinity;
   let lastZone: PhaserZoneType = 'open';
 
+  // Cinematic camera lift (peek at interval end / finale near the finish) —
+  // rendered as a zoom pull-back in 2D.
+  const cameraLift = new CameraLift();
+  let lastCamDistM = 0;
+
+  // Window-resize handling (mirrors useTerrainRenderer's ResizeObserver).
+  let resizeObserver: ResizeObserver | null = null;
+  let resizeSettleTimer: ReturnType<typeof setTimeout> | null = null;
+
   async function init(opts: PhaserRendererInitOptions): Promise<void> {
     routePoints = opts.points;
     cumulativeDists = buildCumulativeDistances(routePoints);
 
     // Create style strategy based on user setting
     const settingsStore = useSettingsStore();
-    const phaserStyle = settingsStore.config.map.phaserStyle ?? 'plastic';
+    const worldStyle = settingsStore.config.map.worldStyle ?? 'plastic';
     const { createStyleStrategy } = await import('@/game/phaser/phaser-style-strategy');
-    styleStrategy = await createStyleStrategy(phaserStyle);
+    styleStrategy = await createStyleStrategy(worldStyle);
 
     // Dynamic imports for code splitting
     const [
@@ -119,6 +132,25 @@ export function usePhaserRenderer() {
       grouping: true,
     });
 
+    // Keep the framebuffer matched to the CSS size, or a window resize leaves
+    // the boot-time buffer stretched across the new size (pixelArt sampling
+    // turns that into mush). The buffer resize is cheap and runs on every
+    // observation so the image stays sharp WHILE dragging; the heavy part —
+    // scene/weather onResize regenerate full-screen textures (film grain,
+    // iris, sky) — waits until the size has settled.
+    const canvasEl = opts.canvas;
+    resizeObserver = new ResizeObserver(() => {
+      if (!gameInstance) return;
+      const w = canvasEl.clientWidth;
+      const h = canvasEl.clientHeight;
+      if (w <= 0 || h <= 0) return;
+      gameInstance.game.scale.resize(w, h);
+      if (resizeSettleTimer) clearTimeout(resizeSettleTimer);
+      // Full relayout (textures, markers, chunk scenery) once the size settles.
+      resizeSettleTimer = setTimeout(() => resize(w, h), 150);
+    });
+    resizeObserver.observe(canvasEl);
+
     fetchAndProjectFeatures(routePoints, cumulativeDists).then((features) => {
       loadingMsg.close();
       chunkManager = new ChunkMgr(scene, elevationProfile, features, styleStrategy!);
@@ -150,6 +182,11 @@ export function usePhaserRenderer() {
   function updateDistance(distanceM: number): void {
     if (!gameInstance) return;
     gameInstance.bridge.distanceM = distanceM;
+
+    // Lap wrap / seek: a large backwards jump would make the smoothed vertical
+    // follow slide between the two elevations — snap instead.
+    if (distanceM < lastCamDistM - 500) gameInstance.scene.snapCamera();
+    lastCamDistM = distanceM;
 
     // Update terrain chunks
     chunkManager?.update(distanceM);
@@ -190,8 +227,28 @@ export function usePhaserRenderer() {
     const bridge = gameInstance.bridge;
     const scene = gameInstance.scene;
 
+    // Cinematic lift → camera zoom weight (0 when idle)
+    scene.setCameraLift(cameraLift.update(dt));
+
     // Update weather visuals
     weatherSystem?.update();
+
+    // Entrance animation: the terrain draws/drops itself in (handled inside the
+    // scene), while the backdrop and the rider fade in around it. Must run
+    // AFTER weatherSystem.update(), which owns those layers' alpha otherwise.
+    const introT = scene.getIntroT();
+    if (introT < INTRO_DURATION_S) {
+      weatherSystem?.setIntroT(introT);
+      // The rider fades in immediately, unlike the demo's "cyclist arrives
+      // last" beat — the intro now fires as they start pedalling, and a rider
+      // who is invisible while already riding just reads as broken.
+      cyclistSprite?.setAlpha(Math.min(1, introT / 0.4));
+    }
+
+    // Building night lights (F2) — fade with the day/night cycle.
+    if (weatherSystem && chunkManager) {
+      chunkManager.setNightFactor(1 - weatherSystem.getDayFactor());
+    }
 
     // Update cyclist sprite
     if (cyclistSprite) {
@@ -269,13 +326,21 @@ export function usePhaserRenderer() {
   }
 
   /**
-   * Handle resize — notify Phaser and weather/scene subsystems.
+   * Handle resize — notify Phaser and weather/scene subsystems, and rebuild
+   * the loaded chunks: their scenery bakes ground Y at load time, and the
+   * ground line is a fraction of the canvas height, so a resize strands
+   * trees/buildings above (or below) the freshly-laid terrain.
    */
   function resize(w: number, h: number): void {
     if (!gameInstance) return;
     gameInstance.game.scale.resize(w, h);
     gameInstance.scene.onResize(w, h);
     weatherSystem?.onResize(w, h);
+    if (chunkManager) {
+      chunkManager.reload();
+      chunkManager.update(gameInstance.bridge.distanceM);
+      gameInstance.scene.setWaterFeatures(chunkManager.getWaterFeatures());
+    }
   }
 
   // ── Coin management (delegated to PhaserCoinLayer) ──
@@ -317,16 +382,42 @@ export function usePhaserRenderer() {
     gameInstance?.scene.addLensMark('dust');
   }
 
-  function setCameraOptions(_opts: Record<string, any>): void {
-    // 2D mode uses fixed camera tracking
+  /** 2D camera control surface, mirroring the 3D renderer's. `mode` switches
+   *  跟車 / 自由 (follow / detached pan+zoom); `zoom` sets the wheel zoom. The
+   *  3D-only options (pitch, height) have no 2D meaning and are ignored. */
+  function setCameraOptions(opts: Record<string, any>): void {
+    if (!gameInstance) return;
+    if (opts.mode === 'third' || opts.mode === 'orbit') {
+      gameInstance.scene.setCameraMode(opts.mode);
+    }
+    if (typeof opts.zoom === 'number') {
+      gameInstance.scene.setUserZoom(opts.zoom);
+    }
   }
 
+  /** Pull the camera back: 'peek' (rise-hold-settle) or 'finale' (rise & stay). */
+  function triggerCameraLift(kind: LiftKind): void {
+    cameraLift.trigger(kind);
+  }
+
+  /** Build the world in around the rider — Tetris blocks drop into place
+   *  (plastic) or an ink pen draws and paints it (cuphead). Call this when the
+   *  ride actually starts, not at load time: the loading overlay covers the
+   *  canvas until then and the animation would be wasted behind it. */
+  function playIntro(): void {
+    gameInstance?.scene.replayIntro();
+  }
+
+  /** 2D checkpoint flags are placed by drawWorkoutSegmentFlags (GameView calls
+   *  it with the segment distances it already computes), so there is nothing to
+   *  spawn here — the 3D renderer's signature is kept for API parity. */
   function spawnCheckpointFlags(): void {
-    // TODO: could add 2D flags in future
+    // Intentionally empty — see drawWorkoutSegmentFlags.
   }
 
-  function updateCheckpointFlags(_dist: number): void {
-    // No-op for now
+  /** Fade the flags the rider has ridden past. */
+  function updateCheckpointFlags(distM: number): void {
+    gameInstance?.scene.updateWorkoutFlags(distM);
   }
 
   /**
@@ -359,6 +450,12 @@ export function usePhaserRenderer() {
   }
 
   function dispose(): void {
+    resizeObserver?.disconnect();
+    resizeObserver = null;
+    if (resizeSettleTimer) {
+      clearTimeout(resizeSettleTimer);
+      resizeSettleTimer = null;
+    }
     coinLayer?.dispose();
     weatherSystem?.dispose();
     chunkManager?.dispose();
@@ -394,6 +491,8 @@ export function usePhaserRenderer() {
     updatePhysiology,
     addLensMark,
     setCameraOptions,
+    triggerCameraLift,
+    playIntro,
     updateSensorData,
     spawnCoin,
     removeCoin,

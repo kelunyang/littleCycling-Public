@@ -13,7 +13,8 @@ export const FEATURE_CORRIDOR_M = 1000;
 
 /** A 2D feature projected onto the route distance axis. */
 export interface ProjectedFeature {
-  type: 'building' | 'tree' | 'water' | 'grass' | 'sand' | 'road';
+  type: 'building' | 'tree' | 'water' | 'grass' | 'sand' | 'road'
+    | 'waterway' | 'aeroway' | 'urban';
   /** Route distance in meters (X position). */
   distanceM: number;
   /** Lateral offset from route in meters (for depth/layering). */
@@ -115,8 +116,22 @@ export function classifyFeature(feature: MVTFeature): ProjectedFeature['type'] |
       return 'grass';
     case 'landuse': {
       const lc = feature.properties.class || '';
-      if (lc === 'residential' || lc === 'commercial' || lc === 'industrial') return null;
+      // Built-up areas tint the ground band so town stretches read differently
+      // from open country (mirrors the 3D landuse-renderer's `urban` kind).
+      if (lc === 'residential' || lc === 'commercial' || lc === 'industrial') return 'urban';
       if (lc === 'cemetery' || lc === 'park') return 'grass';
+      return null;
+    }
+    case 'waterway': {
+      // Linear rivers/canals/streams. Culverts and drainage ditches would draw
+      // water across dry ground — skip them (mirrors the 3D waterway-renderer).
+      if (feature.properties.brunnel === 'tunnel') return null;
+      if (feature.properties.class === 'ditch') return null;
+      return 'waterway';
+    }
+    case 'aeroway': {
+      const cls = feature.properties.class || '';
+      if (cls === 'runway' || cls === 'taxiway') return 'aeroway';
       return null;
     }
     case 'transportation':

@@ -1,0 +1,37 @@
+#!/bin/bash
+# 守門:只有被標記為「錄製主機」的機器才能把 data/sessions/*.jsonl 提交進版控。
+#
+# 原理:GitHub 端分不出是哪一台機器(都是同一個帳號),所以權限只能在 client 端把關。
+#   - hook 本身進版控 → 每台 clone 都有這道規則
+#   - 「誰有權發 session」由每台機器的 local config 決定:
+#         git config --local sessions.publisher true
+#     只在錄製主機設定;其他機器(開發機、replay 機)不設就會被擋。
+#
+# 啟用方式(每台 clone 各跑一次):
+#   git config core.hooksPath scripts/hooks
+#
+# 真的需要一次性繞過:git commit --no-verify(自負責任)
+
+# 已標記為 publisher 的機器直接放行
+if [ "$(git config --local --get sessions.publisher)" = "true" ]; then
+  exit 0
+fi
+
+# 找出這次 staged 的 session jsonl
+staged_sessions=$(git diff --cached --name-only --diff-filter=AM | grep -E '^data/sessions/.*\.jsonl$' || true)
+
+if [ -n "$staged_sessions" ]; then
+  echo "──────────────────────────────────────────────────────────────" >&2
+  echo "✗ pre-commit 擋下:這台機器不是 session 錄製主機,不該提交騎乘紀錄。" >&2
+  echo "" >&2
+  echo "  被擋下的檔案:" >&2
+  echo "$staged_sessions" | sed 's/^/    /' >&2
+  echo "" >&2
+  echo "  處置方式(擇一):" >&2
+  echo "    • 把它們 unstage:  git restore --staged data/sessions/" >&2
+  echo "    • 若這台『真的』是錄製主機:git config --local sessions.publisher true" >&2
+  echo "──────────────────────────────────────────────────────────────" >&2
+  exit 1
+fi
+
+exit 0

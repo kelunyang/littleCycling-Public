@@ -244,38 +244,45 @@
       </div>
     </el-drawer>
 
-    <!-- Comparison ride picker dialog -->
-    <el-dialog
+    <!-- Comparison ride picker — a list-pick, so it wears the same fullscreen
+         drawer as the appearance pickers rather than a dialog. Closing it is
+         *not* a cancel: the ride is already starting, so the close button means
+         "skip the comparison", same as the Skip button. -->
+    <el-drawer
       v-model="showCompareDialog"
-      title=""
-      width="480px"
+      direction="btt"
+      size="100%"
+      :with-header="false"
       :close-on-click-modal="false"
-      :show-close="false"
-      class="compare-dialog"
       append-to-body
+      class="compare-drawer"
+      @close="onCompareDrawerClose"
     >
-      <template #header>
-        <div class="compare-dialog__header">
+      <div class="compare-drawer__header">
+        <h3>
           <font-awesome-icon icon="clock-rotate-left" />
-          <span>Load Comparison Ride?</span>
-        </div>
-      </template>
+          Load Comparison Ride?
+        </h3>
+        <el-button circle @click="proceedWithoutComparison">
+          <font-awesome-icon icon="xmark" />
+        </el-button>
+      </div>
 
-      <div class="compare-dialog__body">
-        <div v-if="historyRides.length === 0" class="compare-dialog__empty">
+      <div class="compare-drawer__body">
+        <div v-if="historyRides.length === 0" class="compare-drawer__empty">
           No previous rides found.
         </div>
 
         <div
           v-for="ride in historyRides"
           :key="ride.id"
-          class="compare-dialog__item"
-          :class="{ 'compare-dialog__item--selected': comparisonStore.compareRideId === ride.id }"
+          class="compare-drawer__item"
+          :class="{ 'compare-drawer__item--selected': comparisonStore.compareRideId === ride.id }"
           @click="toggleCompare(ride.id)"
         >
-          <div class="compare-dialog__info">
-            <span class="compare-dialog__date">{{ formatDate(ride.startedAt) }}</span>
-            <span class="compare-dialog__stats">
+          <div class="compare-drawer__info">
+            <span class="compare-drawer__date">{{ formatDate(ride.startedAt) }}</span>
+            <span class="compare-drawer__stats">
               {{ formatDuration(ride.durationMs) }}
               <template v-if="ride.avgHr"> | {{ Math.round(ride.avgHr) }} bpm</template>
               <template v-if="ride.avgPowerW"> | {{ Math.round(ride.avgPowerW) }} W</template>
@@ -285,24 +292,22 @@
           <font-awesome-icon
             v-if="comparisonStore.compareRideId === ride.id"
             icon="check"
-            class="compare-dialog__check"
+            class="compare-drawer__check"
           />
         </div>
       </div>
 
-      <template #footer>
-        <div class="compare-dialog__footer">
-          <el-button @click="proceedWithoutComparison">
-            <font-awesome-icon icon="xmark" style="margin-right: 6px;" />
-            Skip
-          </el-button>
-          <el-button type="primary" @click="proceedToGame">
-            <font-awesome-icon icon="play" style="margin-right: 6px;" />
-            {{ comparisonStore.compareRideId ? 'Start with Comparison' : 'Start Ride' }}
-          </el-button>
-        </div>
-      </template>
-    </el-dialog>
+      <div class="compare-drawer__footer">
+        <el-button @click="proceedWithoutComparison">
+          <font-awesome-icon icon="xmark" style="margin-right: 6px;" />
+          Skip
+        </el-button>
+        <el-button type="primary" @click="proceedToGame">
+          <font-awesome-icon icon="play" style="margin-right: 6px;" />
+          {{ comparisonStore.compareRideId ? 'Start with Comparison' : 'Start Ride' }}
+        </el-button>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -447,6 +452,12 @@ async function fetchHistoryRides() {
 
 function openComparisonDialog() {
   comparisonStore.clear();
+  // The picker only appears when the welcome-screen switch is on; otherwise
+  // Start launches the ride directly with no comparison.
+  if (!gameStore.comparePickerEnabled) {
+    launchGame();
+    return;
+  }
   fetchHistoryRides();
   showCompareDialog.value = true;
 }
@@ -470,6 +481,18 @@ function proceedToGame() {
   launchGame();
 }
 
+/**
+ * Dismissing the drawer (Esc / close button) means "skip the comparison" — the
+ * ride is already on its way, so we must not leave the user stranded on the
+ * welcome screen. Guarded on `starting` because Skip/Start close the drawer
+ * themselves, and this would otherwise fire *after* proceedToGame() and clear
+ * the comparison the user just picked.
+ */
+function onCompareDrawerClose() {
+  if (starting.value) return;
+  proceedWithoutComparison();
+}
+
 function launchGame() {
   if (starting.value) return;
   starting.value = true;
@@ -480,6 +503,8 @@ function launchGame() {
   // keeps the backend out of 'recording' state — no ride row, jsonl, clock, or
   // moving ball — while the prompt is still showing.
   const route = routeStore.activeRoute;
+  // 今日課表訓練:有則後端把 ride 標記為 plan:<planId>:<day>(自由騎 / workout 不帶)。
+  const todayTraining = todayTrainingSessions.value[0];
   gameStore.pendingStart = {
     routeId: route?.id,
     routeName: route?.name,
@@ -492,12 +517,14 @@ function launchGame() {
           targetDurationMs: settingsStore.config.training.defaultDuration,
           randomEventsEnabled: gameStore.randomEventsEnabled,
           selectedWorkoutId: gameStore.selectedWorkoutId,
+          planRef: todayTraining
+            ? { planId: todayTraining.plan.id, day: todayTraining.day }
+            : undefined,
         }
       : undefined,
   };
 
   // Inject plan segments if an active plan has training for today
-  const todayTraining = todayTrainingSessions.value[0];
   if (todayTraining) {
     gameStore.planDaySegments = todayTraining.session.segments;
   }
@@ -735,31 +762,42 @@ onUnmounted(() => {
   letter-spacing: 1px;
 }
 
-/* ── Comparison dialog ── */
-.compare-dialog__header {
+/* ── Comparison drawer ── mirrors the appearance drawers in StartChecklist. */
+.compare-drawer__header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-family: var(--font-display);
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--hud-cyan);
-  text-transform: uppercase;
-  letter-spacing: 2px;
-  text-shadow: 0 0 10px rgba(var(--accent-rgb), 0.3);
+  justify-content: space-between;
+  padding: 4px 4px 16px;
+  margin-bottom: 4px;
+  border-bottom: 1.5px solid var(--hud-border);
 }
 
-.compare-dialog__body {
+.compare-drawer__header h3 {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--hud-cyan);
+}
+
+.compare-drawer__body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: 300px;
+  max-width: 640px;
+  margin: 0 auto;
+  padding-top: 8px;
+  width: 100%;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: rgba(var(--accent-rgb), 0.3) transparent;
 }
 
-.compare-dialog__empty {
+.compare-drawer__empty {
   font-size: 12px;
   color: var(--hud-text);
   opacity: 0.6;
@@ -769,43 +807,44 @@ onUnmounted(() => {
   letter-spacing: 0.5px;
 }
 
-.compare-dialog__item {
+.compare-drawer__item {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 10px 12px;
   background: rgba(var(--accent-rgb), 0.02);
   border: 1.5px solid var(--hud-border);
+  border-radius: var(--card-radius-sm);
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s;
   font-size: 12px;
 }
 
-.compare-dialog__item:hover {
+.compare-drawer__item:hover {
   background: rgba(var(--accent-rgb), 0.06);
   border-color: rgba(var(--accent-rgb), 0.3);
 }
 
-.compare-dialog__item--selected {
+.compare-drawer__item--selected {
   background: rgba(var(--accent-rgb), 0.1);
   border-color: var(--hud-cyan);
   box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.2);
 }
 
-.compare-dialog__info {
+.compare-drawer__info {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.compare-dialog__date {
+.compare-drawer__date {
   color: var(--hud-text-bright);
   font-family: var(--font-display);
   font-weight: 600;
   letter-spacing: 0.5px;
 }
 
-.compare-dialog__stats {
+.compare-drawer__stats {
   color: var(--hud-text);
   opacity: 0.7;
   font-size: 10px;
@@ -813,16 +852,20 @@ onUnmounted(() => {
   text-transform: uppercase;
 }
 
-.compare-dialog__check {
+.compare-drawer__check {
   color: var(--zone-3);
   font-size: 16px;
-  filter: drop-shadow(0 0 4px rgba(0,255,136,0.6));
 }
 
-.compare-dialog__footer {
+.compare-drawer__footer {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+  max-width: 640px;
+  margin: 16px auto 0;
+  width: 100%;
+  padding-top: 16px;
+  border-top: 1.5px solid var(--hud-border);
 }
 
 /* ── Sensor drawer ── */

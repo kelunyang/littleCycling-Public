@@ -1,6 +1,12 @@
 <template>
   <div ref="containerRef" class="elev-preview">
     <canvas ref="canvasRef" />
+    <font-awesome-icon
+      v-if="showBike"
+      icon="bicycle"
+      class="elev-bike"
+      :style="{ left: `${bikeX}px`, top: `${bikeY}px` }"
+    />
   </div>
 </template>
 
@@ -12,7 +18,7 @@ import { useSettingsStore } from '@/stores/settingsStore';
 
 const settingsStore = useSettingsStore();
 const worldStyle = computed(
-  () => settingsStore.config.map.phaserStyle ?? 'plastic',
+  () => settingsStore.config.map.worldStyle ?? 'plastic',
 );
 
 interface ElevPalette {
@@ -34,6 +40,9 @@ interface ElevPalette {
   font: string;
 }
 
+// Canvas colours can't read CSS var() directly, so this mirrors the palette in
+// src/styles/themes.scss by value — keep the two in sync (plastic ink #1a1140,
+// pink #ff3b8d; cuphead ink #2a2420, gold #c4a035, rust #a0523c, paper #e8dcc0).
 const PALETTES: Record<'plastic' | 'cuphead' | 'default', ElevPalette> = {
   plastic: {
     bg: 'rgba(255, 247, 251, 0.94)',
@@ -113,7 +122,7 @@ const props = withDefaults(defineProps<{
   totalDurationMs: number;
   /** X-axis range = user target ride time. If > route/workout duration, profile & bands tile. */
   displayDurationMs?: number;
-  /** When provided, enables live-tracking mode: triangle cursor + active segment stripes */
+  /** When provided, enables live-tracking mode: bike marker + reference line + active segment stripes */
   elapsedMs?: number;
 }>(), {
   displayDurationMs: 0,
@@ -122,6 +131,11 @@ const props = withDefaults(defineProps<{
 
 const containerRef = ref<HTMLElement | null>(null);
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+
+// Live-mode bike marker (DOM overlay) — position in CSS px within the container
+const showBike = ref(false);
+const bikeX = ref(0);
+const bikeY = ref(0);
 
 const CANVAS_H = 120;
 const PAD = { top: 10, right: 10, bottom: 22, left: 10 };
@@ -456,23 +470,37 @@ function draw() {
   // ── Minute graduations on the X (time) axis ──
   drawMinuteTicks(ctx, plotW, plotH, displayDur, pal);
 
-  // ── Live-mode triangle cursor ──
+  // ── Live-mode marker: gray vertical reference line + bike that rides the curve ──
   if (isLive && displayDur > 0) {
     const pct = Math.min(1, Math.max(0, props.elapsedMs / displayDur));
     const cx = PAD.left + pct * plotW;
-    const triH = 8;
-    const triW = 6;
+
+    // Elevation curve Y at the cursor's X (interpolate the drawn polyline)
+    let cy = PAD.top;
+    for (let i = 0; i < points.length - 1; i++) {
+      if (points[i].x <= cx && points[i + 1].x >= cx) {
+        const t = (cx - points[i].x) / (points[i + 1].x - points[i].x || 1);
+        cy = points[i].y + (points[i + 1].y - points[i].y) * t;
+        break;
+      }
+    }
+
+    // Gray vertical reference line spanning the plot, tracking the bike on X
     ctx.save();
-    ctx.shadowBlur = 6;
-    ctx.shadowColor = pal.cursorGlow;
-    ctx.fillStyle = pal.cursor;
+    ctx.strokeStyle = 'rgba(120, 120, 120, 0.7)';
+    ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(cx, PAD.top + plotH + 2);        // tip pointing down into label area
-    ctx.lineTo(cx - triW, PAD.top + plotH + 2 + triH);
-    ctx.lineTo(cx + triW, PAD.top + plotH + 2 + triH);
-    ctx.closePath();
-    ctx.fill();
+    ctx.moveTo(cx, PAD.top);
+    ctx.lineTo(cx, PAD.top + plotH);
+    ctx.stroke();
     ctx.restore();
+
+    // Publish the bike position (CSS px) for the DOM overlay to follow the curve
+    bikeX.value = cx;
+    bikeY.value = cy;
+    showBike.value = true;
+  } else {
+    showBike.value = false;
   }
 
   // Border (themed)
@@ -586,6 +614,7 @@ watch(
 
 <style scoped>
 .elev-preview {
+  position: relative;
   width: 100%;
   flex-shrink: 0;
 }
@@ -593,5 +622,17 @@ watch(
 .elev-preview canvas {
   display: block;
   width: 100%;
+}
+
+/* Bike marker rides the elevation curve; positioned in px via inline style */
+.elev-bike {
+  position: absolute;
+  transform: translate(-50%, -60%);
+  font-size: 15px;
+  color: var(--hud-text-bright, #1a1140);
+  pointer-events: none;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
+  transition: left 0.08s linear, top 0.08s linear;
+  will-change: left, top;
 }
 </style>

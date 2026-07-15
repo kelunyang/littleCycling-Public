@@ -47,62 +47,34 @@
       </div>
     </div>
 
-    <!-- Weather override -->
-    <div class="checklist__weather">
-      <label>
-        <font-awesome-icon icon="cloud-sun" />
-        Weather
-      </label>
-      <el-segmented
-        v-model="gameStore.weatherOverride"
-        :options="weatherOptions"
-        size="small"
-      />
+    <!-- Appearance shortcuts — weather / glasses / world collapse into three
+         icon buttons; each opens its own drawer for the detailed picks. -->
+    <div class="checklist__appearance">
+      <button type="button" class="appearance-btn" @click="weatherOpen = true">
+        <font-awesome-icon :icon="weatherIcon" class="appearance-btn__icon" />
+        <span class="appearance-btn__label">Weather</span>
+      </button>
+      <button type="button" class="appearance-btn" @click="glassesOpen = true">
+        <font-awesome-icon
+          icon="glasses"
+          class="appearance-btn__icon glasses-glyph"
+          :style="{ color: glassesIconColor }"
+        />
+        <span class="appearance-btn__label">Glasses</span>
+      </button>
+      <button type="button" class="appearance-btn" @click="worldOpen = true">
+        <font-awesome-icon :icon="worldIcon" class="appearance-btn__icon" />
+        <span class="appearance-btn__label">World</span>
+      </button>
     </div>
 
-    <!-- Billboard clouds toggle -->
+    <!-- Comparison ride toggle: when on, Start opens the comparison-ride picker -->
     <div class="checklist__toggle">
       <label>
-        <font-awesome-icon icon="cloud" />
-        Billboard Clouds
+        <font-awesome-icon icon="clock-rotate-left" />
+        Comparison Ride
       </label>
-      <el-switch v-model="gameStore.cloudsEnabled" />
-    </div>
-
-    <!-- Glasses lens — works in both Phaser 2D and Three.js modes -->
-    <div class="checklist__frame-material">
-      <label>
-        <font-awesome-icon icon="glasses" />
-        Lens
-      </label>
-      <el-segmented v-model="gameStore.glassesLens" :options="lensOptions" size="small" />
-    </div>
-
-    <!-- Glasses frame color -->
-    <div class="checklist__frame-color">
-      <label>
-        <font-awesome-icon icon="glasses" />
-        Frame Color
-      </label>
-      <el-segmented v-model="frameColorMode" :options="frameColorOptions" size="small" />
-    </div>
-
-    <!-- Glasses frame material -->
-    <div class="checklist__frame-material">
-      <label>
-        <font-awesome-icon icon="cube" />
-        Material
-      </label>
-      <el-segmented v-model="gameStore.glassesFrameMaterial" :options="materialOptions" size="small" />
-    </div>
-
-    <!-- World style — drives both the Phaser 2D visuals and the welcome theme. -->
-    <div class="checklist__frame-material">
-      <label>
-        <font-awesome-icon icon="paintbrush" />
-        World Style
-      </label>
-      <el-segmented v-model="phaserStyleModel" :options="worldStyleOptions" size="small" />
+      <el-switch v-model="gameStore.comparePickerEnabled" />
     </div>
 
     <!-- Free roam toggle (only if dual-sided power detected) -->
@@ -113,21 +85,191 @@
       </label>
       <el-switch v-model="gameStore.freeRoam" />
     </div>
+
+    <!-- ── Weather drawer (fullscreen) ────────────────────────────── -->
+    <el-drawer
+      v-model="weatherOpen"
+      direction="btt"
+      size="100%"
+      :with-header="false"
+      append-to-body
+      class="appearance-drawer"
+    >
+      <div class="appearance-drawer__header">
+        <h3>
+          <font-awesome-icon :icon="weatherIcon" />
+          Weather
+        </h3>
+        <el-button circle @click="weatherOpen = false">
+          <font-awesome-icon icon="xmark" />
+        </el-button>
+      </div>
+      <div class="appearance-drawer__body">
+        <div class="checklist__weather">
+          <label>
+            <font-awesome-icon icon="cloud-sun" />
+            Weather
+          </label>
+          <el-segmented
+            v-model="gameStore.weatherOverride"
+            :options="weatherOptions"
+            size="small"
+          />
+        </div>
+
+        <div class="checklist__toggle">
+          <label>
+            <font-awesome-icon icon="cloud" />
+            Billboard Clouds
+          </label>
+          <el-switch v-model="gameStore.cloudsEnabled" />
+        </div>
+      </div>
+    </el-drawer>
+
+    <!-- ── Glasses drawer (fullscreen) ────────────────────────────── -->
+    <el-drawer
+      v-model="glassesOpen"
+      direction="btt"
+      size="100%"
+      :with-header="false"
+      append-to-body
+      class="appearance-drawer"
+    >
+      <div class="appearance-drawer__header">
+        <h3>
+          <font-awesome-icon icon="glasses" class="glasses-glyph" :style="{ color: glassesIconColor }" />
+          Glasses
+        </h3>
+        <el-button circle @click="glassesOpen = false">
+          <font-awesome-icon icon="xmark" />
+        </el-button>
+      </div>
+      <div class="appearance-drawer__body">
+        <div class="checklist__frame-material">
+          <label>
+            <font-awesome-icon icon="glasses" />
+            Lens
+          </label>
+          <el-segmented v-model="gameStore.glassesLens" :options="lensOptions" size="small" />
+        </div>
+
+        <div class="checklist__frame-color">
+          <label>
+            <font-awesome-icon icon="glasses" />
+            Frame Color
+          </label>
+          <el-segmented v-model="frameColorMode" :options="frameColorOptions" size="small" />
+        </div>
+
+        <div class="checklist__frame-material">
+          <label>
+            <font-awesome-icon icon="cube" />
+            Material
+          </label>
+          <el-segmented v-model="gameStore.glassesFrameMaterial" :options="materialOptions" size="small" />
+        </div>
+      </div>
+    </el-drawer>
+
+    <!-- ── World drawer (fullscreen) ──────────────────────────────── -->
+    <el-drawer
+      v-model="worldOpen"
+      direction="btt"
+      size="100%"
+      :with-header="false"
+      append-to-body
+      class="appearance-drawer"
+    >
+      <div class="appearance-drawer__header">
+        <h3>
+          <font-awesome-icon icon="paintbrush" />
+          World
+        </h3>
+        <el-button circle @click="worldOpen = false">
+          <font-awesome-icon icon="xmark" />
+        </el-button>
+      </div>
+      <div class="appearance-drawer__body">
+        <!-- Render mode — 3D (Three.js FPS / MapLibre) vs 2D (Phaser). Lives here
+             so the mode can be picked straight from the welcome screen. -->
+        <div class="checklist__frame-material">
+          <label>
+            <font-awesome-icon icon="cube" />
+            Render Mode
+          </label>
+          <el-segmented v-model="renderModeModel" :options="renderModeOptions" size="small">
+            <template #default="{ item }">
+              <span class="segmented-item">
+                <font-awesome-icon :icon="item.icon" />
+                {{ item.label }}
+              </span>
+            </template>
+          </el-segmented>
+        </div>
+
+        <!-- World style — only meaningful for the stylised renderers (Three.js /
+             Phaser). MapLibre is the realistic "classic" map, so there's no style
+             to choose; it just renders straight. -->
+        <div v-if="renderModeModel !== 'maplibre'" class="checklist__frame-material">
+          <label>
+            <font-awesome-icon icon="paintbrush" />
+            World Style
+          </label>
+          <el-segmented v-model="worldStyleModel" :options="worldStyleOptions" size="small" />
+        </div>
+        <p v-else class="appearance-drawer__note">
+          <font-awesome-icon icon="circle-info" />
+          Classic map renders realistically — no world style to pick.
+        </p>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
-import { WORKOUT_PROFILES, WORKOUT_PROFILES_MAP, isDualSidedPower } from '@littlecycling/shared';
+import { computed, ref } from 'vue';
+import { WORKOUT_PROFILES, WORKOUT_PROFILES_MAP, isDualSidedPower, type AppConfig } from '@littlecycling/shared';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useSensorStore } from '@/stores/sensorStore';
-import { useGameStore, type FrameColorMode } from '@/stores/gameStore';
+import { useGameStore, resolveLensColor, type FrameColorMode } from '@/stores/gameStore';
 import { usePlanStore } from '@/stores/planStore';
 
 const settingsStore = useSettingsStore();
 const sensorStore = useSensorStore();
 const gameStore = useGameStore();
 const planStore = usePlanStore();
+
+// Appearance drawers — weather / glasses / world each collapse into an icon
+// button on the checklist and expand into their own drawer.
+const weatherOpen = ref(false);
+const glassesOpen = ref(false);
+const worldOpen = ref(false);
+
+/** Weather button icon mirrors the current override so the pick shows at a glance. */
+const weatherIcon = computed(() => {
+  switch (gameStore.weatherOverride) {
+    case 'sunny':
+      return 'sun';
+    case 'cloudy':
+      return 'cloud';
+    case 'rainy':
+      return 'cloud-rain';
+    case 'snowy':
+      return 'snowflake';
+    default:
+      return 'cloud-sun';
+  }
+});
+
+/**
+ * The glasses glyph is a single-colour Font Awesome path, so it can only carry
+ * one of the two picks. It carries the lens — that is what you actually see the
+ * world through, and 'clear' falls back to the frame colour anyway.
+ */
+const glassesIconColor = computed(() =>
+  resolveLensColor(gameStore.glassesLens, gameStore.weatherOverride, gameStore.glassesFrameColor),
+);
 
 const frameColorOptions = [
   { label: 'Black', value: 'black' },
@@ -162,10 +304,27 @@ const worldStyleOptions = [
   { label: 'Hand-drawn', value: 'cuphead' },
 ];
 
-const phaserStyleModel = computed({
-  get: () => settingsStore.config.map.phaserStyle ?? 'plastic',
-  set: (val: string) => settingsStore.updateMap({ phaserStyle: val as 'plastic' | 'cuphead' }),
+const worldStyleModel = computed({
+  get: () => settingsStore.config.map.worldStyle ?? 'plastic',
+  set: (val: string) => settingsStore.updateMap({ worldStyle: val as 'plastic' | 'cuphead' }),
 });
+
+const renderModeOptions = [
+  { label: '3D (FPS)', value: 'threejs', icon: 'mountain-sun' },
+  { label: 'Classic', value: 'maplibre', icon: 'map-location-dot' },
+  { label: '2D', value: 'phaser', icon: 'chess-board' },
+];
+
+const renderModeModel = computed({
+  get: () => settingsStore.config.map.renderMode,
+  set: (val: AppConfig['map']['renderMode']) => settingsStore.updateMap({ renderMode: val }),
+});
+
+/** World button glyph mirrors the picked render mode, so it reads at a glance
+ *  (2D → map, Classic → map-pin, 3D → mountain) instead of a static brush. */
+const worldIcon = computed(
+  () => renderModeOptions.find((o) => o.value === renderModeModel.value)?.icon ?? 'paintbrush',
+);
 
 const weatherOptions = [
   { value: null, label: 'Auto' },
@@ -373,5 +532,110 @@ const hasDualPower = computed(
 .checklist__frame-color :deep(.el-segmented__item.is-selected),
 .checklist__frame-material :deep(.el-segmented__item.is-selected) {
   color: var(--hud-cyan);
+}
+
+/* Icon + label inside a segmented option (render mode picker). */
+.segmented-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.segmented-item svg {
+  font-size: 0.9em;
+}
+
+/* ── Appearance shortcut buttons (weather / glasses / world) ─────── */
+.checklist__appearance {
+  display: flex;
+  gap: 10px;
+}
+
+.appearance-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px 6px;
+  background: var(--accent-soft);
+  border: 1.5px solid var(--hud-border);
+  border-radius: var(--card-radius-sm);
+  color: var(--hud-cyan);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.15s;
+}
+
+.appearance-btn:hover {
+  background: var(--accent-hover);
+  border-color: var(--hud-cyan);
+  transform: translateY(-1px);
+}
+
+.appearance-btn__icon {
+  font-size: 22px;
+}
+
+/* Tint the glasses glyph with the chosen lens colour; a faint outline keeps the
+   pale ones (clear-on-white frame, yellow) legible on any card background.
+   Shared by the checklist button and the drawer title. */
+.glasses-glyph {
+  filter:
+    drop-shadow(0.6px 0 0 rgba(128, 128, 128, 0.7))
+    drop-shadow(-0.6px 0 0 rgba(128, 128, 128, 0.7))
+    drop-shadow(0 0.6px 0 rgba(128, 128, 128, 0.7))
+    drop-shadow(0 -0.6px 0 rgba(128, 128, 128, 0.7));
+}
+
+.appearance-btn__label {
+  font-family: var(--font-display);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  opacity: 0.85;
+}
+
+/* Fullscreen drawer header — mirrors SettingsPanel's title bar. */
+.appearance-drawer__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 4px 16px;
+  margin-bottom: 4px;
+  border-bottom: 1.5px solid var(--hud-border);
+}
+
+.appearance-drawer__header h3 {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--hud-cyan);
+}
+
+/* Drawer body reuses the checklist layout for the moved segmented pickers.
+   Constrain the width so controls don't stretch edge-to-edge on a full screen. */
+.appearance-drawer__body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 640px;
+  margin: 0 auto;
+  padding-top: 8px;
+}
+
+.appearance-drawer__note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--hud-text-dim);
+  opacity: 0.8;
 }
 </style>

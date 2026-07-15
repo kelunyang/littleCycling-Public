@@ -1,6 +1,6 @@
 /**
  * Service Worker that caches map tiles in Cache Storage for offline/repeat use.
- * Tiles are matched by URL patterns for Mapbox, OpenFreeMap, and AWS terrain.
+ * Tiles are matched by URL patterns for OpenFreeMap (basemap) and AWS terrain.
  *
  * Strategy: Cache-first — serve from cache if available, otherwise fetch from
  * network, cache the response, then return it.
@@ -12,11 +12,6 @@ const MAX_CACHE_ENTRIES = 4000;
 /** URL patterns that should be cached. */
 const TILE_PATTERNS = [
   /tiles\.openfreemap\.org/,
-  /api\.mapbox\.com\/v4/,
-  /api\.mapbox\.com\/styles/,
-  /api\.mapbox\.com\/fonts/,
-  /api\.mapbox\.com\/sprites/,
-  /\.tiles\.mapbox\.com/,
   /s3\.amazonaws\.com\/elevation-tiles-prod/,
 ];
 

@@ -1,0 +1,80 @@
+@use 'sass:color';
+
+// ─────────────────────────────────────────────────────────────────────────
+// World-style theme palettes — single source of truth.
+//
+// The two hand-styled worlds (plastic / cuphead) previously repeated the same
+// raw hex literals across App.vue, WelcomeView.vue and GameView.vue. Here we
+// declare each palette ONCE as an SCSS map, then emit it as global CSS custom
+// properties. Component styles reference the emitted `var(--pl-*)` / `var(--ck-*)`
+// tokens instead of hard-coding hex, so a colour only ever changes in one place.
+//
+// Why CSS custom properties (not bare SCSS vars): the tokens must reach
+// Element Plus drawers/dialogs that Vue *teleports* onto <body>, which sit
+// outside every component's compiled scope. SCSS vars are compile-time and
+// per-file; CSS vars cascade at runtime and cover the teleported chrome too.
+//
+// The cyberpunk base HUD palette (#00e5ff, #ff2d6b, #050810, …) is intentionally
+// NOT tokenised here — it lives in App.vue :root as the default look.
+// ─────────────────────────────────────────────────────────────────────────
+
+// ── Plastic: candy toy world — navy ink lines, hot pink + cyan + acid accents ──
+// Keys are quoted: bare words like `pink`/`cyan` parse as CSS *colour values*,
+// which trips sass's "color value in interpolation" warning.
+$plastic: (
+  'ink':        #1a1140, // primary border / ink line
+  'ink-deep':   #100a30, // darkest text
+  'ink-mid':    #2a2050, // regular text
+  'pink':       #ff3b8d, // primary accent (hud-cyan/magenta role)
+  'purple':     #d500f9, // pink's gradient partner
+  'cyan':       #00d8ff, // secondary accent
+  'cyan-deep':  #00b4d8, // cyan gradient foot
+  'yellow':     #ffea00, // highlight / coin
+  'amber':      #ffb300, // yellow gradient foot
+  'green':      #76ff03, // success / selected
+  'green-deep': #00c853, // green gradient foot
+  'green-2':    #4caf50, // hover green
+  'mint':       #b9f6ca, // selected card top
+  'paper':      #ffe5f1, // card surface (pink)
+  'paper-hi':   #fff7fb, // surface highlight
+  'paper-lo':   #ffd6e8, // surface shadow
+  'shadow':     #140a28, // drop-shadow navy (darker than ink; used only via rgba)
+  'page-hi':    #261a55, // page backdrop centre
+  'page-lo':    #0a081a, // page backdrop edge
+);
+
+// ── Cuphead: 1930s rubber-hose — brown ink, mustard gold, rust, olive on paper ──
+$cuphead: (
+  'ink':        #2a2420, // primary ink line / text
+  'ink-soft':   #4a3a2a, // secondary text
+  'gold':       #c4a035, // mustard accent (hud-yellow role)
+  'rust':       #a0523c, // terracotta accent (hud-magenta role)
+  'olive':      #6b7f3b, // olive accent (hud-cyan role)
+  'paper':      #e8dcc0, // card / panel surface
+  'paper-hi':   #f0e4cc, // surface highlight
+  'paper-lo':   #ddcfa8, // surface shadow
+  'paper-warm': #efe2c2, // radial-gradient warm stop
+  'tan':        #d8c8a4, // switch/slider runway
+  'page-hi':    #2a2418, // page backdrop centre
+  'page-lo':    #100c08, // page backdrop edge
+);
+
+// Emit both palettes as global custom properties. They are plain named
+// constants (--pl-* vs --ck-* never collide), so :root is the simplest scope —
+// every themed subtree inherits them and resolves the ones it references.
+//
+// Each colour emits two tokens from the SAME hex source:
+//   --x       the solid colour        → color: var(--pl-ink);
+//   --x-rgb   the "r, g, b" triplet    → rgba(var(--pl-ink-rgb), 0.4);
+// so alpha variants stay tied to the one source too (no re-typed rgba literals).
+@mixin emit-palette($prefix, $palette) {
+  @each $name, $value in $palette {
+    --#{$prefix}-#{$name}: #{$value};
+    --#{$prefix}-#{$name}-rgb: #{color.channel($value, 'red')}, #{color.channel($value, 'green')}, #{color.channel($value, 'blue')};
+  }
+}
+
+:root {
+  @include emit-palette('pl', $plastic);
+  @include emit-palette('ck', $cuphead);
+}

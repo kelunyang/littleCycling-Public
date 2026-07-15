@@ -1,17 +1,40 @@
 /**
- * FPS camera controller: positions the camera at the rider's eye level,
- * looking ahead along the route direction.
+ * Chase camera for the third-person diorama view — the camera sits behind and
+ * above the rider's bike ornament and looks down the road ahead, the way a 3DS
+ * platformer frames its character.
  *
- * True first-person cycling perspective — no visible ball, no pitch limit.
- * Replaces the MapLibre-based camera.ts that was limited to 85° pitch.
+ * A first-person mode is kept behind `mode: 'first'` (the camera IS the rider,
+ * no bike drawn); third-person is the default the game ships with.
+ *
+ * Coordinates are scene-local metres (floating origin):
+ * - x: east (+) / west (-)
+ * - y: up (+) / down (-)
+ * - z: south (+) / north (-)  (Three.js convention: -z is north/forward)
  */
 
 import * as THREE from 'three';
 
+/** Scratch vector for the chase lerp (avoids a per-frame allocation). */
+const _target = new THREE.Vector3();
+
+/**
+ * 'third' — chase cam (default, the demos' 跟騎).
+ * 'orbit' — free look; driven by `orbit-camera.ts`, NOT by this module.
+ * 'first' — eye level, no bike drawn.
+ */
+export type CameraMode = 'first' | 'third' | 'orbit';
+
 export interface FpsCameraOptions {
-  /** Camera height above ground in meters (cyclist eye height). */
+  /** See CameraMode. `updateFpsCamera` ignores 'orbit' — OrbitCamera owns it. */
+  mode?: CameraMode;
+  /**
+   * In first person: camera height above ground.
+   * In third person: drives BOTH the chase height and distance (see
+   * `chaseHeight` / `chaseDistance`) so the existing in-game height slider
+   * still zooms the diorama in and out.
+   */
   heightAboveM?: number;
-  /** Distance ahead of the rider to look at, in meters. */
+  /** Distance ahead of the rider to look at, in metres. */
   lookAheadM?: number;
   /** Downward pitch angle in degrees. */
   pitchDeg?: number;
@@ -23,22 +46,57 @@ const DEFAULT_LOOK_AHEAD = 80;
 /** Downward pitch angle in degrees (bird's-eye gaze). */
 const DEFAULT_PITCH_DEG = 30;
 
-/** Smoothing factor for camera position (0 = no smoothing, 1 = frozen). */
+/** First-person: smoothing factor (0 = no smoothing, 1 = frozen). */
 const SMOOTH_FACTOR = 0.15;
 
+// ── Third-person chase rig (the demos' "跟騎" camera) ──
+//
+// The demos frame a 7 m bike from 17 m back / 9.5 m up, looking 8 m ahead of it
+// at head height (4 m). Our ornament is ~4.6 m, so the whole rig is scaled by
+// the same 0.66 — same composition, correct for our bike.
+//
+// The feel comes from the asymmetry: the POSITION lags (lerped at dt × 3.2, so
+// it takes ~0.4 s to catch up and swings wide through a corner), while the GAZE
+// is re-aimed hard every frame. Slerping the rotation too — which is what this
+// used to do — kills the swing and reads as a rigid, "on rails" camera.
+
+const BIKE_SCALE = 0.66;
+
+/** Metres behind the bike, along −forward. */
+const CHASE_BACK = 17 * BIKE_SCALE;      // 11.2
+
+/** Metres above the rider's ground. */
+const CHASE_UP = 9.5 * BIKE_SCALE;       // 6.3
+
+/** Metres ahead of the bike the gaze is aimed. */
+const CHASE_LOOK_AHEAD = 8 * BIKE_SCALE; // 5.3
+
+/** Gaze height above the rider's ground, at the neutral pitch. Exported: the
+ *  sightline check must aim at the same point the camera actually looks at. */
+export const CHASE_LOOK_HEIGHT = 4 * BIKE_SCALE; // 2.6
+
+/** Position catch-up rate — the demos' `lerp(target, min(dt * 3.2, 1))`. */
+const CHASE_FOLLOW_RATE = 3.2;
+
 /**
- * Update a Three.js PerspectiveCamera for true first-person cycling view.
- *
- * Camera is placed at the rider's eye level, looking ahead along the bearing.
- * No ball is visible — the rider *is* the camera.
- *
- * Coordinates are in scene-local meters (floating origin system):
- * - x: east (+) / west (-)
- * - y: up (+) / down (-)
- * - z: south (+) / north (-) (Three.js convention: -z is forward/north)
+ * The in-game camera-height slider (default 15) becomes a plain zoom on the rig:
+ * 15 → 1.0 = the demos' framing. Clamped so the bike can't leave the frame.
+ */
+function chaseZoom(heightAboveM: number): number {
+  return THREE.MathUtils.clamp(heightAboveM / DEFAULT_HEIGHT, 0.45, 2.2);
+}
+
+/** Pitch (deg) at which the gaze sits at `CHASE_LOOK_HEIGHT`. Matches the config default. */
+const CHASE_NEUTRAL_PITCH = DEFAULT_PITCH_DEG;
+
+/** Metres the gaze drops per degree of pitch above neutral. */
+const CHASE_PITCH_GAIN = 0.08;
+
+/**
+ * Update a Three.js PerspectiveCamera for the cycling view.
  *
  * @param camera - The Three.js camera to update
- * @param riderPosition - Rider ground position in scene meters {x, y, z} (y = ground level)
+ * @param riderPosition - Rider ground position in scene metres (y = ground level)
  * @param bearingDeg - Rider heading in degrees (0=north, 90=east, clockwise)
  * @param options - Camera positioning parameters
  * @param dt - Delta time in seconds for smoothing (0 = instant snap)
@@ -50,36 +108,63 @@ export function updateFpsCamera(
   options?: FpsCameraOptions,
   dt?: number,
 ): void {
+  const mode = options?.mode ?? 'third';
   const heightAboveM = options?.heightAboveM ?? DEFAULT_HEIGHT;
-  const lookAheadM = options?.lookAheadM ?? DEFAULT_LOOK_AHEAD;
   const pitchDeg = options?.pitchDeg ?? DEFAULT_PITCH_DEG;
 
-  // Convert bearing to Three.js angle
-  // bearingDeg: 0=north=(-z), 90=east=(+x)
+  // Heading → forward unit vector. bearing 0 = north = -z, 90 = east = +x.
   const bearingRad = (bearingDeg * Math.PI) / 180;
+  const fx = Math.sin(bearingRad);
+  const fz = -Math.cos(bearingRad);
 
-  // Camera at rider's eye level
+  if (mode === 'third') {
+    const zoom = chaseZoom(heightAboveM);
+
+    // Behind the bike along −forward, lifted above the ground.
+    const back = CHASE_BACK * zoom;
+    const camX = riderPosition.x - fx * back;
+    const camY = riderPosition.y + CHASE_UP * zoom;
+    const camZ = riderPosition.z - fz * back;
+
+    if (dt && dt > 0) {
+      // Position lags, gaze does not — see the note on the chase rig above.
+      _target.set(camX, camY, camZ);
+      camera.position.lerp(_target, Math.min(dt * CHASE_FOLLOW_RATE, 1));
+    } else {
+      camera.position.set(camX, camY, camZ);
+    }
+
+    // Aim just ahead of the bike; the pitch slider tilts the gaze up/down.
+    const gaze = CHASE_LOOK_HEIGHT - (pitchDeg - CHASE_NEUTRAL_PITCH) * CHASE_PITCH_GAIN;
+    camera.lookAt(
+      riderPosition.x + fx * CHASE_LOOK_AHEAD,
+      riderPosition.y + gaze,
+      riderPosition.z + fz * CHASE_LOOK_AHEAD,
+    );
+    return;
+  }
+
+  // ── First person (kept behind `mode: 'first'`; the camera IS the rider) ──
+  const lookAheadM = options?.lookAheadM ?? DEFAULT_LOOK_AHEAD;
   const camX = riderPosition.x;
   const camY = riderPosition.y + heightAboveM;
   const camZ = riderPosition.z;
 
-  // Look-at target: ahead along bearing, pitched down
   const pitchDrop = Math.tan((pitchDeg * Math.PI) / 180) * lookAheadM;
-  const lookX = riderPosition.x + Math.sin(bearingRad) * lookAheadM;
+  const lookX = riderPosition.x + fx * lookAheadM;
   const lookY = camY - pitchDrop;
-  const lookZ = riderPosition.z - Math.cos(bearingRad) * lookAheadM;
+  const lookZ = riderPosition.z + fz * lookAheadM;
 
   if (dt && dt > 0) {
-    // Smooth interpolation
     const alpha = 1 - Math.pow(SMOOTH_FACTOR, dt * 60);
-    camera.position.lerp(new THREE.Vector3(camX, camY, camZ), alpha);
+    _target.set(camX, camY, camZ);
+    camera.position.lerp(_target, alpha);
     // Smooth look-at via quaternion slerp
     const tempCam = camera.clone();
     tempCam.position.copy(camera.position);
     tempCam.lookAt(lookX, lookY, lookZ);
     camera.quaternion.slerp(tempCam.quaternion, alpha);
   } else {
-    // Instant snap (first frame or teleport)
     camera.position.set(camX, camY, camZ);
     camera.lookAt(lookX, lookY, lookZ);
   }

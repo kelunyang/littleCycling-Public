@@ -1,20 +1,18 @@
 /**
  * 3D checkpoint flags placed along the route at workout segment boundaries.
  *
- * Each flag = cylinder pole + flat rectangular flag mesh.
- * Flag color matches the next segment's color.
+ * The look comes from the world-style strategy (cuphead → map pin + sticky
+ * note; plastic → brick flag pole); the flag colour is the next segment's.
  * Flags fade out when the rider passes them.
  */
 
 import * as THREE from 'three';
 import type { RoutePoint, WorkoutSegment } from '@littlecycling/shared';
 import { totalWorkoutDuration } from '@littlecycling/shared';
+import type { TerrainStyleStrategy } from './terrain-style-strategy';
 
-const POLE_RADIUS = 0.15;
-const POLE_HEIGHT = 12;
-const FLAG_WIDTH = 4;
-const FLAG_HEIGHT = 2.5;
-const POLE_COLOR = 0x888888;
+/** Opacity a flag fades to once the rider is past it. */
+const PASSED_OPACITY = 0.2;
 
 interface CheckpointFlag {
   group: THREE.Group;
@@ -25,13 +23,20 @@ interface CheckpointFlag {
 
 export class CheckpointFlagManager {
   private scene: THREE.Scene;
+  private strategy: TerrainStyleStrategy;
   private flags: CheckpointFlag[] = [];
   private originLon = 0;
   private originLat = 0;
   private cosLat = 1;
 
-  constructor(scene: THREE.Scene) {
+  constructor(scene: THREE.Scene, strategy: TerrainStyleStrategy) {
     this.scene = scene;
+    this.strategy = strategy;
+  }
+
+  /** Swap the style — the caller re-spawns the flags afterwards. */
+  setStrategy(strategy: TerrainStyleStrategy): void {
+    this.strategy = strategy;
   }
 
   /**
@@ -90,11 +95,13 @@ export class CheckpointFlagManager {
     for (const flag of this.flags) {
       if (!flag.passed && riderDistanceM >= flag.distanceM) {
         flag.passed = true;
-        // Fade out
+        // Fade out. Every flag part owns its material (the strategy builds them
+        // fresh per checkpoint), so mutating opacity here can't leak to others.
         flag.group.traverse((child) => {
-          if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshStandardMaterial) {
-            child.material.transparent = true;
-            child.material.opacity = 0.2;
+          const mat = (child as THREE.Mesh).material;
+          if (mat instanceof THREE.Material) {
+            mat.transparent = true;
+            mat.opacity = PASSED_OPACITY;
           }
         });
       }
@@ -105,11 +112,14 @@ export class CheckpointFlagManager {
     for (const flag of this.flags) {
       this.scene.remove(flag.group);
       flag.group.traverse((child) => {
-        if (child instanceof THREE.Mesh) {
-          child.geometry.dispose();
-          if (child.material instanceof THREE.Material) {
-            child.material.dispose();
-          }
+        if (!(child instanceof THREE.Mesh)) return;
+        child.geometry.dispose();
+        const mat = child.material;
+        if (mat instanceof THREE.Material) {
+          // Paper's sticky-note flag bakes its own CanvasTexture per checkpoint —
+          // disposing the material alone would leak it.
+          (mat as THREE.MeshToonMaterial).map?.dispose();
+          mat.dispose();
         }
       });
     }
@@ -147,8 +157,6 @@ export class CheckpointFlagManager {
     color: string,
     raycastGround?: (x: number, z: number) => number | undefined,
   ): CheckpointFlag {
-    const group = new THREE.Group();
-
     // Convert lngLat to local meters
     const dLon = pt.lon - this.originLon;
     const dLat = pt.lat - this.originLat;
@@ -158,29 +166,7 @@ export class CheckpointFlagManager {
     // Ground height from raycast or fallback to 0
     const groundY = raycastGround?.(x, z) ?? 0;
 
-    // Pole
-    const poleGeo = new THREE.CylinderGeometry(POLE_RADIUS, POLE_RADIUS, POLE_HEIGHT, 6);
-    const poleMat = new THREE.MeshStandardMaterial({
-      color: POLE_COLOR,
-      metalness: 0.6,
-      roughness: 0.4,
-    });
-    const pole = new THREE.Mesh(poleGeo, poleMat);
-    pole.position.y = POLE_HEIGHT / 2;
-    group.add(pole);
-
-    // Flag rectangle
-    const flagGeo = new THREE.PlaneGeometry(FLAG_WIDTH, FLAG_HEIGHT);
-    const flagMat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(color),
-      side: THREE.DoubleSide,
-      emissive: new THREE.Color(color),
-      emissiveIntensity: 0.3,
-    });
-    const flagMesh = new THREE.Mesh(flagGeo, flagMat);
-    flagMesh.position.set(FLAG_WIDTH / 2, POLE_HEIGHT - FLAG_HEIGHT / 2 - 0.5, 0);
-    group.add(flagMesh);
-
+    const group = this.strategy.buildCheckpoint(color, segmentIndex);
     group.position.set(x, groundY, z);
 
     return { group, segmentIndex, distanceM: distM, passed: false };

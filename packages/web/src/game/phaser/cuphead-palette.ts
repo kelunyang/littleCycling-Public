@@ -62,6 +62,9 @@ export const CLOUD = 0xd4ccc0; // warm grey
 // ── Moon ──
 export const MOON = 0xe8dcc0; // warm cream
 
+// ── Sun (ink disc with radiating strokes) ──
+export const SUN = 0xd4b050; // mustard gold
+
 // ── Coins ──
 export const COIN_GOLD      = 0xc4a035; // dark gold
 export const COIN_HIGHLIGHT = 0xd4b545; // lighter gold

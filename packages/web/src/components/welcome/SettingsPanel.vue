@@ -18,6 +18,19 @@
     </div>
 
     <div class="settings-panel__body">
+        <!-- 首次使用提示:必填個人化設定尚未填齊(後端 missingSettings 判定) -->
+        <el-alert
+          v-if="missingSettingLabels.length"
+          class="settings-panel__setup-alert"
+          type="warning"
+          :closable="false"
+          show-icon
+        >
+          <template #title>
+            首次使用請完成以下設定：{{ missingSettingLabels.join('、') }}
+          </template>
+        </el-alert>
+
         <!-- Sensor settings -->
         <fieldset>
           <legend>
@@ -58,13 +71,38 @@
           </legend>
 
           <label>
+            Age (years)
+            <el-input-number v-model="ageModel" :min="10" :max="100" size="small" controls-position="right" placeholder="optional" />
+          </label>
+
+          <label>
             HR Max (bpm)
             <el-input-number v-model="hrMaxModel" :min="100" :max="250" size="small" controls-position="right" />
+            <span v-if="config.training.age" class="field-hint">
+              由年齡 {{ config.training.age }} 推算 (Tanaka：208 − 0.7×age)，可手動覆寫
+            </span>
           </label>
 
           <label>
             FTP (watts)
             <el-input-number v-model="ftpModel" :min="50" :max="600" size="small" controls-position="right" />
+          </label>
+
+          <label>
+            體重 (kg)
+            <el-input-number
+              v-model="weightKgModel"
+              :min="30"
+              :max="200"
+              :step="0.5"
+              :precision="1"
+              size="small"
+              controls-position="right"
+              placeholder="optional"
+            />
+            <span class="field-hint">
+              選填;填了 AI 分析才能算 W/kg 與更精準的負荷指標
+            </span>
           </label>
         </fieldset>
 
@@ -219,7 +257,7 @@
             LLM Providers
           </legend>
 
-          <div v-for="(provider, idx) in config.llm" :key="idx" class="llm-entry">
+          <div v-for="(provider, idx) in llmProviders" :key="provider.id" class="llm-entry">
             <div class="llm-entry__row">
               <label>
                 Name
@@ -277,6 +315,33 @@
             <el-switch v-model="debugModel" />
           </label>
         </fieldset>
+
+        <!-- Data sources / attribution -->
+        <fieldset>
+          <legend>
+            <font-awesome-icon icon="scale-balanced" />
+            Data Sources
+          </legend>
+
+          <p class="attribution-intro">
+            Map, terrain and weather data come from free, openly-licensed sources.
+            Their licences require the credits below. EuroVelo route data is credited
+            in the route catalog.
+          </p>
+
+          <ul class="attribution-list">
+            <li v-for="src in attributions" :key="src.role" class="attribution-item">
+              <span class="attribution-role">{{ src.role }}</span>
+              <span class="attribution-text">{{ src.text }}</span>
+              <span v-if="src.links.length" class="attribution-links">
+                <template v-for="(link, i) in src.links" :key="link.url">
+                  <a :href="link.url" target="_blank" rel="noopener noreferrer">{{ link.name }}</a>
+                  <span v-if="i < src.links.length - 1"> · </span>
+                </template>
+              </span>
+            </li>
+          </ul>
+        </fieldset>
       </div>
 
     <MessageTemplateEditor :open="tplEditorOpen" @close="tplEditorOpen = false" />
@@ -286,7 +351,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { useSettingsStore } from '@/stores/settingsStore';
-import { WHEEL_CIRCUMFERENCES, POWER_CURVES, GAME_MESSAGE_TYPES, type AppConfig, type LlmProvider } from '@littlecycling/shared';
+import { WHEEL_CIRCUMFERENCES, POWER_CURVES, GAME_MESSAGE_TYPES, hrMaxFromAge, DATA_ATTRIBUTIONS, type AppConfig, type LlmProvider } from '@littlecycling/shared';
 import { OPENFREEMAP_STYLES } from '@/game/map-styles';
 import MessageTemplateEditor from './MessageTemplateEditor.vue';
 
@@ -297,7 +362,25 @@ const settingsStore = useSettingsStore();
 const tplEditorOpen = ref(false);
 const config = computed(() => settingsStore.config);
 
+// 首次設定提示:必填欄位 path → 中文顯示名稱(純顯示用,判定邏輯在後端)。
+const SETTING_LABELS: Record<string, string> = {
+  'training.hrMax': '最大心率',
+  'training.ftp': 'FTP 功率',
+  'training.age': '年齡',
+  'sensor.wheelCircumference': '輪徑',
+  'sensor.trainerModel': '訓練台型號',
+};
+
+// 後端回報尚未填齊的必填欄位 → 對照成中文清單;存檔後 missingSettings 更新即消失。
+const missingSettingLabels = computed(() =>
+  (config.value.missingSettings ?? []).map((key) => SETTING_LABELS[key] ?? key),
+);
+
 const currentStyles = OPENFREEMAP_STYLES;
+
+// Map/terrain/weather attribution — server-injected via /api/config, render-only.
+// Falls back to the bundled constant if the server read hasn't populated it.
+const attributions = computed(() => config.value.attributions ?? DATA_ATTRIBUTIONS);
 
 const wheelCircModel = computed({
   get: () => config.value.sensor.wheelCircumference,
@@ -309,6 +392,19 @@ const trainerModel = computed({
   set: (val: string) => settingsStore.updateSensor({ trainerModel: val }),
 });
 
+// Setting age derives hrMax via the Tanaka formula, but hrMax stays
+// independently editable (a rider who knows their measured max can override).
+const ageModel = computed({
+  get: () => config.value.training.age,
+  set: (val: number | undefined) => {
+    if (val == null) {
+      settingsStore.updateTraining({ age: undefined });
+      return;
+    }
+    settingsStore.updateTraining({ age: val, hrMax: hrMaxFromAge(val) });
+  },
+});
+
 const hrMaxModel = computed({
   get: () => config.value.training.hrMax,
   set: (val: number) => settingsStore.updateTraining({ hrMax: val }),
@@ -317,6 +413,14 @@ const hrMaxModel = computed({
 const ftpModel = computed({
   get: () => config.value.training.ftp,
   set: (val: number) => settingsStore.updateTraining({ ftp: val }),
+});
+
+// 體重為選填(同 age 的處理):清空 → 存回 undefined,讓後端知道未設定。
+const weightKgModel = computed({
+  get: () => config.value.training.weightKg,
+  set: (val: number | undefined) => {
+    settingsStore.updateTraining({ weightKg: val == null ? undefined : val });
+  },
 });
 
 const renderModeModel = computed({
@@ -364,32 +468,38 @@ const debugModel = computed({
   set: (val: boolean) => settingsStore.updateDebug(val),
 });
 
+// LLM providers 改存 SQLite,走 settingsStore.llmProviders(/api/llm-providers)。
+const llmProviders = computed(() => settingsStore.llmProviders);
+
 function addLlm() {
-  config.value.llm.push({ id: crypto.randomUUID(), name: '', key: '', endpoint: '', model: '', enabled: true });
+  llmProviders.value.push({ id: crypto.randomUUID(), name: '', key: '', endpoint: '', model: '', enabled: true });
   saveLlm();
 }
 
 function removeLlm(idx: number) {
-  config.value.llm.splice(idx, 1);
+  llmProviders.value.splice(idx, 1);
   saveLlm();
 }
 
 function saveLlm() {
-  settingsStore.updateLlm([...config.value.llm]);
+  settingsStore.saveLlmProviders([...llmProviders.value]);
 }
 
 // ── LLM Presets ──
 
 const LLM_PRESETS: Omit<LlmProvider, 'id' | 'key' | 'enabled' | 'hasKey'>[] = [
-  { name: 'DeepSeek', endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-  { name: 'Gemini', endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai/', model: 'gemini-3.1-flash-lite-preview' },
-  { name: 'Kimi', endpoint: 'https://api.moonshot.ai/v1', model: 'kimi-k2.5' },
-  { name: 'Qwen', endpoint: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', model: 'qwen3.5-plus' },
-  { name: 'GLM', endpoint: 'https://api.z.ai/api/paas/v4/', model: 'glm-5' },
+  { name: 'DeepSeek', endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-v4-flash' },
+  { name: 'Gemini', endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai/', model: 'gemini-flash-latest' },
+  { name: 'Kimi', endpoint: 'https://api.moonshot.ai/v1', model: 'kimi-k2.6' },
+  { name: 'Qwen', endpoint: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', model: 'qwen3.7-plus' },
+  { name: 'GLM', endpoint: 'https://api.z.ai/api/paas/v4/', model: 'glm-5.2' },
+  // 名稱含 "claude" 會自動走 Anthropic /messages 格式(見 llm-client.ts)
+  { name: 'Claude', endpoint: 'https://api.anthropic.com/v1', model: 'claude-opus-4-8' },
+  { name: 'OpenAI', endpoint: 'https://api.openai.com/v1', model: 'gpt-5.6' },
 ];
 
 function addPreset(preset: Omit<LlmProvider, 'id' | 'key' | 'enabled' | 'hasKey'>) {
-  config.value.llm.push({ ...preset, id: crypto.randomUUID(), key: '', enabled: false });
+  llmProviders.value.push({ ...preset, id: crypto.randomUUID(), key: '', enabled: false });
   saveLlm();
 }
 
@@ -509,6 +619,11 @@ async function generateAllVariants() {
   gap: 20px;
 }
 
+/* 首次設定提示橫跨兩欄,置於面板最上方 */
+.settings-panel__setup-alert {
+  grid-column: 1 / -1;
+}
+
 fieldset {
   border: 1.5px solid var(--hud-border);
   border-radius: 0;
@@ -547,6 +662,16 @@ label {
   flex-direction: row;
   align-items: center;
   gap: 8px;
+}
+
+.field-hint {
+  font-size: 9px;
+  color: var(--hud-text);
+  opacity: 0.6;
+  text-transform: none;
+  letter-spacing: 0;
+  line-height: 1.3;
+  margin-top: 2px;
 }
 
 .tpl-btn {
@@ -614,5 +739,50 @@ label {
   color: var(--hud-text);
   margin-top: 4px;
   letter-spacing: 0.5px;
+}
+
+.attribution-intro {
+  font-size: 11px;
+  color: var(--hud-text-dim);
+  line-height: 1.5;
+  margin: 0 0 10px;
+}
+
+.attribution-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attribution-item {
+  font-size: 12px;
+  color: var(--hud-text-dim);
+  line-height: 1.5;
+}
+
+.attribution-role {
+  display: inline-block;
+  min-width: 64px;
+  font-weight: 600;
+  color: var(--hud-text);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 10px;
+}
+
+.attribution-links {
+  margin-left: 4px;
+}
+
+.attribution-links a {
+  color: var(--hud-accent, #4ea1ff);
+  text-decoration: none;
+}
+
+.attribution-links a:hover {
+  text-decoration: underline;
 }
 </style>

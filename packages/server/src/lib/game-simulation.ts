@@ -48,6 +48,7 @@ import {
   COIN_SPACING,
   WIND_STORM_COIN_COUNT,
   TAILWIND_COMBO_MULTIPLIER,
+  IDLE_AUTOPAUSE_MS,
   type HrZone,
 } from '@littlecycling/shared';
 import type { ServerWind } from './server-weather.js';
@@ -255,6 +256,15 @@ export class GameSimulation {
   private clientControlled = false;
   private ended = false;
 
+  // Idle detection (停止踩踏 → 罵人 + 自動暫停). idleSince stamps when the rider
+  // last went to zero power/cadence (or the sensor went stale); idleMs is how
+  // long that has lasted. At IDLE_AUTOPAUSE_MS the sim auto-pauses (autoPaused),
+  // which — unlike a manual pause — auto-resumes on the next pedal stroke and
+  // keeps the clock/recording running the whole time (方案甲).
+  private idleSince: number | null = null;
+  private idleMs = 0;
+  private autoPaused = false;
+
   private timer: NodeJS.Timeout | null = null;
   private lastTickAt = 0;
   private comboAccumMs = 0;
@@ -311,6 +321,11 @@ export class GameSimulation {
     this.clientControlled = true;
     this.paused = paused;
     if (!paused) this.hasStarted = true;
+    // A manual pause/resume overrides any idle auto-pause: a manual pause must
+    // NOT auto-resume on pedalling, and a resume restarts the idle clock fresh.
+    this.autoPaused = false;
+    this.idleSince = null;
+    this.idleMs = 0;
   }
 
   /** Award coins (random events in P6; collisions credit via collideCoins). */
@@ -396,6 +411,20 @@ export class GameSimulation {
       }
     }
 
+    // Auto-resume from an idle auto-pause: mirror of the idle detector below.
+    // The rider stopped for 30s and we froze the game; the first pedal stroke
+    // brings it back on its own (no Space needed). Only auto-pauses self-heal
+    // this way — a manual pause cleared autoPaused in setPaused().
+    if (this.paused && this.autoPaused && !this.ended && !stale) {
+      const signal = Math.max(snapshot.power ?? 0, snapshot.cadence ?? 0);
+      if (signal > 0) {
+        this.paused = false;
+        this.autoPaused = false;
+        this.idleSince = null;
+        this.idleMs = 0;
+      }
+    }
+
     // Time up → freeze permanently, keep broadcasting until stopRecording.
     if (!this.ended && elapsed >= this.config.targetDurationMs) {
       this.ended = true;
@@ -427,6 +456,31 @@ export class GameSimulation {
       // Random-event state machine advances on the same frozen-on-pause
       // game time.
       this.tickEvents(dt, elapsed);
+
+      // Idle detection: rider pedalling (or coasting to a stop) → not idle.
+      // Zero power AND zero cadence (or stale sensor) → accumulate idle time;
+      // at IDLE_AUTOPAUSE_MS auto-pause. idleMs is broadcast so the client can
+      // scold and show the pause countdown bar.
+      const active = !stale && ((snapshot.power ?? 0) > 0 || (snapshot.cadence ?? 0) > 0);
+      if (active) {
+        this.idleSince = null;
+        this.idleMs = 0;
+      } else {
+        if (this.idleSince === null) this.idleSince = now;
+        this.idleMs = now - this.idleSince;
+        if (this.idleMs >= IDLE_AUTOPAUSE_MS) {
+          this.paused = true;
+          this.autoPaused = true;
+          this.idleSince = null;
+          this.idleMs = 0;
+        }
+      }
+    } else {
+      // Paused (manual or auto) or ended: no idle accrual. idleMs=0 clears the
+      // countdown bar; the autoPaused flag stays to drive the "pedal to resume"
+      // prompt until auto-resume above flips it.
+      this.idleSince = null;
+      this.idleMs = 0;
     }
 
     // Reconcile runs on wall time, not game time: a paused client that
@@ -792,6 +846,9 @@ export class GameSimulation {
       combo: this.combo,
       coinsTotal: this.coinsTotal,
     };
+
+    if (this.idleMs > 0) msg.idleMs = this.idleMs;
+    if (this.autoPaused) msg.autoPaused = true;
 
     const event = this.buildEventDto();
     if (event) msg.event = event;

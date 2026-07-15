@@ -25,6 +25,12 @@ import type { ProjectedFeature } from '@/game/terrain/mvt-projection';
 /** Sampling interval for elevation profile (meters). */
 const ELEVATION_SAMPLE_INTERVAL = 5;
 
+/** Window-light layer opacity from the night factor — smoothstep dusk 0.25→0.6. */
+function nightLightAlpha(nightFactor: number): number {
+  const t = Math.max(0, Math.min(1, (nightFactor - 0.25) / 0.35));
+  return t * t * (3 - 2 * t) * 0.9;
+}
+
 /** Chunk size in meters for progressive loading. */
 export const CHUNK_SIZE_M = 500;
 
@@ -87,6 +93,9 @@ export interface TerrainChunk {
   endDistM: number;
   graphics: Phaser.GameObjects.Graphics;
   objects: Phaser.GameObjects.GameObject[];
+  /** Warm additive window glows for this chunk's buildings — alpha driven by
+   *  the night factor (F2). */
+  lights?: Phaser.GameObjects.Graphics;
 }
 
 /**
@@ -109,8 +118,20 @@ export class TerrainChunkManager2D {
   private minElevation: number;
   private maxElevation: number;
   private waterByChunk = new Map<number, WaterFeaturePos[]>();
+  /** Current night factor (0 day → 1 night) — building-light alpha. */
+  private currentNightFactor = 0;
+  /** Flattened water-feature cache + dirty flag. getWaterFeatures() is polled
+   *  every frame by the renderer; water only changes on chunk load/unload, so
+   *  rebuild the flat list only then instead of re-flattening every frame. */
+  private waterFeaturesCache: WaterFeaturePos[] = [];
+  private waterDirty = false;
   /** Track last lamp X to enforce minimum spacing. */
   private lastLampDistM = -Infinity;
+
+  /** Paved stretches of the route (meters), merged from nearby road features.
+   *  Where these spans cover the route the ground gets a road-surface
+   *  treatment; gaps read as unpaved trail. */
+  private roadSpans: { start: number; end: number }[] = [];
 
   constructor(
     scene: Phaser2DScene,
@@ -136,6 +157,8 @@ export class TerrainChunkManager2D {
       }
       arr.push(f);
     }
+
+    this.roadSpans = buildRoadSpans(features);
   }
 
   /**
@@ -181,6 +204,12 @@ export class TerrainChunkManager2D {
     const endDistM = (index + 1) * CHUNK_SIZE_M;
     const gfx = this.scene.add.graphics();
     gfx.setDepth(15);
+    // Warm additive window glows for this chunk's buildings (F2) — alpha follows
+    // the night factor, so they light up after dusk.
+    const lightsGfx = this.scene.add.graphics();
+    lightsGfx.setDepth(16);
+    lightsGfx.setBlendMode(Phaser.BlendModes.ADD);
+    lightsGfx.setAlpha(nightLightAlpha(this.currentNightFactor));
     const objects: Phaser.GameObjects.GameObject[] = [];
 
     const chunkFeatures = this.featuresByChunk.get(index) || [];
@@ -188,11 +217,14 @@ export class TerrainChunkManager2D {
     const baselineY = h * 0.75;
     const elevRange = Math.max(this.maxElevation - this.minElevation, 10);
 
+    // Road surface first — it lies on the ground, everything else stands on it.
+    this.renderRoadSpans(gfx, startDistM, endDistM);
+
     const chunkWaters: WaterFeaturePos[] = [];
     for (const f of chunkFeatures) {
       switch (f.type) {
         case 'building':
-          this.renderBuilding(gfx, f, baselineY, elevRange);
+          this.renderBuilding(gfx, f, baselineY, elevRange, lightsGfx);
           break;
         case 'tree':
           this.renderTree(f, baselineY, elevRange, objects);
@@ -202,8 +234,22 @@ export class TerrainChunkManager2D {
           if (wp) chunkWaters.push(wp);
           break;
         }
+        case 'waterway': {
+          const wp = this.renderWaterway(gfx, f, baselineY, elevRange);
+          if (wp) chunkWaters.push(wp);
+          break;
+        }
         case 'grass':
           this.renderGrass(gfx, f, baselineY, elevRange);
+          break;
+        case 'sand':
+          this.renderSand(gfx, f, baselineY, elevRange);
+          break;
+        case 'urban':
+          this.renderUrban(gfx, f, baselineY, elevRange);
+          break;
+        case 'aeroway':
+          this.renderAeroway(gfx, f, baselineY, elevRange);
           break;
         case 'road':
           this.renderRoadLamp(gfx, f, baselineY, elevRange, objects);
@@ -212,18 +258,31 @@ export class TerrainChunkManager2D {
     }
     if (chunkWaters.length > 0) {
       this.waterByChunk.set(index, chunkWaters);
+      this.waterDirty = true;
     }
 
-    const chunk: TerrainChunk = { index, startDistM, endDistM, graphics: gfx, objects };
+    const chunk: TerrainChunk = { index, startDistM, endDistM, graphics: gfx, objects, lights: lightsGfx };
     this.chunks.set(index, chunk);
   }
 
   private unloadChunk(chunk: TerrainChunk) {
     chunk.graphics.destroy();
+    chunk.lights?.destroy();
     for (const obj of chunk.objects) {
       obj.destroy();
     }
-    this.waterByChunk.delete(chunk.index);
+    if (this.waterByChunk.delete(chunk.index)) this.waterDirty = true;
+  }
+
+  /** Set the night factor (0 day → 1 night); fades every chunk's window glows.
+   *  Called each frame from the renderer with (1 − dayFactor). */
+  setNightFactor(f: number): void {
+    if (Math.abs(f - this.currentNightFactor) < 0.002) return; // skip micro-updates
+    this.currentNightFactor = f;
+    const a = nightLightAlpha(f);
+    for (const chunk of this.chunks.values()) {
+      chunk.lights?.setAlpha(a);
+    }
   }
 
   /** Render a building — delegates visual style to strategy. */
@@ -232,6 +291,7 @@ export class TerrainChunkManager2D {
     feature: ProjectedFeature,
     baselineY: number,
     elevRange: number,
+    lightsGfx: Phaser.GameObjects.Graphics,
   ) {
     const groundY = this.getGroundY(feature.distanceM, baselineY, elevRange);
     const heightM = feature.props.render_height || feature.props.height || 8;
@@ -245,7 +305,21 @@ export class TerrainChunkManager2D {
     );
     const colorIndex = hash % this.strategy.palette.buildingColors.length;
 
-    this.strategy.renderBuilding(gfx, x - widthPx / 2, groundY - heightPx, widthPx, heightPx, colorIndex, hash);
+    const bx = x - widthPx / 2;
+    const by = groundY - heightPx;
+    this.strategy.renderBuilding(gfx, bx, by, widthPx, heightPx, colorIndex, hash);
+
+    // Warm window glows on the same grid the strategies use — a deterministic
+    // ~40% are lit. Drawn into the additive night-lights layer (F2).
+    const gap = 6, size = 2.4;
+    for (let wy = by + 5; wy < by + heightPx - 4; wy += gap) {
+      for (let wx = bx + 4; wx < bx + widthPx - 4; wx += gap) {
+        const r = Math.sin(wx * 12.9898 + wy * 78.233) * 43758.5453;
+        if (r - Math.floor(r) >= 0.42) continue;
+        lightsGfx.fillStyle(0xffdd88, 0.9);
+        lightsGfx.fillCircle(wx, wy, size);
+      }
+    }
   }
 
   /** Render a tree — its own Graphics so it can sway via rotation tween. */
@@ -355,6 +429,97 @@ export class TerrainChunkManager2D {
     this.strategy.renderGrass(gfx, x, groundY, 30, 4, seed);
   }
 
+  /** Render sandy ground (landcover class=sand) — delegates to strategy. */
+  private renderSand(
+    gfx: Phaser.GameObjects.Graphics,
+    feature: ProjectedFeature,
+    baselineY: number,
+    elevRange: number,
+  ) {
+    const groundY = this.getGroundY(feature.distanceM, baselineY, elevRange);
+    const x = feature.distanceM * PX_PER_METER;
+    const seed = Math.abs(Math.round(x * 19)) % 100;
+
+    this.strategy.renderSand(gfx, x, groundY, 40, 5, seed);
+  }
+
+  /** Render built-up-area ground tint — delegates to strategy. */
+  private renderUrban(
+    gfx: Phaser.GameObjects.Graphics,
+    feature: ProjectedFeature,
+    baselineY: number,
+    elevRange: number,
+  ) {
+    const groundY = this.getGroundY(feature.distanceM, baselineY, elevRange);
+    const x = feature.distanceM * PX_PER_METER;
+    const seed = Math.abs(Math.round(x * 23)) % 100;
+
+    this.strategy.renderUrban(gfx, x, groundY, 60, 5, seed);
+  }
+
+  /** Render a linear watercourse (river/canal/stream) crossing the route.
+   *  Width by class; joins the shimmer list like polygon water does. */
+  private renderWaterway(
+    gfx: Phaser.GameObjects.Graphics,
+    feature: ProjectedFeature,
+    baselineY: number,
+    elevRange: number,
+  ): WaterFeaturePos | null {
+    const groundY = this.getGroundY(feature.distanceM, baselineY, elevRange);
+    const x = feature.distanceM * PX_PER_METER;
+    const h = this.scene.game.canvas.height;
+    const seed = Math.abs(Math.round(x * 29)) % 100;
+
+    const cls = feature.props.class || 'stream';
+    const width = cls === 'river' ? 40 : cls === 'canal' ? 30 : 16;
+
+    const result = this.strategy.renderWaterway(gfx, x, groundY, width, h - groundY, seed);
+    if (!result) return null;
+    return { x: result.x, groundY: result.y, width: result.w };
+  }
+
+  /** Render an airport runway/taxiway strip — delegates to strategy. */
+  private renderAeroway(
+    gfx: Phaser.GameObjects.Graphics,
+    feature: ProjectedFeature,
+    baselineY: number,
+    elevRange: number,
+  ) {
+    const groundY = this.getGroundY(feature.distanceM, baselineY, elevRange);
+    const x = feature.distanceM * PX_PER_METER;
+    const seed = Math.abs(Math.round(x * 31)) % 100;
+
+    const kind = feature.props.class === 'runway' ? 'runway' as const : 'taxiway' as const;
+    this.strategy.renderAeroway(gfx, x, groundY, kind === 'runway' ? 90 : 40, kind, seed);
+  }
+
+  /** Sample interval (px) for road-surface points along the terrain. */
+  private static readonly ROAD_SAMPLE_PX = 8;
+
+  /** Draw the paved-road surface for every road span crossing this chunk. */
+  private renderRoadSpans(
+    gfx: Phaser.GameObjects.Graphics,
+    startDistM: number,
+    endDistM: number,
+  ) {
+    for (const span of this.roadSpans) {
+      const s = Math.max(span.start, startDistM);
+      const e = Math.min(span.end, endDistM);
+      if (e <= s) continue;
+
+      const points: { x: number; y: number }[] = [];
+      const x0 = s * PX_PER_METER;
+      const x1 = e * PX_PER_METER;
+      for (let x = x0; x <= x1; x += TerrainChunkManager2D.ROAD_SAMPLE_PX) {
+        points.push({ x, y: this.scene.getTerrainY(x / PX_PER_METER) });
+      }
+      if (points.length < 2) continue;
+
+      const seed = Math.abs(Math.round(x0 * 7)) % 10000;
+      this.strategy.renderRoadSurface(gfx, points, seed);
+    }
+  }
+
   /** Get ground Y position for a given route distance. Delegates to the host
    *  scene so chunks always sit on the same terrain surface as the scene's own
    *  drawTerrain — including any per-instance baseline override (Welcome). */
@@ -362,13 +527,34 @@ export class TerrainChunkManager2D {
     return this.scene.getTerrainY(distanceM);
   }
 
-  /** Get all currently loaded water feature positions (for shimmer animation). */
+  /** Get all currently loaded water feature positions (for shimmer animation).
+   *  Returns a cached flat list, rebuilt only when chunks changed (waterDirty). */
   getWaterFeatures(): WaterFeaturePos[] {
-    const result: WaterFeaturePos[] = [];
-    for (const waters of this.waterByChunk.values()) {
-      result.push(...waters);
+    if (this.waterDirty) {
+      this.waterFeaturesCache = [];
+      for (const waters of this.waterByChunk.values()) {
+        this.waterFeaturesCache.push(...waters);
+      }
+      this.waterDirty = false;
     }
-    return result;
+    return this.waterFeaturesCache;
+  }
+
+  /**
+   * Drop every loaded chunk so the next update() repaints them from scratch.
+   * Needed whenever the ground line itself moves: chunk scenery bakes its Y
+   * at load time, and the terrain baseline is a fraction of the canvas
+   * height — after a resize the freshly-laid terrain and the stale chunks
+   * disagree, and the trees float. Also the style-switch path.
+   */
+  reload() {
+    for (const chunk of this.chunks.values()) {
+      this.unloadChunk(chunk);
+    }
+    this.chunks.clear();
+    this.waterByChunk.clear();
+    this.waterDirty = true;
+    this.lastLampDistM = -Infinity;
   }
 
   /**
@@ -378,12 +564,7 @@ export class TerrainChunkManager2D {
    */
   setStrategy(newStrategy: PhaserStyleStrategy) {
     this.strategy = newStrategy;
-    for (const chunk of this.chunks.values()) {
-      this.unloadChunk(chunk);
-    }
-    this.chunks.clear();
-    this.waterByChunk.clear();
-    this.lastLampDistM = -Infinity;
+    this.reload();
   }
 
   dispose() {
@@ -393,6 +574,43 @@ export class TerrainChunkManager2D {
     this.chunks.clear();
     this.waterByChunk.clear();
   }
+}
+
+/** Roads whose centroid is further than this from the route don't say much
+ *  about the surface the rider is on — skip them when building spans. */
+const ROAD_SPAN_MAX_OFFSET_M = 150;
+/** Road features closer than this along the route merge into one span. */
+const ROAD_SPAN_MERGE_GAP_M = 150;
+/** Padding added to each end of a merged span. */
+const ROAD_SPAN_PAD_M = 40;
+
+/**
+ * Merge nearby road features into continuous paved spans along the route.
+ * The rider's GPX follows roads, but remote trail sections have no
+ * `transportation` features nearby — those gaps stay unpaved, which is
+ * exactly the contrast the road surface is there to show.
+ */
+export function buildRoadSpans(
+  features: ProjectedFeature[],
+): { start: number; end: number }[] {
+  const dists = features
+    .filter((f) => f.type === 'road' && f.offsetM <= ROAD_SPAN_MAX_OFFSET_M)
+    .map((f) => f.distanceM)
+    .sort((a, b) => a - b);
+  if (dists.length === 0) return [];
+
+  const spans: { start: number; end: number }[] = [];
+  let start = dists[0];
+  let prev = dists[0];
+  for (let i = 1; i < dists.length; i++) {
+    if (dists[i] - prev > ROAD_SPAN_MERGE_GAP_M) {
+      spans.push({ start: Math.max(0, start - ROAD_SPAN_PAD_M), end: prev + ROAD_SPAN_PAD_M });
+      start = dists[i];
+    }
+    prev = dists[i];
+  }
+  spans.push({ start: Math.max(0, start - ROAD_SPAN_PAD_M), end: prev + ROAD_SPAN_PAD_M });
+  return spans;
 }
 
 /**

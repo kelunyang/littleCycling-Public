@@ -14,6 +14,11 @@ data/routes/*.json
 data/plans/*.json
 !data/plans/.gitkeep
 data/eurovelo-cache/
+
+# 從 packages/server/ 直接起 server 時會生出的本機資料(config + db),不進版控。
+# 上面的 data/* 規則含斜線,只錨定在 repo 根目錄,擋不到這裡。
+packages/server/data/
+
 Caddyfile
 caddy.exe
 
@@ -22,3 +27,6 @@ packages/*/src/**/*.js
 packages/*/src/**/*.js.map
 .wsl-debug/
 .claude/
+
+# MVT survey CSVs are a build product of scripts/mvt-survey/survey.mjs
+data/mvt-survey/

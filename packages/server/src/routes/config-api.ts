@@ -3,7 +3,6 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import type { LlmProvider } from '@littlecycling/shared';
 import type { ConfigStore } from '../lib/config-store.js';
 
 export default async function configApi(fastify: FastifyInstance, opts: { configStore: ConfigStore }): Promise<void> {
@@ -17,13 +16,15 @@ export default async function configApi(fastify: FastifyInstance, opts: { config
   /** Partial update config (deep merge). */
   fastify.patch('/api/config', async (req) => {
     const partial = req.body as Record<string, unknown>;
-    // Blank keys in an incoming llm array mean "unchanged" — preserve the
-    // stored key (matched by id) so a redacted read-back can't wipe secrets.
-    if (Array.isArray(partial.llm)) {
-      partial.llm = configStore.reconcileLlmKeys(partial.llm as LlmProvider[]);
-    }
+    // LLM providers live in SQLite now (see /api/llm-providers); drop any `llm`
+    // a client echoes back so it can never be re-persisted into config.json.
+    delete partial.llm;
     configStore.save(partial);
-    // Return the redacted view so the client's copy also never holds keys.
+    // Refresh first-run missing-settings tracking: any required field this PATCH
+    // provided is now filled; once none remain, setupCompleted is flagged.
+    configStore.markPatched(partial);
+    // Return the redacted view so the client's copy also never holds keys and
+    // picks up the refreshed missingSettings (drives the settings-drawer prompt).
     return configStore.getRedacted();
   });
 }

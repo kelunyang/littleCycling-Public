@@ -10,14 +10,23 @@
  * to the replay server when detected, so startup order doesn't matter.
  *
  * Usage:
- *   npx tsx src/dev-runner.tsx
- *   npx tsx src/dev-runner.tsx --caddy       # also start Caddy
+ *   npx tsx src/dev-runner.tsx                             # live dev (all services)
+ *   npx tsx src/dev-runner.tsx --caddy                     # also start Caddy
+ *   npx tsx src/dev-runner.tsx --replay [file.jsonl]       # drive the sim from a recording
+ *       [--replay-speed N] [--replay-loop]                 # (bare --replay = newest session)
+ *
+ * From the repo root these map to npm scripts (single-layer forwarding, so the
+ * file arg survives — unlike `-w` workspace forwarding):
+ *   npm run dev                          # live dev
+ *   npm run replay                       # replay the newest recording
+ *   npm run replay -- ride-7-....jsonl   # replay a specific recording
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { render, useApp, useInput, Box, Text } from 'ink';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { createConnection } from 'node:net';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import WebSocket from 'ws';
 import { DEFAULT_WS_PORT, DEFAULT_REPLAY_PORT, DEFAULT_DEV_PROXY_PORT, parseHrData, parseScData, parsePwrData } from '@littlecycling/shared';
@@ -28,6 +37,60 @@ import { DevProxy } from './lib/dev-proxy.js';
 const ROOT = path.resolve(import.meta.dirname, '..', '..', '..');
 const args = process.argv.slice(2);
 const withCaddy = args.includes('--caddy');
+
+// Replay passthrough — drive the server-authoritative sim from a recorded ride
+// (server.ts `--replay`), instead of live sensors. Mirrors server.ts flags.
+function flagValue(flag: string): string | undefined {
+  const i = args.indexOf(flag);
+  return i >= 0 && args[i + 1] && !args[i + 1].startsWith('-') ? args[i + 1] : undefined;
+}
+
+/** Newest .jsonl in data/sessions (by mtime), so bare `--replay` just works. */
+function latestSession(): string | undefined {
+  const dir = path.join(ROOT, 'data', 'sessions');
+  if (!existsSync(dir)) return undefined;
+  const files = readdirSync(dir)
+    .filter((f) => f.endsWith('.jsonl'))
+    .map((f) => ({ f, m: statSync(path.join(dir, f)).mtimeMs }))
+    .sort((a, b) => b.m - a.m);
+  return files[0]?.f;
+}
+
+const replayRequested = args.includes('--replay');
+const replayFile = flagValue('--replay') ?? (replayRequested ? latestSession() : undefined);
+const replaySpeed = flagValue('--replay-speed');
+const replayLoop = args.includes('--replay-loop');
+
+// Server args, with replay flags appended when requested.
+const serverArgs = ['tsx', 'src/server.ts', '--data-dir', path.join(ROOT, 'data')];
+if (replayRequested && !replayFile) {
+  console.error('[dev] --replay given but no recording found in data/sessions/');
+  process.exit(1);
+}
+if (replayFile) {
+  serverArgs.push('--replay', replayFile);
+  if (replaySpeed) serverArgs.push('--replay-speed', replaySpeed);
+  if (replayLoop) serverArgs.push('--replay-loop');
+}
+
+/**
+ * Kill a spawned service and its whole process tree.
+ * On Windows, `proc.kill()` only terminates the outer cmd.exe from `shell: true`;
+ * the node.exe underneath (tsx/vite) survives and keeps the port occupied,
+ * so we must use `taskkill /T` to take down the entire tree.
+ */
+function killTree(proc: ChildProcess): void {
+  if (proc.pid == null) return;
+  if (process.platform === 'win32') {
+    try {
+      execFileSync('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { stdio: 'ignore' });
+    } catch {
+      // already exited
+    }
+  } else if (!proc.killed) {
+    proc.kill('SIGTERM');
+  }
+}
 
 /** Check if a TCP port is already in use */
 function isPortInUse(port: number): Promise<boolean> {
@@ -74,7 +137,7 @@ function getServices(): ServiceConfigExt[] {
       label: 'server',
       color: 'cyan',
       command: 'npx',
-      args: ['tsx', 'src/server.ts', '--data-dir', path.join(ROOT, 'data')],
+      args: serverArgs,
       cwd: path.join(ROOT, 'packages/server'),
       readyPattern: /listening|started|Server running/i,
       readyText: `:${DEFAULT_WS_PORT}`,
@@ -210,15 +273,17 @@ function App() {
     proxyRef.current?.stop();
 
     for (const proc of processesRef.current) {
-      if (!proc.killed) {
-        proc.kill('SIGTERM');
-      }
+      killTree(proc);
     }
 
     setTimeout(() => {
       for (const proc of processesRef.current) {
         if (!proc.killed) {
-          proc.kill('SIGKILL');
+          if (process.platform === 'win32') {
+            killTree(proc);
+          } else {
+            proc.kill('SIGKILL');
+          }
         }
       }
       exit();
@@ -324,7 +389,7 @@ function App() {
 
     return () => {
       for (const proc of processesRef.current) {
-        if (!proc.killed) proc.kill('SIGTERM');
+        killTree(proc);
       }
     };
   }, [addLog]);

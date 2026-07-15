@@ -3,7 +3,17 @@
  * Persisted in data/config.json, editable via the settings page.
  */
 
-/** LLM provider configuration (OpenAI-compatible endpoints) */
+import type { DataSourceAttribution } from './attributions.js';
+
+/**
+ * LLM provider configuration (OpenAI-compatible endpoints).
+ *
+ * NOTE: providers are NO LONGER stored in config.json / AppConfig — they live
+ * in SQLite (table `llm_providers`) and are read/written via the
+ * `/api/llm-providers` endpoints. This type is still the shared shape used by
+ * that API, the DB layer and the settings UI. Legacy config.json `llm[]` arrays
+ * are migrated into SQLite once on server startup.
+ */
 export interface LlmProvider {
   id: string;                // stable id — used to preserve the stored key across edits
   name: string;              // display name, e.g. 'DeepSeek'
@@ -19,6 +29,21 @@ export interface LlmProvider {
   hasKey?: boolean;
 }
 
+/**
+ * Update-check status — computed by the server (git HEAD vs the public repo's
+ * latest commit) and persisted into config.json. The frontend only reads this
+ * to decide whether to show a "git pull" reminder; it never sets it.
+ */
+export interface UpdateStatus {
+  localHash: string | null;   // running checkout's HEAD (full sha)
+  localDate: number | null;   // local HEAD commit time (ms)
+  remoteHash: string | null;  // public repo's latest commit sha
+  remoteDate: number | null;  // public latest commit time (ms)
+  remoteUrl: string | null;   // link shown in the update prompt
+  updateAvailable: boolean;
+  checkedAt: number | null;   // when the check last completed (ms)
+}
+
 export interface AppConfig {
   sensor: {
     wheelCircumference: number;  // meters
@@ -28,6 +53,17 @@ export interface AppConfig {
     defaultDuration: number;     // ms
     hrMax: number;               // bpm
     ftp: number;                 // watts
+    /**
+     * Optional age (years). When set, the settings UI derives hrMax from it
+     * via the Tanaka formula (hrMaxFromAge). hrMax stays independently
+     * editable, so a rider who knows their measured max can override it.
+     */
+    age?: number;
+    /**
+     * Optional rider weight (kg). Enables W/kg and more accurate load metrics
+     * in the AI coach analysis; absent → those metrics are skipped.
+     */
+    weightKg?: number;
   };
   server: {
     wsPort: number;
@@ -35,7 +71,13 @@ export interface AppConfig {
   map: {
     basemapStyle: string;
     renderMode: 'maplibre' | 'threejs' | 'phaser';
-    phaserStyle: 'plastic' | 'cuphead'; // 2D visual style (only for phaser mode)
+    /**
+     * World visual style — spans all render modes (Phaser 2D + Three.js 3D).
+     * `plastic` → neon/blocks; `cuphead` → hand-drawn/corrugated paper.
+     * (Renamed from the former `phaserStyle`; old config.json values are
+     * migrated on load — see ConfigStore.load in the server.)
+     */
+    worldStyle: 'plastic' | 'cuphead';
     cameraHeight: number;    // 1-30m, camera height above ground
     cameraPitch: number;     // 1-60°, downward pitch angle
     cameraLookAhead: number; // 10-200m, look-ahead distance
@@ -54,8 +96,32 @@ export interface AppConfig {
      */
     persistRawFrames: boolean;
   };
-  llm: LlmProvider[];
   debug: boolean; // enable verbose console logging for terrain, MVT, weather, etc.
+  /** Server-managed update-check result; the frontend reads it, never writes it. */
+  update: UpdateStatus;
+  /**
+   * True once the rider has completed first-run personalization (all required
+   * fields filled). Persisted in config.json. Because save() re-writes the full
+   * deep-merged config, DEFAULT values for hrMax/ftp/sensor always end up on
+   * disk and can't tell "user set" from "default" — this flag is the reliable
+   * "setup done, never prompt again" signal. Set by the server after a PATCH
+   * that leaves no required field missing; never written by the frontend.
+   */
+  setupCompleted?: boolean;
+  /**
+   * Static attribution notices for the map / terrain / weather data sources.
+   * Server-injected on the redacted GET read (never persisted); the frontend
+   * only renders it. See DATA_ATTRIBUTIONS in attributions.ts.
+   */
+  attributions?: DataSourceAttribution[];
+  /**
+   * Required personalization fields still missing from config.json on first
+   * use (e.g. `['training.age']`). Server-injected on the redacted GET read and
+   * refreshed on every PATCH response (never persisted); the frontend reads it
+   * to auto-open the settings drawer and highlight the fields. Empty once setup
+   * is complete. See ConfigStore.computeMissingSettings in the server.
+   */
+  missingSettings?: string[];
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
@@ -74,7 +140,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   map: {
     basemapStyle: 'liberty',
     renderMode: 'threejs',
-    phaserStyle: 'plastic',
+    worldStyle: 'plastic',
     cameraHeight: 15,
     cameraPitch: 12,
     cameraLookAhead: 80,
@@ -87,6 +153,15 @@ export const DEFAULT_CONFIG: AppConfig = {
   recording: {
     persistRawFrames: true,
   },
-  llm: [],
+  setupCompleted: false,
   debug: false,
+  update: {
+    localHash: null,
+    localDate: null,
+    remoteHash: null,
+    remoteDate: null,
+    remoteUrl: null,
+    updateAvailable: false,
+    checkedAt: null,
+  },
 };

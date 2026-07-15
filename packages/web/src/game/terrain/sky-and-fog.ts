@@ -8,11 +8,17 @@
  */
 
 import * as THREE from 'three';
-import { Sky } from 'three/addons/objects/Sky.js';
 import type { GameRenderer } from './game-renderer';
 import { getCelestialState, type CelestialState } from './sun-moon-calc';
-import { computeDayNightLighting } from './day-night-lighting';
+import { computeDayNightLighting, DEFAULT_SKY_PALETTE } from './day-night-lighting';
+import { GradientSky } from './gradient-sky';
+import type { SkyPalette } from './terrain-style-strategy';
 import { LightningBolt } from './lightning-bolt';
+import { cloudShadowUniforms, CLOUD_SHADOW_UV_SCALE } from './cloud-shadow';
+
+/** Scratch colours for the per-frame sky update (avoids per-frame allocation). */
+const _skyTop = new THREE.Color();
+const _skyBottom = new THREE.Color();
 
 export type WeatherType = 'sunny' | 'cloudy' | 'rainy' | 'snowy';
 
@@ -32,6 +38,18 @@ const RAIN_AREA = 100;
 
 /** Rain drop fall speed (m/s). */
 const RAIN_SPEED = 25;
+
+/** Per-drop fall-speed jitter range (multiplier on RAIN_SPEED / SNOW_SPEED). */
+const FALL_SPEED_JITTER_MIN = 0.75;
+const FALL_SPEED_JITTER_MAX = 1.25;
+
+/**
+ * Max integration step (seconds) for particle animation. A tab switch or
+ * frame hitch produces a huge dt; without clamping, every drop overshoots
+ * the ground in one frame and gets reset to the same top Y — after which
+ * all drops fall in perfect sync as one flat sheet.
+ */
+const MAX_PARTICLE_DT = 0.1;
 
 /** Snow particle count. */
 const SNOW_PARTICLE_COUNT = 2000;
@@ -93,13 +111,127 @@ const MOON_SCALE = 100;
 
 const DEG = Math.PI / 180;
 
+// ── Rainbow (rain→sun celebration, F4) ──
+/** Inner radius + band width of the arc, and its distance from the camera (m). */
+const RAINBOW_INNER_R = 900;
+const RAINBOW_BAND_W = 150;
+const RAINBOW_DISTANCE = 1900;
+/** Fade-in / hold / fade-out seconds and peak opacity. */
+const RAINBOW_FADE_IN = 5;
+const RAINBOW_HOLD = 70;
+const RAINBOW_FADE_OUT = 15;
+const RAINBOW_MAX_OPACITY = 0.5;
+
+// ── Meteor (deep-night streak, F5) ──
+/** Star-alpha above which it's "deep night" enough for meteors. */
+const METEOR_STAR_ALPHA_MIN = 0.8;
+/** Random gap between meteors (seconds). */
+const METEOR_MIN_GAP = 60;
+const METEOR_MAX_GAP = 240;
+/** Meteor streak lifetime (seconds) + geometry (m). */
+const METEOR_LIFE_MIN = 0.6;
+const METEOR_LIFE_MAX = 1.0;
+const METEOR_RADIUS = 2200; // just inside STAR_RADIUS (2500)
+const METEOR_LENGTH = 260;
+const METEOR_WIDTH = 9;
+
+const UNIT_X = new THREE.Vector3(1, 0, 0);
+const UNIT_Y = new THREE.Vector3(0, 1, 0);
+
+function randRange(min: number, max: number): number {
+  return min + Math.random() * (max - min);
+}
+
+// ── Procedural texture singletons (shared for the app's lifetime; NOT disposed
+//    with individual meshes — see removeRainbow/removeMeteor) ──
+let _rainbowTex: THREE.CanvasTexture | null = null;
+function rainbowTexture(): THREE.CanvasTexture {
+  if (_rainbowTex) return _rainbowTex;
+  const w = 4, h = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+  // v across the band (0 = inner/violet, 1 = outer/red), soft alpha at both edges.
+  const grad = ctx.createLinearGradient(0, h, 0, 0);
+  grad.addColorStop(0.00, 'rgba(140,0,200,0)');
+  grad.addColorStop(0.12, 'rgba(140,0,200,0.5)');
+  grad.addColorStop(0.28, 'rgba(60,60,230,0.55)');
+  grad.addColorStop(0.44, 'rgba(0,180,120,0.55)');
+  grad.addColorStop(0.60, 'rgba(240,230,0,0.6)');
+  grad.addColorStop(0.76, 'rgba(255,140,0,0.6)');
+  grad.addColorStop(0.90, 'rgba(230,30,30,0.55)');
+  grad.addColorStop(1.00, 'rgba(230,30,30,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+  _rainbowTex = new THREE.CanvasTexture(canvas);
+  _rainbowTex.needsUpdate = true;
+  return _rainbowTex;
+}
+
+let _meteorTex: THREE.CanvasTexture | null = null;
+function meteorTexture(): THREE.CanvasTexture {
+  if (_meteorTex) return _meteorTex;
+  const w = 64, h = 16;
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+  // Tail: brightening gradient toward the head (right end).
+  const grad = ctx.createLinearGradient(0, 0, w, 0);
+  grad.addColorStop(0, 'rgba(255,255,255,0)');
+  grad.addColorStop(0.7, 'rgba(210,230,255,0.35)');
+  grad.addColorStop(1, 'rgba(255,255,255,0.9)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, h * 0.4, w, h * 0.2);
+  // Head glow (radial) at the right end.
+  const rg = ctx.createRadialGradient(w - 6, h / 2, 0, w - 6, h / 2, 8);
+  rg.addColorStop(0, 'rgba(255,255,255,1)');
+  rg.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = rg;
+  ctx.fillRect(w - 16, 0, 16, h);
+  _meteorTex = new THREE.CanvasTexture(canvas);
+  _meteorTex.needsUpdate = true;
+  return _meteorTex;
+}
+
+/** Half-arc ribbon in local XY (X right, Y up, bulging over +Y). UV: u along the
+ *  arc, v across the band (0 inner → 1 outer). */
+function buildRainbowGeometry(): THREE.BufferGeometry {
+  const N = 48;
+  const ri = RAINBOW_INNER_R;
+  const ro = RAINBOW_INNER_R + RAINBOW_BAND_W;
+  const pos: number[] = [];
+  const uv: number[] = [];
+  const idx: number[] = [];
+  for (let i = 0; i <= N; i++) {
+    const th = Math.PI * (i / N);
+    const c = Math.cos(th), s = Math.sin(th);
+    pos.push(c * ri, s * ri, 0); uv.push(i / N, 0);
+    pos.push(c * ro, s * ro, 0); uv.push(i / N, 1);
+  }
+  for (let i = 0; i < N; i++) {
+    const a = i * 2;
+    idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  return g;
+}
+
 export class SkyAndFog {
   private readonly gameRenderer: GameRenderer;
-  private sky: Sky | null = null;
+  private sky: GradientSky | null = null;
+  /** Day/night end points — replaced by the world style's on init/style switch. */
+  private palette: SkyPalette = DEFAULT_SKY_PALETTE;
   private rainParticles: THREE.Points | null = null;
   private rainGeometry: THREE.BufferGeometry | null = null;
+  private rainSpeeds: Float32Array | null = null;
   private snowParticles: THREE.Points | null = null;
   private snowGeometry: THREE.BufferGeometry | null = null;
+  private snowSpeeds: Float32Array | null = null;
   private snowTime = 0;
   private moonSprite: THREE.Sprite | null = null;
   private cloudGroup: THREE.Group | null = null;
@@ -115,12 +247,39 @@ export class SkyAndFog {
   private starGeometry: THREE.BufferGeometry | null = null;
   private currentWeather: WeatherType = 'sunny';
 
+  /** Last weather config seen — the sun position the day/night-off path uses. */
+  private lastConfig: WeatherConfig = { type: 'sunny', sunElevation: 45, sunAzimuth: 180 };
+
+  /** Latest computed star opacity (0..1) — drives the meteor's night gate. */
+  private currentStarAlpha = 0;
+
+  // Rainbow (F4) — spawned on a rain→sun transition, self-fading.
+  private rainbowMesh: THREE.Mesh | null = null;
+  private rainbowMat: THREE.MeshBasicMaterial | null = null;
+  private rainbowActive = false;
+  private rainbowAge = 0;
+
+  // Meteor (F5) — one reused streak mesh, fired at random deep-night intervals.
+  private meteorMesh: THREE.Mesh | null = null;
+  private meteorMat: THREE.MeshBasicMaterial | null = null;
+  private meteorActive = false;
+  private meteorAge = 0;
+  private meteorLife = METEOR_LIFE_MIN;
+  private meteorNextIn = -1; // -1 = unscheduled (schedule on first night frame)
+  private readonly meteorVel = new THREE.Vector3();
+
   /** Route location for astronomical calculations. */
   private latitude = 25.0; // default: ~Taipei
   private longitude = 121.5;
 
   /** Whether day/night system is enabled. */
   private dayNightEnabled = true;
+
+  /** Seconds since the last day/night recompute. The sun/moon move ~0.25°/min,
+   *  so recomputing 60×/s is wasted work — throttle to 4 Hz. Starts at Infinity
+   *  so the first frame always runs. */
+  private dayNightTimer = Infinity;
+  private static readonly DAY_NIGHT_INTERVAL = 0.25;
 
   /** Latest celestial state (exposed for external consumers like player lights). */
   private _celestial: CelestialState | null = null;
@@ -172,11 +331,23 @@ export class SkyAndFog {
     }
   }
 
+  /**
+   * Adopt the world style's day/night palette. Call on init and on style switch;
+   * the next update() picks it up.
+   */
+  setPalette(palette: SkyPalette): void {
+    this.palette = palette;
+    if (!this.dayNightEnabled) {
+      // That path only recomputes on setWeather — refresh it against the new
+      // palette now, or a style switch would leave the old style's sky up.
+      this.applyLighting(this.legacyCelestial(this.lastConfig), null);
+    }
+  }
+
   /** Initialize the sky. Call once after GameRenderer is set up. */
   init(): void {
-    this.sky = new Sky();
-    this.sky.scale.setScalar(4500);
-    this.gameRenderer.scene.add(this.sky);
+    // A flat gradient dome, not a physical atmosphere — see gradient-sky.ts.
+    this.sky = new GradientSky(this.gameRenderer.scene);
 
     // Moon sprite — always created, visibility toggled
     this.createMoonSprite();
@@ -209,20 +380,24 @@ export class SkyAndFog {
 
   /** Update weather type. The day/night system overrides sun position. */
   setWeather(config: WeatherConfig): void {
+    const prevWeather = this.currentWeather;
     this.currentWeather = config.type;
+    this.lastConfig = config;
 
-    // Hide sky for non-sunny weather — Preetham shader outputs extreme HDR
-    // values at the horizon causing blown-out white. Only sunny uses the
-    // sky dome; cloudy/rainy/snowy use flat scene.background instead.
-    if (this.sky) {
-      this.sky.visible = config.type === 'sunny';
+    // Rain → sun in daylight: reward the rider with a rainbow (F4).
+    if (prevWeather === 'rainy' && config.type === 'sunny'
+        && (this._celestial?.sunElevation ?? 45) > 5) {
+      this.spawnRainbow();
     }
 
+    // The gradient dome is ALWAYS visible — it just greys over in overcast. (The
+    // old Preetham dome had to be hidden for non-sunny weather because it blew
+    // out to white at the horizon, which left the scene with a flat background.)
+
     if (!this.dayNightEnabled) {
-      // Legacy behavior: use provided sun position directly
-      this.updateSky(config);
-      this.updateLightingLegacy(config);
-      this.updateFogLegacy(config);
+      // Day/night off: light from the sun position the caller handed us, through
+      // the same palette pipeline, so "no day/night" == the demo's daylight.
+      this.applyLighting(this.legacyCelestial(config), null);
     }
     // When day/night is enabled, update() handles everything per-frame.
 
@@ -235,8 +410,20 @@ export class SkyAndFog {
    * Animates rain, updates sun/moon positions, and adjusts lighting.
    */
   update(dt: number, cameraPosition: THREE.Vector3): void {
+    // GameView passes raw frame dt (unclamped) — cap it so a tab switch or
+    // hitch doesn't teleport every particle past its wrap boundary at once.
+    dt = Math.min(dt, MAX_PARTICLE_DT);
+
+    // The dome is centred on the rider EVERY frame — the lighting recompute below
+    // is throttled to 4 Hz, and a dome that only re-centres 4×/s visibly lags.
+    this.sky?.update(cameraPosition);
+
     if (this.dayNightEnabled) {
-      this.updateDayNight(cameraPosition);
+      this.dayNightTimer += dt;
+      if (this.dayNightTimer >= SkyAndFog.DAY_NIGHT_INTERVAL) {
+        this.dayNightTimer = 0;
+        this.updateDayNight(cameraPosition);
+      }
     }
 
     if (this.currentWeather === 'rainy' && this.rainGeometry) {
@@ -255,15 +442,20 @@ export class SkyAndFog {
     if (this.dustGeometry) this.animateDust(dt, cameraPosition);
     if (this.leafGeometry) this.animateLeaves(dt, cameraPosition);
 
+    // Rainbow (F4) + meteor (F5) — cheap no-ops when inactive.
+    if (this.rainbowActive) this.updateRainbow(dt, cameraPosition);
+    this.updateMeteor(dt, cameraPosition);
+
+    // Cloud shadows (F3) — drift + strength into the shared terrain uniforms.
+    this.updateCloudShadow(dt);
+
     // Lightning fade + reposition
     this.lightning?.update(dt, cameraPosition, this.gameRenderer.camera.quaternion);
   }
 
   dispose(): void {
     if (this.sky) {
-      this.gameRenderer.scene.remove(this.sky);
-      this.sky.geometry.dispose();
-      (this.sky.material as THREE.Material).dispose();
+      this.sky.dispose();
       this.sky = null;
     }
     this.disposeMoonSprite();
@@ -277,6 +469,8 @@ export class SkyAndFog {
     this.removeDust();
     this.removeLeaves();
     this.removeStars();
+    this.removeRainbow();
+    this.removeMeteor();
     this.lightning?.dispose();
     this.lightning = null;
   }
@@ -286,28 +480,46 @@ export class SkyAndFog {
   private updateDayNight(cameraPosition: THREE.Vector3): void {
     const celestial = getCelestialState(this.latitude, this.longitude);
     this._celestial = celestial;
+    this.applyLighting(celestial, cameraPosition);
+  }
 
-    // Update sky shader sun position
-    this.updateSky({
-      type: this.currentWeather,
-      sunElevation: celestial.sunElevation,
-      sunAzimuth: celestial.sunAzimuth,
-    });
+  /**
+   * Synthesise a celestial state from a caller-supplied sun position, for the
+   * day/night-disabled path. Moon mirrors the sun so the key light has somewhere
+   * to sit if the caller hands us a night-time elevation.
+   */
+  private legacyCelestial(config: WeatherConfig): CelestialState {
+    return {
+      sunElevation: config.sunElevation,
+      sunAzimuth: config.sunAzimuth,
+      moonElevation: config.sunElevation,
+      moonAzimuth: config.sunAzimuth,
+      moonPhase: 0.5,
+      isDaytime: config.sunElevation > 0,
+      dayFactor: config.sunElevation > 0 ? 1 : 0,
+    };
+  }
 
-    // Hide sky shader when:
-    // 1. Sun below civil twilight (-6°) — Preetham renders black
-    // 2. Non-sunny weather — Preetham outputs extreme HDR at horizon.
-    //    Only sunny uses the sky dome; others use flat scene.background.
-    const SKY_HIDE_THRESHOLD = -6;
+  /**
+   * The single lighting path: celestial state + weather + the style's palette →
+   * sky gradient, fog, the three lights, exposure. Used by both the day/night
+   * cycle and the day/night-disabled path, so they can never drift apart.
+   */
+  private applyLighting(
+    celestial: CelestialState,
+    cameraPosition: THREE.Vector3 | null,
+  ): void {
+    const lighting = computeDayNightLighting(celestial, this.currentWeather, this.palette);
+
+    // Sky dome — always visible, colours carry the hour and the weather.
     if (this.sky) {
-      this.sky.visible = celestial.sunElevation > SKY_HIDE_THRESHOLD
-        && this.currentWeather === 'sunny';
+      this.sky.setColors(
+        _skyTop.setHex(lighting.skyTopColor),
+        _skyBottom.setHex(lighting.skyBottomColor),
+      );
+      if (cameraPosition) this.sky.update(cameraPosition);
     }
 
-    // Compute lighting from celestial state + weather
-    const lighting = computeDayNightLighting(celestial, this.currentWeather);
-
-    // Apply lighting
     const { ambientLight, directionalLight, hemisphereLight } = this.gameRenderer;
     ambientLight.intensity = lighting.ambientIntensity;
     ambientLight.color.setHex(lighting.ambientColor);
@@ -317,32 +529,25 @@ export class SkyAndFog {
     hemisphereLight.color.setHex(lighting.hemisphereColor);
     hemisphereLight.groundColor.setHex(lighting.hemisphereGroundColor);
 
-    // Directional light position follows sun (daytime) or moon (nighttime).
-    // Clamp minimum elevation to 15° so light always illuminates terrain surfaces
-    // even at sunrise/sunset. The sky shader still uses the real sun position.
+    // Key light follows sun (daytime) or moon (nighttime). Clamp its elevation
+    // so surfaces stay lit even when the source is at/below the horizon.
     const MIN_LIGHT_ELEV = 15;
-    if (celestial.isDaytime) {
-      const clampedElev = Math.max(MIN_LIGHT_ELEV, celestial.sunElevation);
-      const phi = DEG * (90 - clampedElev);
-      const theta = DEG * celestial.sunAzimuth;
-      directionalLight.position.setFromSphericalCoords(200, phi, theta);
-    } else {
-      const moonElev = Math.max(MIN_LIGHT_ELEV, celestial.moonElevation);
-      const phi = DEG * (90 - moonElev);
-      const theta = DEG * celestial.moonAzimuth;
-      directionalLight.position.setFromSphericalCoords(200, phi, theta);
-    }
+    const elev = celestial.isDaytime ? celestial.sunElevation : celestial.moonElevation;
+    const azim = celestial.isDaytime ? celestial.sunAzimuth : celestial.moonAzimuth;
+    directionalLight.position.setFromSphericalCoords(
+      200,
+      DEG * (90 - Math.max(MIN_LIGHT_ELEV, elev)),
+      DEG * azim,
+    );
 
-    // Fog and background
     this.gameRenderer.setFog(lighting.fogNear, lighting.fogFar, lighting.fogColor);
     this.gameRenderer.setBackground(lighting.backgroundColor);
     this.gameRenderer.setToneMappingExposure(lighting.toneMappingExposure);
 
-    // Moon sprite
-    this.updateMoonSprite(celestial, cameraPosition);
-
-    // Stars — fade in during twilight, full at night
-    this.updateStars(celestial, cameraPosition);
+    if (cameraPosition) {
+      this.updateMoonSprite(celestial, cameraPosition);
+      this.updateStars(celestial, cameraPosition);
+    }
   }
 
   // ── Moon sprite ──
@@ -504,6 +709,7 @@ export class SkyAndFog {
     }
 
     const finalOpacity = baseOpacity * weatherMul;
+    this.currentStarAlpha = finalOpacity; // meteor night gate reads this
     this.starParticles.visible = finalOpacity > 0.01;
 
     if (this.starParticles.visible) {
@@ -512,6 +718,181 @@ export class SkyAndFog {
       this.starParticles.position.x = cameraPosition.x;
       this.starParticles.position.z = cameraPosition.z;
     }
+  }
+
+  // ── Cloud shadows (F3) ──
+
+  /** Advance the shared cloud-shadow uniforms: drift with wind, strength by
+   *  weather × daylight. Updates two shared uniforms → all terrain chunks. */
+  private updateCloudShadow(dt: number): void {
+    const day = this._celestial?.dayFactor ?? 1;
+    let target = 0;
+    if (this.currentWeather === 'sunny') target = 0.10;
+    else if (this.currentWeather === 'cloudy') target = 0.18;
+    target *= day; // fade out at night
+
+    const cur = cloudShadowUniforms.uCloudStrength.value;
+    cloudShadowUniforms.uCloudStrength.value = cur + (target - cur) * Math.min(1, dt * 2);
+
+    // Drift = gentle base breeze + wind, converted metres → UV.
+    const BASE_VX = 1.2, BASE_VZ = 0.5;
+    const off = cloudShadowUniforms.uCloudOffset.value;
+    off.x += (BASE_VX + this.wind.vx) * dt * CLOUD_SHADOW_UV_SCALE;
+    off.y += (BASE_VZ + this.wind.vz) * dt * CLOUD_SHADOW_UV_SCALE;
+  }
+
+  // ── Rainbow (F4) ──
+
+  /** Spawn (or restart) the rainbow arc. Cheap geometry, self-fading. */
+  private spawnRainbow(): void {
+    if (this.rainbowActive) { this.rainbowAge = 0; return; }
+    const geo = buildRainbowGeometry();
+    const mat = new THREE.MeshBasicMaterial({
+      map: rainbowTexture(),
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      fog: false,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = -40; // in the sky, behind foreground scenery
+    this.gameRenderer.scene.add(mesh);
+    this.rainbowMesh = mesh;
+    this.rainbowMat = mat;
+    this.rainbowActive = true;
+    this.rainbowAge = 0;
+  }
+
+  private updateRainbow(dt: number, cameraPosition: THREE.Vector3): void {
+    if (!this.rainbowMesh || !this.rainbowMat) return;
+    this.rainbowAge += dt;
+
+    const total = RAINBOW_FADE_IN + RAINBOW_HOLD + RAINBOW_FADE_OUT;
+    let k: number;
+    if (this.rainbowAge < RAINBOW_FADE_IN) {
+      k = this.rainbowAge / RAINBOW_FADE_IN;
+    } else if (this.rainbowAge < RAINBOW_FADE_IN + RAINBOW_HOLD) {
+      k = 1;
+    } else if (this.rainbowAge < total) {
+      k = 1 - (this.rainbowAge - RAINBOW_FADE_IN - RAINBOW_HOLD) / RAINBOW_FADE_OUT;
+    } else {
+      this.removeRainbow();
+      return;
+    }
+    this.rainbowMat.opacity = k * RAINBOW_MAX_OPACITY;
+
+    // Sit opposite the sun, standing upright, facing the camera.
+    const az = ((this._celestial?.sunAzimuth ?? 180) + 180) * DEG;
+    const cx = cameraPosition.x + Math.sin(az) * RAINBOW_DISTANCE;
+    const cz = cameraPosition.z + Math.cos(az) * RAINBOW_DISTANCE;
+    this.rainbowMesh.position.set(cx, cameraPosition.y, cz);
+
+    const toCam = new THREE.Vector3(cameraPosition.x - cx, 0, cameraPosition.z - cz).normalize();
+    const right = new THREE.Vector3().crossVectors(UNIT_Y, toCam).normalize();
+    const basis = new THREE.Matrix4().makeBasis(right, UNIT_Y, toCam);
+    this.rainbowMesh.quaternion.setFromRotationMatrix(basis);
+  }
+
+  private removeRainbow(): void {
+    if (this.rainbowMesh) {
+      this.gameRenderer.scene.remove(this.rainbowMesh);
+      this.rainbowMesh.geometry.dispose();
+      this.rainbowMat?.dispose(); // NB: shared rainbowTexture() singleton is NOT disposed
+      this.rainbowMesh = null;
+      this.rainbowMat = null;
+    }
+    this.rainbowActive = false;
+  }
+
+  // ── Meteor (F5) ──
+
+  private ensureMeteor(): void {
+    if (this.meteorMesh) return;
+    const geo = new THREE.PlaneGeometry(METEOR_LENGTH, METEOR_WIDTH);
+    const mat = new THREE.MeshBasicMaterial({
+      map: meteorTexture(),
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.frustumCulled = false;
+    mesh.visible = false;
+    mesh.renderOrder = 5;
+    this.gameRenderer.scene.add(mesh);
+    this.meteorMesh = mesh;
+    this.meteorMat = mat;
+  }
+
+  private updateMeteor(dt: number, cameraPosition: THREE.Vector3): void {
+    const isNight = this.currentStarAlpha >= METEOR_STAR_ALPHA_MIN;
+
+    if (this.meteorActive && this.meteorMesh && this.meteorMat) {
+      this.meteorAge += dt;
+      const t = this.meteorAge / this.meteorLife;
+      if (t >= 1 || !isNight) {
+        this.meteorMesh.visible = false;
+        this.meteorActive = false;
+        this.meteorNextIn = randRange(METEOR_MIN_GAP, METEOR_MAX_GAP);
+        return;
+      }
+      this.meteorMesh.position.addScaledVector(this.meteorVel, dt);
+      this.meteorMat.opacity = Math.sin(t * Math.PI); // 0 → 1 → 0
+      return;
+    }
+
+    if (!isNight) return;
+    if (this.meteorNextIn < 0) { // first night frame — schedule, don't fire yet
+      this.meteorNextIn = randRange(METEOR_MIN_GAP, METEOR_MAX_GAP);
+      return;
+    }
+    this.meteorNextIn -= dt;
+    if (this.meteorNextIn <= 0) this.spawnMeteor(cameraPosition);
+  }
+
+  private spawnMeteor(cameraPosition: THREE.Vector3): void {
+    this.ensureMeteor();
+    if (!this.meteorMesh || !this.meteorMat) return;
+
+    // Random start high on the dome shell, relative to the camera.
+    const az = Math.random() * Math.PI * 2;
+    const elev = (35 + Math.random() * 40) * DEG;
+    const r = METEOR_RADIUS;
+    const sx = r * Math.cos(elev) * Math.sin(az);
+    const sy = r * Math.sin(elev);
+    const sz = r * Math.cos(elev) * Math.cos(az);
+    this.meteorMesh.position.set(cameraPosition.x + sx, cameraPosition.y + sy, cameraPosition.z + sz);
+
+    // Mostly-downward direction; head (local +X) leads.
+    const dir = new THREE.Vector3(
+      (Math.random() - 0.5) * 0.8,
+      -(0.5 + Math.random() * 0.5),
+      (Math.random() - 0.5) * 0.8,
+    ).normalize();
+    this.meteorLife = randRange(METEOR_LIFE_MIN, METEOR_LIFE_MAX);
+    this.meteorVel.copy(dir).multiplyScalar((r * 0.5) / this.meteorLife); // travel ~0.5R over life
+    this.meteorMesh.quaternion.setFromUnitVectors(UNIT_X, dir);
+
+    this.meteorMat.opacity = 0;
+    this.meteorMesh.visible = true;
+    this.meteorActive = true;
+    this.meteorAge = 0;
+  }
+
+  private removeMeteor(): void {
+    if (this.meteorMesh) {
+      this.gameRenderer.scene.remove(this.meteorMesh);
+      this.meteorMesh.geometry.dispose();
+      this.meteorMat?.dispose(); // shared meteorTexture() singleton NOT disposed
+      this.meteorMesh = null;
+      this.meteorMat = null;
+    }
+    this.meteorActive = false;
   }
 
   private removeStars(): void {
@@ -682,11 +1063,12 @@ export class SkyAndFog {
 
     // Gentle drift + wind transport (clouds drift ~2× ground particle speed)
     const windScale = 2;
+    const now = performance.now();
     for (const child of this.cloudGroup.children) {
       const mesh = child as THREE.Mesh;
       const offset = mesh.userData.driftOffset as number;
-      mesh.position.x += (Math.sin(offset + performance.now() * 0.0003) * CLOUD_DRIFT_SPEED       + this.wind.vx * windScale) * dt;
-      mesh.position.z += (Math.cos(offset + performance.now() * 0.0002) * CLOUD_DRIFT_SPEED * 0.5 + this.wind.vz * windScale) * dt;
+      mesh.position.x += (Math.sin(offset + now * 0.0003) * CLOUD_DRIFT_SPEED       + this.wind.vx * windScale) * dt;
+      mesh.position.z += (Math.cos(offset + now * 0.0002) * CLOUD_DRIFT_SPEED * 0.5 + this.wind.vz * windScale) * dt;
 
       // Wrap around if drifted too far from center
       const halfArea = CLOUD_AREA / 2;
@@ -906,118 +1288,6 @@ export class SkyAndFog {
     positions.needsUpdate = true;
   }
 
-  // ── Sky shader ──
-
-  private updateSky(config: WeatherConfig): void {
-    if (!this.sky) return;
-
-    const uniforms = this.sky.material.uniforms;
-
-    switch (config.type) {
-      case 'sunny':
-        uniforms['turbidity'].value = 2;
-        uniforms['rayleigh'].value = 1;
-        uniforms['mieCoefficient'].value = 0.003;
-        uniforms['mieDirectionalG'].value = 0.8;
-        break;
-      case 'cloudy':
-        uniforms['turbidity'].value = 20;
-        uniforms['rayleigh'].value = 0.3;
-        uniforms['mieCoefficient'].value = 0.08;
-        uniforms['mieDirectionalG'].value = 0.1;
-        break;
-      case 'rainy':
-        uniforms['turbidity'].value = 15;
-        uniforms['rayleigh'].value = 0.5;
-        uniforms['mieCoefficient'].value = 0.05;
-        uniforms['mieDirectionalG'].value = 0.1;
-        break;
-      case 'snowy':
-        uniforms['turbidity'].value = 10;
-        uniforms['rayleigh'].value = 0.3;
-        uniforms['mieCoefficient'].value = 0.06;
-        uniforms['mieDirectionalG'].value = 0.1;
-        break;
-    }
-
-    // Sun position from elevation + azimuth
-    const phi = DEG * (90 - config.sunElevation);
-    const theta = DEG * config.sunAzimuth;
-    const sunPosition = new THREE.Vector3().setFromSphericalCoords(1, phi, theta);
-    uniforms['sunPosition'].value.copy(sunPosition);
-  }
-
-  // ── Legacy lighting (used when day/night is disabled) ──
-
-  private updateLightingLegacy(config: WeatherConfig): void {
-    const { ambientLight, directionalLight, hemisphereLight } = this.gameRenderer;
-
-    switch (config.type) {
-      case 'sunny':
-        ambientLight.intensity = 0.5;
-        ambientLight.color.setHex(0xffffff);
-        directionalLight.intensity = 0.9;
-        directionalLight.color.setHex(0xfff4e0);
-        hemisphereLight.intensity = 0.4;
-        hemisphereLight.color.setHex(0x87ceeb);
-        hemisphereLight.groundColor.setHex(0x556633);
-        break;
-      case 'cloudy':
-        ambientLight.intensity = 0.6;
-        ambientLight.color.setHex(0xcccccc);
-        directionalLight.intensity = 0.3;
-        directionalLight.color.setHex(0xdddddd);
-        hemisphereLight.intensity = 0.5;
-        hemisphereLight.color.setHex(0xaaaaaa);
-        hemisphereLight.groundColor.setHex(0x444433);
-        break;
-      case 'rainy':
-        ambientLight.intensity = 0.4;
-        ambientLight.color.setHex(0x999999);
-        directionalLight.intensity = 0.15;
-        directionalLight.color.setHex(0xaaaaaa);
-        hemisphereLight.intensity = 0.3;
-        hemisphereLight.color.setHex(0x888888);
-        hemisphereLight.groundColor.setHex(0x333322);
-        break;
-      case 'snowy':
-        ambientLight.intensity = 0.55;
-        ambientLight.color.setHex(0xddddee);
-        directionalLight.intensity = 0.25;
-        directionalLight.color.setHex(0xccccdd);
-        hemisphereLight.intensity = 0.4;
-        hemisphereLight.color.setHex(0xbbbbcc);
-        hemisphereLight.groundColor.setHex(0x444444);
-        break;
-    }
-
-    // Sun direction
-    const phi = DEG * (90 - config.sunElevation);
-    const theta = DEG * config.sunAzimuth;
-    directionalLight.position.setFromSphericalCoords(200, phi, theta);
-  }
-
-  private updateFogLegacy(config: WeatherConfig): void {
-    switch (config.type) {
-      case 'sunny':
-        this.gameRenderer.setFog(800, 3000, 0xdce6f0);
-        this.gameRenderer.setBackground(0x87ceeb);
-        break;
-      case 'cloudy':
-        this.gameRenderer.setFog(400, 1800, 0xbbbbbb);
-        this.gameRenderer.setBackground(0xaaaaaa);
-        break;
-      case 'rainy':
-        this.gameRenderer.setFog(150, 800, 0x888888);
-        this.gameRenderer.setBackground(0x777777);
-        break;
-      case 'snowy':
-        this.gameRenderer.setFog(200, 900, 0xcccccc);
-        this.gameRenderer.setBackground(0xbbbbbb);
-        break;
-    }
-  }
-
   // ── Rain ──
 
   private updateRain(enable: boolean): void {
@@ -1031,11 +1301,14 @@ export class SkyAndFog {
   private createRain(): void {
     this.rainGeometry = new THREE.BufferGeometry();
     const positions = new Float32Array(RAIN_PARTICLE_COUNT * 3);
+    this.rainSpeeds = new Float32Array(RAIN_PARTICLE_COUNT);
 
     for (let i = 0; i < RAIN_PARTICLE_COUNT; i++) {
       positions[i * 3] = (Math.random() - 0.5) * RAIN_AREA;
       positions[i * 3 + 1] = Math.random() * RAIN_AREA;
       positions[i * 3 + 2] = (Math.random() - 0.5) * RAIN_AREA;
+      this.rainSpeeds[i] = RAIN_SPEED
+        * (FALL_SPEED_JITTER_MIN + Math.random() * (FALL_SPEED_JITTER_MAX - FALL_SPEED_JITTER_MIN));
     }
 
     this.rainGeometry.setAttribute(
@@ -1064,15 +1337,18 @@ export class SkyAndFog {
       (this.rainParticles.material as THREE.Material).dispose();
       this.rainParticles = null;
       this.rainGeometry = null;
+      this.rainSpeeds = null;
     }
   }
 
   private animateRain(dt: number, cameraPosition: THREE.Vector3): void {
     if (!this.rainGeometry) return;
 
-    // Center rain around camera
+    // Center rain around camera (vertically too — routes above RAIN_AREA
+    // elevation would otherwise leave the whole band under the terrain)
     if (this.rainParticles) {
       this.rainParticles.position.x = cameraPosition.x;
+      this.rainParticles.position.y = cameraPosition.y - RAIN_AREA * 0.25;
       this.rainParticles.position.z = cameraPosition.z;
     }
 
@@ -1082,12 +1358,14 @@ export class SkyAndFog {
     const half = RAIN_AREA / 2;
     for (let i = 0; i < RAIN_PARTICLE_COUNT; i++) {
       const idx = i * 3;
-      arr[idx + 1] -= RAIN_SPEED * dt; // fall down
+      arr[idx + 1] -= (this.rainSpeeds?.[i] ?? RAIN_SPEED) * dt; // fall down
       arr[idx]     += this.wind.vx * dt;
       arr[idx + 2] += this.wind.vz * dt;
 
       if (arr[idx + 1] < 0) {
-        arr[idx + 1] = RAIN_AREA; // reset to top
+        // Wrap by modulo (keeps each drop's random phase — snapping every
+        // drop to the exact top would sync them into one falling sheet)
+        arr[idx + 1] = (arr[idx + 1] % RAIN_AREA) + RAIN_AREA;
         arr[idx]     = (Math.random() - 0.5) * RAIN_AREA;
         arr[idx + 2] = (Math.random() - 0.5) * RAIN_AREA;
       }
@@ -1114,11 +1392,14 @@ export class SkyAndFog {
   private createSnow(): void {
     this.snowGeometry = new THREE.BufferGeometry();
     const positions = new Float32Array(SNOW_PARTICLE_COUNT * 3);
+    this.snowSpeeds = new Float32Array(SNOW_PARTICLE_COUNT);
 
     for (let i = 0; i < SNOW_PARTICLE_COUNT; i++) {
       positions[i * 3] = (Math.random() - 0.5) * SNOW_AREA;
       positions[i * 3 + 1] = Math.random() * SNOW_AREA;
       positions[i * 3 + 2] = (Math.random() - 0.5) * SNOW_AREA;
+      this.snowSpeeds[i] = SNOW_SPEED
+        * (FALL_SPEED_JITTER_MIN + Math.random() * (FALL_SPEED_JITTER_MAX - FALL_SPEED_JITTER_MIN));
     }
 
     this.snowGeometry.setAttribute(
@@ -1146,6 +1427,7 @@ export class SkyAndFog {
       (this.snowParticles.material as THREE.Material).dispose();
       this.snowParticles = null;
       this.snowGeometry = null;
+      this.snowSpeeds = null;
     }
   }
 
@@ -1154,9 +1436,10 @@ export class SkyAndFog {
 
     this.snowTime += dt;
 
-    // Center snow around camera
+    // Center snow around camera (vertically too, same as rain)
     if (this.snowParticles) {
       this.snowParticles.position.x = cameraPosition.x;
+      this.snowParticles.position.y = cameraPosition.y - SNOW_AREA * 0.25;
       this.snowParticles.position.z = cameraPosition.z;
     }
 
@@ -1167,15 +1450,15 @@ export class SkyAndFog {
     for (let i = 0; i < SNOW_PARTICLE_COUNT; i++) {
       const idx = i * 3;
       // Slow fall
-      arr[idx + 1] -= SNOW_SPEED * dt;
+      arr[idx + 1] -= (this.snowSpeeds?.[i] ?? SNOW_SPEED) * dt;
       // Horizontal drift = small sin sway + wind transport
       arr[idx]     += (Math.sin(this.snowTime * 0.5 + i)         * 0.6 * this.wind.gust + this.wind.vx) * dt;
       arr[idx + 2] += (Math.cos(this.snowTime * 0.7 + i * 0.3)   * 0.4 * this.wind.gust + this.wind.vz) * dt;
 
-      // Reset to top when below ground
+      // Wrap to top when below ground (modulo keeps random phase — see rain)
       if (arr[idx + 1] < 0) {
         arr[idx] = (Math.random() - 0.5) * SNOW_AREA;
-        arr[idx + 1] = SNOW_AREA;
+        arr[idx + 1] = (arr[idx + 1] % SNOW_AREA) + SNOW_AREA;
         arr[idx + 2] = (Math.random() - 0.5) * SNOW_AREA;
       }
       // Wrap on wind transport

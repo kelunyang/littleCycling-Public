@@ -392,6 +392,11 @@ export class LiveSession extends EventEmitter {
     routeId?: string;
     routeName?: string;
     /**
+     * 訓練模式標記：workout profile id 或 `plan:<planId>:<day>`。
+     * 自由騎不帶（rides.workout_id 存 NULL）。
+     */
+    workoutId?: string;
+    /**
      * Game simulation inputs. When present, a GameSimulation runs for the
      * lifetime of this recording and broadcasts `game_state` at 20Hz.
      * Absent for recording-only sessions (recorder CLI, no active route).
@@ -431,6 +436,7 @@ export class LiveSession extends EventEmitter {
       startedAt: now,
       routeId: opts.routeId,
       routeName: opts.routeName,
+      workoutId: opts.workoutId,
       // Snapshot of which sensors were active at start; used by the FIT
       // exporter to emit DEVICE_INFO messages.
       sensors: [...this._detectedSensors],

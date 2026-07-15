@@ -5,6 +5,8 @@
 
 import type { LlmProvider } from '@littlecycling/shared';
 import { GAME_MESSAGE_TYPES, type GameMessageType } from '@littlecycling/shared';
+import { isDeepSeekProvider } from './llm-client.js';
+import { singleTurn } from './agent/agent-loop.js';
 
 // ── Types ──
 
@@ -36,53 +38,44 @@ ${style}
 
 export class LlmService {
   /**
-   * Send a chat completion request to an OpenAI-compatible endpoint.
-   * Returns the assistant's text content.
+   * 送一輪 chat completion（無 tools），回傳助手文字內容。
+   *
+   * 底層改走 agent 模組的統一路徑（singleTurn → provider adapter），因此
+   * 除了 OpenAI-compatible / DeepSeek 外，也一併支援 Anthropic provider。
+   * 訊息變體不需要 tools，故用 singleTurn；temperature / max_tokens 透過
+   * SendOpts 傳入（預設 0.9 / 2048，維持原本文案生成的語氣多樣性）。
    */
   async chatCompletion(
     provider: LlmProvider,
     messages: { role: string; content: string }[],
     options?: { temperature?: number; maxTokens?: number },
   ): Promise<string> {
-    // Normalize endpoint: strip trailing slash
-    const base = provider.endpoint.replace(/\/+$/, '');
-    const url = `${base}/chat/completions`;
+    // 把訊息拆成 system（合併所有 system）與 user（合併其餘）。
+    const system = messages
+      .filter((m) => m.role === 'system')
+      .map((m) => m.content)
+      .join('\n\n');
+    const user = messages
+      .filter((m) => m.role !== 'system')
+      .map((m) => m.content)
+      .join('\n\n');
 
-    // Build request body
-    const body: Record<string, unknown> = {
-      model: provider.model,
-      messages,
-      temperature: options?.temperature ?? 0.9,
-      max_tokens: options?.maxTokens ?? 2048,
-    };
+    // DeepSeek 思考鏈仍轉發到 stdout，維持長思考期間的連線保活與可觀測性。
+    const onReasoning = isDeepSeekProvider(provider)
+      ? (r: string) => process.stdout.write(r)
+      : undefined;
 
-    // DeepSeek thinking mode: add non-standard parameter
-    if (provider.name.toLowerCase().includes('deepseek')) {
-      body.thinking = { type: 'enabled' };
-      // When thinking is enabled, temperature/top_p are ignored by DeepSeek
-    }
-
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${provider.key}`,
+    const content = await singleTurn(
+      provider,
+      system,
+      user,
+      {
+        temperature: options?.temperature ?? 0.9,
+        maxTokens: options?.maxTokens ?? 2048,
       },
-      body: JSON.stringify(body),
-    });
+      onReasoning,
+    );
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(
-        `LLM API error: ${res.status} ${res.statusText} — ${text.slice(0, 200)}`,
-      );
-    }
-
-    const data = await res.json() as {
-      choices: { message: { content: string; reasoning_content?: string } }[];
-    };
-
-    const content = data.choices?.[0]?.message?.content;
     if (!content) {
       throw new Error('LLM returned empty content');
     }
@@ -137,7 +130,7 @@ function buildPrompt(msgType: GameMessageType, count: number): string {
  * Parse LLM response into validated variant strings.
  * Handles markdown code fences and validates placeholders.
  */
-function parseVariants(raw: string, msgType: GameMessageType): string[] {
+export function parseVariants(raw: string, msgType: GameMessageType): string[] {
   // Strip markdown code fences if present
   let cleaned = raw.trim();
   const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);

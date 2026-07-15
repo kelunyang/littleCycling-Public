@@ -47,22 +47,30 @@ littleCycling/
 
 ## 快速開始
 
-### 1. 安裝依賴
+### 1. 一鍵安裝 + 建置（推薦）
+
+在專案根目錄執行，會依序完成安裝依賴與建置所有套件（shared → server → web）：
 
 ```bash
-# 在專案根目錄
-npm install
+npm run setup
 ```
 
-### 2. 建置所有套件
+> **每次 `git pull` 之後也請重跑 `npm run setup`**：`dist/` 不進版控，原始碼更新後若沒重新 build，後端／前端會抓到舊的 `@littlecycling/shared` 而報 `has no exported member`。此指令是冪等的，相依沒變時 `npm install` 幾乎瞬間完成。
 
-shared 套件需要先編譯，後端和前端都依賴它。使用以下指令一次建置所有套件（shared → server → web）：
+<details>
+<summary>或分兩步手動執行</summary>
 
 ```bash
+# 安裝依賴（會編譯 better-sqlite3 / noble 等 native module，須在對應平台執行）
+npm install
+
+# shared 套件需先編譯，後端和前端都依賴它（shared → server → web）
 npm run build
 ```
 
-### 3. 啟動後端 (Server)
+</details>
+
+### 2. 啟動後端 (Server)
 
 後端有多種啟動模式：
 
@@ -76,8 +84,8 @@ npm run start -w packages/server
 # 純錄製模式（CLI）
 npm run record -w packages/server
 
-# Replay 模式（回放 JSONL 錄製檔，前端開發用，不需要實體感測器）
-npm run replay -w packages/server
+# Replay 模式（用錄製檔驅動「後端完整模擬」，不需實體感測器；見下方「沒有感測器的快速體驗路徑」）
+#   在專案根目錄執行：npm run replay
 
 # BLE 心率測試
 npm run ble:test -w packages/server
@@ -85,7 +93,7 @@ npm run ble:test -w packages/server
 
 > **注意**: 涉及 ANT+ Stick 的指令必須在 **Windows PowerShell / Terminal** 中執行，不能在 WSL 中執行。
 
-### 4. 啟動前端 (Web)
+### 3. 啟動前端 (Web)
 
 ```bash
 # 開發模式（Vite dev server，支援 HMR）
@@ -98,7 +106,7 @@ npm run build -w packages/web
 npm run preview -w packages/web
 ```
 
-### 5. 一鍵啟動開發模式
+### 4. 一鍵啟動開發模式
 
 `npm run dev` 會同時啟動所有服務（shared watch + server + web），並顯示 Ink 儀表板。**預設不啟動 Caddy**（不需要）：
 
@@ -112,9 +120,11 @@ npm run dev:caddy
 
 儀表板會顯示每個服務的狀態（starting / ready / error）、即時感測器數值，下方即時輸出所有服務的 log。按 **`Ctrl+C`** 停止所有服務。
 
-開啟 `http://localhost:5173` 即可使用。一鍵模式會另起一個內部 dev proxy（`:8770`），Vite 的 `/api` 與 WebSocket 都經由它轉發到後端 live server（`:8765`）；**當你另外執行 `npm run replay`（`:8766`）時，dev proxy 會自動偵測並把 WebSocket 熱切換到 replay server**，不需重啟。若有加 `--caddy`，也可改開統一入口 `http://localhost:3000`。
+開啟 `http://localhost:5173` 即可使用。一鍵模式會另起一個內部 dev proxy（`:8770`），Vite 的 `/api` 與 WebSocket 都經由它轉發到後端 live server（`:8765`）。若有加 `--caddy`，也可改開統一入口 `http://localhost:3000`。
 
-### 6. Caddy 反向代理（選用）
+**用錄製檔重播（不需感測器）**：把 `npm run dev` 換成 `npm run replay -- <file.jsonl>`（省略檔名則自動挑最新的一支），後端會用該錄製檔驅動完整遊戲模擬（見「沒有感測器的快速體驗路徑」）。
+
+### 5. Caddy 反向代理（選用）
 
 開發時**不需要** Caddy——Vite dev server 已內建 proxy 統一前後端與 WebSocket。只有想要一個 production-like 的單一入口時才用它。
 
@@ -139,7 +149,7 @@ caddy run --config Caddyfile.example
 
 正式部署時，編輯 Caddyfile 切換為 static file serving（參見檔案內註解）。
 
-### 7. 手動分別啟動
+### 6. 手動分別啟動
 
 如果不想用一鍵模式，也可以開 4 個 Terminal 分別啟動：
 
@@ -157,14 +167,15 @@ npm run dev -w packages/web
 caddy run --config Caddyfile.example
 ```
 
-如果沒有實體感測器，可以用 replay 模式（回放內建 JSONL，`:8766`）。**最簡單的做法是用一鍵模式**：`npm run dev` 照常跑，另開一個 terminal 執行 `npm run replay`，dev proxy 會自動把 WebSocket 切到 replay。
-
-若堅持只手動起前端（不透過 dev proxy），Vite 預設連 `:8765`，必須明確指向 replay 的 `:8766`：
+如果沒有實體感測器，改用 **server `--replay`**——讓後端用錄製檔跑完整遊戲模擬。把上面 Terminal 2 的 server 換成帶 replay 的版本即可（其餘 Terminal 不變，Vite 預設就打 `:8765`）：
 
 ```bash
-npm run replay                                  # Terminal A：replay server（:8766）
-VITE_WS_PORT=8766 npm run dev -w packages/web   # Terminal B：讓 Vite 連到 replay
+# Terminal 2（改）— 後端用錄製檔驅動模擬，取代 live server
+cd packages/server
+npx tsx src/server.ts --replay ride-7-2026-07-10T07-28-59.jsonl   # 裸檔名會自動去 data/sessions/ 找
 ```
+
+> 也可直接用一鍵模式的 replay：在專案根目錄跑 `npm run replay -- <file.jsonl>`（一次起 shared + server[replay] + web + dev proxy）。
 
 ### 路線匯入
 
@@ -237,31 +248,27 @@ VITE_WS_PORT=8766 npm run dev -w packages/web   # Terminal B：讓 Vite 連到 r
 
 ### 沒有感測器的快速體驗路徑
 
-大多數使用者不會有 ANT+ stick 和自行車感測器。請引導他們使用 **Replay 模式**。最可靠的方式是搭配一鍵開發模式（dev proxy 會自動把 WebSocket 切到 replay）：
+大多數使用者不會有 ANT+ stick 和自行車感測器。請引導他們使用 **Replay 模式**——把一段內建錄製檔餵進後端，由**後端跑完整遊戲模擬**（虛擬速度、金幣、zones 全部照真實騎乘計算）。
 
 ```bash
-npm install
-npm run build
-npm run dev             # Terminal 1：一鍵啟動（shared + server + web + dev proxy）
+npm run setup           # 安裝依賴 + 建置所有套件（clone 後、以及每次 git pull 後都跑這個）
+
+# 一鍵啟動，並用錄製檔驅動後端模擬（shared + server[replay] + web + dev proxy）
+npm run replay                                       # 自動挑 data/sessions/ 最新的一支
+npm run replay -- ride-7-2026-07-10T07-28-59.jsonl   # 或指定某一支
 ```
 
-另開一個 terminal 啟動 replay（會回放內建錄製資料，不需要任何硬體）：
+開啟 `http://localhost:5173` 即可看到遊戲畫面自動重播。錄製檔放在 `data/sessions/`，傳**裸檔名**即可（會自動解析）；可加 `--replay-speed 2`（加速）或 `--replay-loop`（循環）。
 
-```bash
-npm run replay          # Terminal 2：dev proxy 偵測到 :8766 後自動切換 WebSocket
-```
-
-開啟 `http://localhost:5173` 即可看到遊戲畫面。
-
-> ⚠️ 不要用「`npm run replay` + 單獨 `npm run dev -w packages/web`」：replay 在 `:8766`，但單獨啟動的 Vite 預設連 `:8765`，會連不上。要嘛用上面的一鍵模式，要嘛手動指定 `VITE_WS_PORT=8766 npm run dev -w packages/web`。
+> ⚠️ **請用 `npm run replay`，不要用 `npm run dev -- --replay <file>`**：root 的 `dev` 是 `npm run dev:all -w packages/server` 的兩層 workspace 轉發，npm 會把 `--replay` flag 吃掉（只剩檔名當裸參數，replay 不會啟動）。`replay` 是單層轉發，所以 `--` 後的參數會完整傳到 dev-runner。
 
 ### 使用的 Port
 
 | Port | 用途 | 服務 |
 |------|------|------|
 | 5173 | Vite 前端 dev server（**開發預設入口**，proxy 含 /api 與 WebSocket） | packages/web |
-| 8765 | live server：WebSocket（感測器資料）+ REST API | packages/server |
-| 8766 | replay server（回放 JSONL，`npm run replay` 才啟動） | packages/server |
+| 8765 | live server：WebSocket + REST API（`--replay` 也在此埠，驅動後端模擬） | packages/server |
+| 8766 | 舊 replay server（`/ws/replay`，只丟原始 frame、**繞過模擬**，已不建議） | packages/server |
 | 8770 | 一鍵模式的 dev proxy（Vite → 這裡 → 8765 或 8766，自動切換） | dev-runner |
 | 3000 | Caddy 反向代理統一入口（**選用**，`--caddy` 才啟動） | Caddy |
 

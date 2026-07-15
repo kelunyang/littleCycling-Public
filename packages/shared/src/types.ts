@@ -201,6 +201,12 @@ export interface WsGameStateMessage {
   combo: number;
   /** Player's authoritative coin total (self-healing scalar — not derivable from deltas). */
   coinsTotal: number;
+  /** 停止踩踏已持續毫秒數（功率與踏頻皆 0 或感測 stale）。0／缺省＝正在踩或已暫停。
+   *  前端據此顯示「罵人」bubble 與自動暫停倒數 prompt。 */
+  idleMs?: number;
+  /** 由「停踩 30 秒」觸發的自動暫停（相對於手動 Space 暫停）。前端據此顯示
+   *  「踩踏即可繼續」提示；重新踩踏時伺服器會自動恢復（見 game-simulation tick）。 */
+  autoPaused?: boolean;
   coins?: {
     spawned: CoinDto[];
     collected: { id: number; combo: number }[];
@@ -291,9 +297,21 @@ export interface Ride {
   zoneSustainPct?: number;
   routeId?: string;
   routeName?: string;
+  /** 騎後主觀備註（與 rpe 一起由 PATCH /api/rides/:id/feedback 寫入）。 */
   notes?: string;
+  /** 騎後自覺強度 RPE 1-5（1=很輕鬆 5=力竭；Strava「你的感受」概念）。 */
+  rpe?: number;
   /** Sensors that were active when recording started (for FIT device_info). */
   sensors?: DetectedSensor[];
+  /**
+   * 訓練模式（ride 開始時記錄）：workout profile id（如 'ftp_test'）、
+   * `plan:<planId>:<day>`（課表訓練）；自由騎為 undefined。舊紀錄（加欄位前）
+   * 一律 undefined，課表訓練可由 planId/planDay（plan_completions join）推斷。
+   */
+  workoutId?: string;
+  /** 由 plan_completions 反推的課表連結（僅列表 API 填入）。 */
+  planId?: string;
+  planDay?: number;
 }
 
 /**

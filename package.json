@@ -7,13 +7,15 @@
     "packages/*"
   ],
   "scripts": {
+    "setup": "npm install && npm run build",
     "dev": "npm run dev:all -w packages/server",
     "dev:caddy": "npm run dev:all -w packages/server -- --caddy",
     "build": "npm run build -w packages/shared && npm run build -w packages/server && npm run build -w packages/web",
     "record": "npm run record -w packages/server",
-    "replay": "npm run replay -w packages/server",
+    "replay": "tsx packages/server/src/dev-runner.tsx --replay",
     "start": "npm run start -w packages/server",
     "server": "npm run server -w packages/server",
+    "check:3d": "node --no-warnings --import ./scripts/headless-check/register.mjs scripts/headless-check/diorama.ts",
     "publish-public": "bash scripts/publish-public.sh"
   },
   "engines": {

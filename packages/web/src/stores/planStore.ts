@@ -10,12 +10,17 @@ import type {
 } from '@littlecycling/shared';
 import { getCurrentPlanDay, getSessionByDay } from '@littlecycling/shared';
 import { notifyError, notifySuccess } from '@/utils/notify';
+import { useAgentStream } from '@/composables/useAgentStream';
 
 export const usePlanStore = defineStore('plan', () => {
   const plans = ref<TrainingPlanSummary[]>([]);
   const activePlans = ref<{ plan: TrainingPlan; startDate: string }[]>([]);
   const completions = ref<Map<string, PlanDayCompletion[]>>(new Map());
-  const generating = ref(false);
+  // 展開課表卡時一次拉的每日達標等級(day → { grade, pct }),供 day cell 顯示。
+  const complianceByPlan = ref<Map<string, Record<number, { grade: string; pct: number }>>>(new Map());
+
+  // 課表生成走 agent SSE 串流；running 直接對外當作 generating（按鈕 loading）。
+  const genStream = useAgentStream();
 
   // ── Computed ──
 
@@ -39,11 +44,19 @@ export const usePlanStore = defineStore('plan', () => {
 
   async function fetchPlans() {
     try {
-      const res = await fetch('/api/plans');
-      if (!res.ok) return;
+      // no-store:排除任何快取層讓列表停在舊狀態的可能。
+      const res = await fetch('/api/plans', { cache: 'no-store' });
+      if (!res.ok) {
+        // 不能靜默吞掉——這裡失敗會讓「課表建立成功但列表不動」無跡可循。
+        console.error(`[planStore] GET /api/plans 失敗(HTTP ${res.status})`);
+        notifyError(`讀取課表列表失敗(HTTP ${res.status})`);
+        return;
+      }
       const data = await res.json();
+      console.debug(`[planStore] fetchPlans → ${(data.plans ?? []).length} 筆`);
       plans.value = data.plans;
-    } catch {
+    } catch (err) {
+      console.error('[planStore] fetchPlans 網路錯誤:', err);
       notifyError('Failed to load training plans');
     }
   }
@@ -130,25 +143,35 @@ export const usePlanStore = defineStore('plan', () => {
     notes?: string;
     userPrompt?: string;
   }) {
-    generating.value = true;
-    try {
-      const res = await fetch('/api/plans/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `Generation failed (${res.status})`);
-      }
-      await fetchPlans();
-      notifySuccess('Training plan generated');
-    } catch (err: any) {
-      notifyError(err.message);
-      throw err;
-    } finally {
-      generating.value = false;
+    // 走 SSE 串流：genStream 逐幀累積進度事件供 UI 顯示，串流結束後判斷結果。
+    await genStream.start('/api/plans/generate', params);
+
+    // 防禦:無論 result 幀有沒有送達都刷新列表——server 端 submit_plan 可能
+    // 已成功落庫(log 有 "Plan created")但終局幀在傳輸端丟失;若不刷新,
+    // 列表會永久停在舊狀態(fetchPlans 平時只在 onMounted 跑一次)。
+    const before = plans.value.length;
+    await fetchPlans();
+
+    if (genStream.error.value) {
+      notifyError(genStream.error.value);
+      throw new Error(genStream.error.value);
     }
+    if (!genStream.result.value) {
+      // result 幀沒到,但課表可能已建立(列表剛刷新過)。dump 收到的事件序列
+      // 供比對後端 [plan-api][sse] log,找出幀在哪一端消失。
+      console.warn(
+        '[planStore] 課表生成串流結束但沒有 result 幀;收到的事件:',
+        genStream.events.value.map((e) => e.phase).join(','),
+      );
+      if (plans.value.length > before) {
+        notifySuccess('已產生訓練課表(結果回傳異常,已自動刷新列表)');
+        return;
+      }
+      const msg = '課表生成未完成';
+      notifyError(msg);
+      throw new Error(msg);
+    }
+    notifySuccess('已產生訓練課表');
   }
 
   async function deletePlan(id: string) {
@@ -164,6 +187,23 @@ export const usePlanStore = defineStore('plan', () => {
     }
   }
 
+  // 展開課表卡時 fire-and-forget 拉每日達標等級;失敗靜默(不阻擋 UI)。
+  async function fetchComplianceSummary(planId: string) {
+    try {
+      const res = await fetch(`/api/plans/${planId}/compliance-summary`, { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      const next = new Map(complianceByPlan.value);
+      next.set(planId, (data.days ?? {}) as Record<number, { grade: string; pct: number }>);
+      complianceByPlan.value = next;
+    } catch { /* fire-and-forget */ }
+  }
+
+  /** 取某日達標等級;無(手動標記或未拉到)回 null。 */
+  function getCompliance(planId: string, day: number): { grade: string; pct: number } | null {
+    return complianceByPlan.value.get(planId)?.[day] ?? null;
+  }
+
   function isCompleted(planId: string, day: number): boolean {
     const comps = completions.value.get(planId);
     return comps?.some((c) => c.day === day) ?? false;
@@ -174,9 +214,13 @@ export const usePlanStore = defineStore('plan', () => {
   }
 
   return {
-    plans, activePlans, completions, generating,
+    plans, activePlans, completions, complianceByPlan,
+    // generating 對映串流 running；agentEvents 供進度列顯示。
+    generating: genStream.running,
+    agentEvents: genStream.events,
     todaySessions, todayHasTraining,
     fetchPlans, fetchActivePlans, activatePlan, deactivatePlan,
     recordCompletion, generatePlan, deletePlan, isCompleted, getDateForDay,
+    fetchComplianceSummary, getCompliance,
   };
 });

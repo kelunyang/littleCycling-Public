@@ -81,6 +81,31 @@ export const useHudStore = defineStore('hud', () => {
     visibleMetrics.value = cleaned;
   }
 
+  /** 已達上限時擠掉最舊的一項，而不是拒絕加入 —— 面板不再需要把候選項目反灰。 */
+  function addMetric(id: HudMetricId) {
+    if (!VALID_IDS.has(id) || visibleMetrics.value.includes(id)) return;
+    const next = [...visibleMetrics.value, id];
+    visibleMetrics.value = next.slice(Math.max(0, next.length - HUD_METRIC_LIMIT));
+  }
+
+  function removeMetric(id: HudMetricId) {
+    visibleMetrics.value = visibleMetrics.value.filter((m) => m !== id);
+  }
+
+  /** 被 addMetric 擠掉的會是這一項；面板拿來預告使用者。 */
+  const evictionCandidate = computed<HudMetricId | null>(() =>
+    visibleMetrics.value.length >= HUD_METRIC_LIMIT ? visibleMetrics.value[0] : null,
+  );
+
+  function reorder(from: number, to: number) {
+    const list = visibleMetrics.value;
+    if (from === to || from < 0 || to < 0 || from >= list.length || to >= list.length) return;
+    const next = [...list];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    visibleMetrics.value = next;
+  }
+
   function moveUp(id: HudMetricId) {
     const idx = visibleMetrics.value.indexOf(id);
     if (idx <= 0) return;
@@ -116,7 +141,11 @@ export const useHudStore = defineStore('hud', () => {
   return {
     visibleMetrics,
     isVisible,
+    evictionCandidate,
     setVisibleMetrics,
+    addMetric,
+    removeMetric,
+    reorder,
     moveUp,
     moveDown,
     resetToDefaults,

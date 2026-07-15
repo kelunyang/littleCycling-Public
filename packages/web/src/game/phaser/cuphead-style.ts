@@ -22,15 +22,173 @@ import {
   drawSimpleHatch,
   drawWatercolorFill,
   drawOrganicBlob,
-  drawWobblyTerrainPath,
   generateFilmGrainCanvas,
-  drawInkLineCtx,
-  drawOrganicBlobCtx,
 } from './cuphead-draw';
 
 // ── Film grain state (module-level, shared across resize) ──
 let grainImage: Phaser.GameObjects.Image | null = null;
 const GRAIN_TEXTURE_KEY = '__cuphead_grain__';
+const IRIS_TEXTURE_KEY = '__cuphead_iris__';
+
+// ── Terrain watercolour layers ──
+// The terrain's permanent paint job — the entrance animation brushes the same
+// three layers in one at a time. Each layer sits a little lower than the one
+// above so the edges bleed like wet paint.
+const WASHES: readonly { color: number; alpha: number; dy: number }[] = [
+  { color: 0x7a8a5a, alpha: 0.5, dy: 16 },  // dusty sage under-wash
+  { color: 0x8a9a6a, alpha: 0.45, dy: 7 },  // mid tone
+  { color: P.TERRAIN_FILL, alpha: 0.85, dy: 0 },
+];
+
+const easeOutCubic = (t: number): number => 1 - Math.pow(1 - Math.min(1, Math.max(0, t)), 3);
+
+/** Smooth deterministic wobble — same world x, same offset, every frame.
+ *  (The demo's `wob`: two incommensurate sines, no RNG jitter.) */
+function wob(x: number, seed: number): number {
+  return Math.sin(x * 0.045 + seed) * 1.6 + Math.sin(x * 0.13 + seed * 2.3) * 1.0;
+}
+
+/** Linear-interpolated surface Y at world x from the terrain point list. */
+function surfYAt(points: { x: number; y: number }[], x: number): number {
+  if (points.length === 0) return 0;
+  if (x <= points[0].x) return points[0].y;
+  const last = points[points.length - 1];
+  if (x >= last.x) return last.y;
+  let lo = 0;
+  let hi = points.length - 1;
+  while (lo < hi - 1) {
+    const mid = (lo + hi) >> 1;
+    if (points[mid].x <= x) lo = mid;
+    else hi = mid;
+  }
+  const p0 = points[lo];
+  const p1 = points[hi];
+  const span = p1.x - p0.x;
+  const t = span > 0 ? (x - p0.x) / span : 0;
+  return p0.y + (p1.y - p0.y) * t;
+}
+
+/** Demo's ink tree: wobbly trunk strokes under a lumpy 24-gon canopy blob. */
+function drawInkTree(
+  gfx: Phaser.GameObjects.Graphics,
+  x: number, y: number, s: number, seed: number,
+): void {
+  gfx.lineStyle(3, P.INK, 0.95);
+  gfx.lineBetween(x + wob(x, 2), y, x + wob(x, 5), y - 26 * s);
+  gfx.fillStyle(P.TERRAIN_FILL, 0.9);
+  gfx.lineStyle(2.5, P.INK, 0.9);
+  gfx.beginPath();
+  for (let j = 0; j <= 24; j++) {
+    const a = (j / 24) * Math.PI * 2;
+    const r = (16 + Math.sin(a * 5 + seed) * 4.5) * s;
+    const px = x + Math.cos(a) * r;
+    const py = y - 26 * s - 10 * s + Math.sin(a) * r * 0.85;
+    if (j === 0) gfx.moveTo(px, py); else gfx.lineTo(px, py);
+  }
+  gfx.closePath();
+  gfx.fillPath();
+  gfx.strokePath();
+}
+
+/**
+ * Decorative ink trees scattered along the terrain — the demo world is dotted
+ * with them everywhere, not only where OSM happens to map a forest. Placed on
+ * a deterministic world grid (~270px), skipping steep ground; MVT forest trees
+ * still draw on top where real forests exist, which only adds foliage.
+ * During the intro each tree "grows" in with a staggered delay.
+ */
+function drawScatteredTrees(
+  gfx: Phaser.GameObjects.Graphics,
+  points: { x: number; y: number }[],
+  introT: number | null,
+): void {
+  if (points.length < 2) return;
+  const SPACING = 270; // ≈90 m at 3 px/m
+  const x0 = points[0].x;
+  const x1 = points[points.length - 1].x;
+  for (let gx = Math.ceil(x0 / SPACING) * SPACING; gx < x1; gx += SPACING) {
+    if (seededRandom(gx) < 0.45) continue;
+    // Skip steep ground — trees on a wall read as a mistake.
+    const dy = surfYAt(points, gx + 15) - surfYAt(points, gx - 15);
+    if (Math.abs(dy / 30) > 0.12) continue;
+
+    let grow = 1;
+    if (introT !== null) {
+      grow = easeOutCubic((introT - 1.9 - seededRandom(gx * 11) * 0.8) / 0.45);
+      if (grow <= 0) continue;
+    }
+    const x = gx + (seededRandom(gx * 3) - 0.5) * 50;
+    const s = (0.7 + seededRandom(gx * 7) * 0.7) * grow;
+    drawInkTree(gfx, x, surfYAt(points, x) + 2, s, gx);
+  }
+}
+
+/** One watercolour layer: fill from the (already wobbled) surface, shifted
+ *  down by the layer's dy, to the bottom of the view. */
+function fillWash(
+  gfx: Phaser.GameObjects.Graphics,
+  pts: { x: number; y: number }[],
+  bottomY: number,
+  wash: { color: number; alpha: number; dy: number },
+): void {
+  gfx.fillStyle(wash.color, wash.alpha);
+  gfx.beginPath();
+  gfx.moveTo(pts[0].x, bottomY);
+  for (const p of pts) gfx.lineTo(p.x, p.y + wash.dy);
+  gfx.lineTo(pts[pts.length - 1].x, bottomY);
+  gfx.closePath();
+  gfx.fillPath();
+}
+
+/** The pen line along the surface: a 4px ink stroke with a thin offset echo —
+ *  one pass of a nib leaves two edges, and that is what sells "drawn". */
+function strokeTerrainInk(
+  gfx: Phaser.GameObjects.Graphics,
+  pts: { x: number; y: number }[],
+): void {
+  gfx.lineStyle(4, P.INK, 1);
+  gfx.beginPath();
+  gfx.moveTo(pts[0].x, pts[0].y);
+  for (const p of pts) gfx.lineTo(p.x, p.y);
+  gfx.strokePath();
+  gfx.lineStyle(1.5, P.INK, 0.55);
+  gfx.beginPath();
+  gfx.moveTo(pts[0].x, pts[0].y + 5);
+  for (const p of pts) gfx.lineTo(p.x, p.y + 5);
+  gfx.strokePath();
+}
+
+/** Hatch shading on the STEEP stretches only — three 45° strokes below the
+ *  surface every ~36px where the grade exceeds ~4%. Flat ground stays clean
+ *  paper; the pen only shades where the hill needs explaining. */
+function drawTerrainHatch(
+  gfx: Phaser.GameObjects.Graphics,
+  points: { x: number; y: number }[],
+  bottomY: number,
+  alpha: number,
+): void {
+  if (points.length < 5) return;
+  // Visual-slope threshold for a ~4% grade at the scene's px-per-metre scales
+  // (4 px/m vertical over 3 px/m horizontal).
+  const SLOPE_MIN = 0.053;
+  const STEP_PX = 36;
+  gfx.lineStyle(1.5, P.TERRAIN_OUTLINE, 0.6 * alpha);
+  let nextX = points[0].x;
+  for (let i = 2; i < points.length - 2; i++) {
+    const p = points[i];
+    if (p.x < nextX) continue;
+    nextX = p.x + STEP_PX;
+    const a = points[i - 2];
+    const b = points[i + 2];
+    const dx = b.x - a.x;
+    if (dx <= 0 || Math.abs((b.y - a.y) / dx) < SLOPE_MIN) continue;
+    for (let k = 0; k < 3; k++) {
+      const yy = p.y + 10 + k * 11;
+      if (yy > bottomY) break;
+      gfx.lineBetween(p.x - 7, yy + 7, p.x + 7, yy - 7);
+    }
+  }
+}
 
 // ── Cyclist frame size (larger for rubber-hose detail) ──
 const CYCLIST_W = 64;
@@ -46,6 +204,7 @@ const INK_HEX = `#${P.INK.toString(16).padStart(6, '0')}`;
 export function createCupheadStyle(): PhaserStyleStrategy {
   return {
     style: 'cuphead',
+    cloudsOnSunny: true, // a 1930s cartoon sky always has ink clouds in it
     palette: {
       terrainFill: P.TERRAIN_FILL,
       terrainOutline: P.TERRAIN_OUTLINE,
@@ -77,20 +236,85 @@ export function createCupheadStyle(): PhaserStyleStrategy {
 
     // ── Terrain ──
 
-    drawTerrainSurface(gfx, points, bottomY, seed) {
+    /**
+     * Terrain surface — and, on entry, the animation of it being *drawn*:
+     * an ink pen strokes the outline left-to-right (0–1.1 s), watercolour
+     * washes brush in behind it one layer at a time (from 0.7 s), then the
+     * hatch shading fades up (1.7 s). The plastic world drops into place;
+     * this one gets painted.
+     */
+    drawTerrainSurface(gfx, points, bottomY, seed, intro) {
+      if (points.length < 2) return;
       const wobble = generateWobbleOffsets(points.length, seed, 1.8);
-      drawWobblyTerrainPath(
-        gfx, points, wobble,
-        P.TERRAIN_FILL, P.TERRAIN_OUTLINE, 3, bottomY,
-      );
+      const wobbly = points.map((pt, i) => ({
+        x: pt.x + (wobble[i]?.dx ?? 0),
+        y: pt.y + (wobble[i]?.dy ?? 0),
+      }));
 
-      // Add subtle cross-hatch shading on the terrain surface
-      if (points.length >= 2) {
-        const left = points[0].x;
-        const right = points[points.length - 1].x;
-        const avgY = points.reduce((s, p) => s + p.y, 0) / points.length;
-        drawSimpleHatch(gfx, left, avgY, right - left, bottomY - avgY, P.INK, 0.06, 8);
+      // Steady state IS the intro's final frame — same washes, same pen line —
+      // so the animation ends without a visible switch of rendering paths.
+      if (!intro) {
+        for (const wash of WASHES) fillWash(gfx, wobbly, bottomY, wash);
+        strokeTerrainInk(gfx, wobbly);
+        drawTerrainHatch(gfx, wobbly, bottomY, 1);
+        drawScatteredTrees(gfx, wobbly, null);
+        return;
       }
+
+      // The reveal sweeps from where the view started, not from the (moving)
+      // left edge of the current point list.
+      const sweepFrom = intro.originX - 70;
+      const sweepSpan = (wobbly[wobbly.length - 1].x - sweepFrom) + 140;
+
+      // ── Watercolour washes (three layers, brushed in one after another) ──
+      for (let i = 0; i < WASHES.length; i++) {
+        const wash = WASHES[i];
+        const k = (intro.t - 0.7 - i * 0.45) / 0.9;
+        if (k <= 0) continue;
+
+        let layer = wobbly;
+        let brushX: number | null = null;
+        if (k < 1) {
+          brushX = sweepFrom + sweepSpan * easeOutCubic(k);
+          layer = wobbly.filter((p) => p.x <= brushX!);
+          if (layer.length < 2) continue;
+        }
+
+        fillWash(gfx, layer, bottomY, wash);
+
+        // Wet brush head: a blob of pigment with a drag mark behind it.
+        if (brushX !== null) {
+          const tip = layer[layer.length - 1];
+          gfx.fillStyle(wash.color, 0.55);
+          gfx.fillEllipse(tip.x, tip.y + wash.dy + 6, 34, 16);
+          gfx.fillStyle(wash.color, 0.3);
+          gfx.fillEllipse(tip.x - 14, tip.y + wash.dy + 20, 26, 12);
+        }
+      }
+
+      // ── Ink outline, drawn by a travelling pen nib ──
+      const inkK = intro.t / 1.1;
+      let inkPts = wobbly;
+      let nib: { x: number; y: number } | null = null;
+      if (inkK < 1) {
+        const cutX = sweepFrom + sweepSpan * easeOutCubic(inkK);
+        inkPts = wobbly.filter((p) => p.x <= cutX);
+        nib = inkPts.length > 0 ? inkPts[inkPts.length - 1] : null;
+      }
+      if (inkPts.length >= 2) strokeTerrainInk(gfx, inkPts);
+      if (nib) {
+        gfx.fillStyle(P.INK, 1);
+        gfx.fillCircle(nib.x, nib.y, 3.5);
+        gfx.lineStyle(3, P.INK, 0.9);
+        gfx.lineBetween(nib.x, nib.y, nib.x + 14, nib.y - 22); // pen shaft
+      }
+
+      // ── Hatch shading, fading up once the paint is down ──
+      const hatchA = Math.min(1, Math.max(0, (intro.t - 1.7) / 0.6));
+      if (hatchA > 0) drawTerrainHatch(gfx, wobbly, bottomY, hatchA);
+
+      // ── Trees grow in last, staggered ──
+      drawScatteredTrees(gfx, wobbly, intro.t);
     },
 
     drawOverlay(scene) {
@@ -114,11 +338,45 @@ export function createCupheadStyle(): PhaserStyleStrategy {
 
       scene.textures.addCanvas(GRAIN_TEXTURE_KEY, grainCanvas);
       grainImage = scene.add.image(w / 2, h / 2, GRAIN_TEXTURE_KEY);
-      grainImage.setScrollFactor(0);
-      grainImage.setDepth(999);
       grainImage.setAlpha(0.8);
+      // 2× overscan: camera-lift zoom-out scales scrollFactor(0) layers too;
+      // without this the grain would shrink and leave clean borders.
+      grainImage.setScale(2);
 
-      return grainImage;
+      // Both overlay pieces ride in one container (drawOverlay returns a
+      // single object that the scene destroys/recreates on resize). Children
+      // of a container follow ITS scrollFactor, so it carries the (0, 0).
+      const container = scene.add.container(0, 0, [grainImage]);
+      container.setScrollFactor(0);
+      container.setDepth(999);
+
+      // Iris vignette — the 1930s picture-frame darkening at the corners.
+      // Game mode already gets a vignette from the cycling-glasses PostFX;
+      // doubling them up goes muddy, so the iris only draws on welcome.
+      const mode = (scene as Partial<{ sceneMode: string }>).sceneMode;
+      if (mode === 'welcome') {
+        if (scene.textures.exists(IRIS_TEXTURE_KEY)) {
+          scene.textures.remove(IRIS_TEXTURE_KEY);
+        }
+        const tex = scene.textures.createCanvas(IRIS_TEXTURE_KEY, w, h);
+        if (tex) {
+          const ictx = tex.getContext();
+          const grad = ictx.createRadialGradient(
+            w / 2, h / 2, Math.min(w, h) * 0.42,
+            w / 2, h / 2, Math.max(w, h) * 0.78,
+          );
+          grad.addColorStop(0, 'rgba(42,36,32,0)');   // P.INK, transparent
+          grad.addColorStop(1, 'rgba(42,36,32,0.5)'); // P.INK at the corners
+          ictx.fillStyle = grad;
+          ictx.fillRect(0, 0, w, h);
+          tex.refresh();
+          const iris = scene.add.image(w / 2, h / 2, IRIS_TEXTURE_KEY);
+          iris.setScale(2); // 2× overscan, same reason as the grain
+          container.add(iris);
+        }
+      }
+
+      return container;
     },
 
     updateOverlay(frameCount) {
@@ -244,6 +502,117 @@ export function createCupheadStyle(): PhaserStyleStrategy {
       }
     },
 
+    /** Sand: warm sandstone hump with ink stipple — a pen-shaded dune. */
+    renderSand(gfx, x, y, _w, _h, seed) {
+      gfx.fillStyle(0xc4a87a, 0.55); // P.MARKER_TICK sandstone
+      gfx.beginPath();
+      gfx.moveTo(x - 22, y);
+      for (let i = -22; i <= 22; i += 4) {
+        gfx.lineTo(x + i, y - 3 - Math.sin((i + 22) / 44 * Math.PI) * 3 + wob(x + i, seed));
+      }
+      gfx.lineTo(x + 22, y);
+      gfx.closePath();
+      gfx.fillPath();
+      // Ink stipple
+      gfx.fillStyle(P.INK, 0.4);
+      for (let i = 0; i < 7; i++) {
+        const sx = x + (seededRandom(seed + i * 13) - 0.5) * 40;
+        const sy = y - 2 - seededRandom(seed + i * 29) * 4;
+        gfx.fillRect(sx, sy, 1.2, 1.2);
+      }
+    },
+
+    /** Urban: a warm-grey wash band with sparse ink flecks — cobbles, not
+     *  countryside. Kept quiet so buildings carry the town. */
+    renderUrban(gfx, x, y, _w, _h, seed) {
+      gfx.fillStyle(P.FOG_COLOR, 0.25);
+      gfx.fillRect(x - 30, y - 3, 60, 5);
+      gfx.fillStyle(P.INK, 0.3);
+      for (let i = 0; i < 5; i++) {
+        const sx = x + (seededRandom(seed + i * 17) - 0.5) * 55;
+        gfx.fillRect(sx, y - 2 + seededRandom(seed + i * 7) * 2, 2, 1.2);
+      }
+    },
+
+    /** Waterway: teal channel with wobbled ink banks — renderWater, narrowed. */
+    renderWaterway(gfx, x, y, w, h, seed) {
+      const half = w / 2;
+      gfx.fillStyle(P.WATER_FILL, 0.55);
+      gfx.fillRect(x - half, y, w, h);
+      // Ink banks
+      gfx.lineStyle(2, P.INK, 0.7);
+      gfx.lineBetween(x - half + wob(y, seed), y, x - half + wob(y + 40, seed), y + h);
+      gfx.lineBetween(x + half + wob(y, seed + 3), y, x + half + wob(y + 40, seed + 3), y + h);
+      // Surface line
+      gfx.lineStyle(2, P.WATER_OUTLINE, 0.6);
+      gfx.lineBetween(x - half, y, x + half, y);
+      return { x, y, w };
+    },
+
+    /** Aeroway: warm concrete strip, ink edges, white dashes — and a little
+     *  tethered balloon-plane bobbing over the runway (the 3D cuphead world
+     *  parks one at every aerodrome too). */
+    renderAeroway(gfx, x, y, w, kind, seed) {
+      const half = w / 2;
+      const stripH = 7;
+      gfx.fillStyle(0x9a8a7a, 0.7); // P.FOG_COLOR — warm concrete
+      gfx.fillRect(x - half, y - stripH, w, stripH);
+      gfx.lineStyle(2, P.INK, 0.7);
+      gfx.lineBetween(x - half, y - stripH, x + half, y - stripH);
+      gfx.lineBetween(x - half, y, x + half, y);
+      gfx.fillStyle(0xffffff, 0.7);
+      for (let i = -half + 4; i < half - 10; i += 18) {
+        gfx.fillRect(x + i, y - stripH / 2 - 1, 9, 2);
+      }
+      if (kind !== 'runway') return;
+
+      // Balloon plane: round body + triangle wing + rope down to the strip
+      const px = x + (seededRandom(seed) - 0.5) * w * 0.5;
+      const py = y - 60 - seededRandom(seed + 5) * 15;
+      gfx.lineStyle(1.5, P.INK, 0.8);
+      gfx.lineBetween(px, py + 9, px, y - stripH); // tether
+      gfx.fillStyle(0xa0523c, 0.95);               // brick-red body
+      gfx.lineStyle(2, P.INK, 0.9);
+      gfx.beginPath();
+      gfx.arc(px, py, 9, 0, Math.PI * 2);
+      gfx.closePath();
+      gfx.fillPath();
+      gfx.strokePath();
+      gfx.fillStyle(0xc4a035, 0.95);               // mustard wing
+      gfx.fillTriangle(px - 2, py, px - 14, py - 7, px - 12, py + 4);
+      gfx.lineStyle(1.5, P.INK, 0.9);
+      gfx.strokeTriangle(px - 2, py, px - 14, py - 7, px - 12, py + 4);
+      // Propeller tick
+      gfx.lineStyle(1.5, P.INK, 0.8);
+      gfx.lineBetween(px + 9, py - 5, px + 11, py + 5);
+    },
+
+    /** Road: a dirt-track band — warm earth wash between two wobbled ink
+     *  edges, with dashed wheel ruts down the middle. */
+    renderRoadSurface(gfx, points, seed) {
+      const H = 8;
+      // Earth wash
+      gfx.fillStyle(0xb5a67a, 0.5); // khaki earth
+      gfx.beginPath();
+      gfx.moveTo(points[0].x, points[0].y + 1);
+      for (const p of points) gfx.lineTo(p.x, p.y + 1);
+      for (let i = points.length - 1; i >= 0; i--) gfx.lineTo(points[i].x, points[i].y + H);
+      gfx.closePath();
+      gfx.fillPath();
+      // Lower ink edge (the surface's own double-stroke line is the upper one)
+      gfx.lineStyle(1.5, P.INK, 0.5);
+      gfx.beginPath();
+      gfx.moveTo(points[0].x, points[0].y + H + wob(points[0].x, seed));
+      for (const p of points) gfx.lineTo(p.x, p.y + H + wob(p.x, seed));
+      gfx.strokePath();
+      // Wheel-rut dashes
+      gfx.lineStyle(1.2, P.INK, 0.35);
+      for (let i = 2; i < points.length - 3; i += 5) {
+        const p = points[i];
+        gfx.lineBetween(p.x, p.y + H * 0.55, p.x + 12, p.y + H * 0.55);
+      }
+    },
+
     renderRoadLamp(gfx, x, y, seed) {
       const poleH = 35 + (seed % 10);
       const armW = 8;
@@ -305,140 +674,82 @@ export function createCupheadStyle(): PhaserStyleStrategy {
       return { top: topColor, bottom: bottomColor };
     },
 
-    drawCloud(gfx, cx, cy, w, h, seed) {
-      // 2-3 overlapping organic blobs for puffy cloud
-      const blobCount = 2 + Math.floor(seededRandom(seed + 7) * 2);
-      for (let i = 0; i < blobCount; i++) {
-        const bx = cx + (seededRandom(seed + i * 31) - 0.5) * w * 0.5;
-        const by = cy + (seededRandom(seed + i * 47) - 0.5) * h * 0.3;
-        const br = (w * 0.25) + seededRandom(seed + i * 61) * (w * 0.15);
-        drawOrganicBlob(gfx, bx, by, br, seed + i * 100, P.CLOUD, P.INK, 1.5, 0.6);
+    /** Demo's cloud: one squashed 7-lobe blob with a bold ink outline —
+     *  reads as a single confident pen shape, not a cluster of puffs. */
+    drawCloud(gfx, cx, cy, w, _h, seed) {
+      const s = w / 110; // demo blob is ~110px wide at scale 1
+      gfx.fillStyle(P.CLOUD, 0.9);
+      gfx.lineStyle(2.5, P.INK, 0.75);
+      gfx.beginPath();
+      const lobes = 7;
+      for (let j = 0; j <= lobes * 8; j++) {
+        const a = (j / (lobes * 8)) * Math.PI * 2;
+        const r = (34 + Math.sin(a * lobes + seed) * 10 + wob(j * 9, seed) * 2) * s;
+        const px = cx + Math.cos(a) * r * 1.6;
+        const py = cy + Math.sin(a) * r * 0.62; // demo's squash — h is implied by w
+        if (j === 0) gfx.moveTo(px, py); else gfx.lineTo(px, py);
       }
-
-      // Bottom shadow hatch
-      drawSimpleHatch(
-        gfx,
-        cx - w * 0.3, cy + h * 0.1,
-        w * 0.6, h * 0.3,
-        P.INK, 0.06, 4,
-      );
+      gfx.closePath();
+      gfx.fillPath();
+      gfx.strokePath();
     },
 
+    /** Demo's mountain profile: two incommensurate sines + wobble around the
+     *  base line — soft rolling ranges, not jagged peaks. The far layer is
+     *  taller and lazier; the near one busier and lower. */
     generateMountainPoints(baseY, skyH, totalWidth, layer, seed) {
       const points: { x: number; y: number }[] = [];
-
-      if (layer === 'far') {
-        // Cuphead-style jagged peaks — triangular with varied heights and spacing
-        let x = 0;
-        let peakIndex = 0;
-        while (x <= totalWidth) {
-          // Each peak has deterministic random height and width, varied by session seed
-          const r1 = seededRandom(peakIndex * 137 + 42 + seed);
-          const r2 = seededRandom(peakIndex * 197 + 88 + seed);
-          const r3 = seededRandom(peakIndex * 251 + 13 + seed);
-
-          // Peak width: 200-400px
-          const peakWidth = 200 + r1 * 200;
-          // Peak height: 18-28% of skyH (much taller than plastic's ~12%)
-          const peakHeight = skyH * (0.18 + r2 * 0.10);
-          // Valley depth: shallow connection between peaks
-          const valleyDepth = skyH * (0.02 + r3 * 0.04);
-
-          // Rising slope to peak
-          const peakX = x + peakWidth * 0.5;
-          const halfW = peakWidth * 0.5;
-          for (let dx = 0; dx <= peakWidth && (x + dx) <= totalWidth; dx += 4) {
-            const t = dx / peakWidth;
-            let elevation: number;
-
-            // 10% chance of flat-top mountain
-            const isFlat = seededRandom(peakIndex * 311 + 7 + seed) < 0.1;
-            // 15% chance of twin peaks
-            const isTwin = seededRandom(peakIndex * 373 + 3 + seed) < 0.15;
-
-            if (isFlat && t > 0.35 && t < 0.65) {
-              // Flat plateau
-              elevation = peakHeight * 0.9;
-            } else if (isTwin) {
-              // Twin peaks — two summits with a saddle
-              const twin1 = Math.max(0, 1 - Math.abs(t - 0.35) * 5);
-              const twin2 = Math.max(0, 1 - Math.abs(t - 0.65) * 5);
-              elevation = Math.max(twin1, twin2) * peakHeight;
-            } else {
-              // Standard triangular peak with slight curve
-              const dist = Math.abs(t - 0.5) * 2; // 0 at center, 1 at edges
-              elevation = (1 - dist * dist) * peakHeight; // quadratic for slight curve
-            }
-
-            // Add small wobble for hand-drawn feel
-            const wobble = (seededRandom(peakIndex * 73 + Math.floor(dx / 4) * 17 + seed) - 0.5) * 3;
-
-            points.push({
-              x: x + dx,
-              y: baseY - elevation - valleyDepth + wobble,
-            });
-          }
-
-          x += peakWidth;
-          peakIndex++;
-        }
-      } else {
-        // Near layer: rolling hills — rounder, bigger amplitude than plastic
-        const phaseShift = seededRandom(seed + 500) * Math.PI * 2;
-        for (let x = 0; x <= totalWidth; x += 4) {
-          const r = seededRandom(Math.floor(x / 300) * 59 + 7 + seed);
-          const ampMod = 0.7 + r * 0.6; // amplitude modulation per hill
-          const y = baseY
-            - Math.abs(Math.sin(x * 0.0015 + 0.5 + phaseShift)) * skyH * 0.12 * ampMod
-            - Math.abs(Math.sin(x * 0.004 + 1.1 + phaseShift * 0.7)) * skyH * 0.06 * ampMod
-            + (seededRandom(Math.floor(x / 4) * 31 + 99 + seed) - 0.5) * 2; // subtle wobble
-          points.push({ x, y });
-        }
+      const s = layer === 'far' ? 5 + seed * 0.37 : 11 + seed * 0.37;
+      const amp = skyH * (layer === 'far' ? 0.11 : 0.085);
+      const freq = layer === 'far' ? 0.0016 : 0.003;
+      for (let x = 0; x <= totalWidth; x += 6) {
+        const y = baseY
+          + Math.sin(x * freq + s) * amp
+          + Math.sin(x * freq * 2.7 + s * 2) * amp * 0.45
+          + wob(x, s) * 2;
+        points.push({ x, y });
       }
-
       return points;
     },
 
+    /** Demo's range drawing: a near-opaque fill with a bold 3px ink outline —
+     *  the outline (0.35 far / 0.5 near) is what makes them read as DRAWN.
+     *  (Weather passes seed 0 for the far layer, 1 for the near one.) */
     drawMountainSilhouette(gfx, points, color, bottomY, seed) {
-      // Generate wobble for mountain outline
-      const wobble = generateWobbleOffsets(points.length, seed * 1000 + 777, 2.5);
-
-      // Fill with wobbled outline
-      gfx.fillStyle(color, 0.7);
+      gfx.fillStyle(color, 0.9);
+      gfx.lineStyle(3, P.INK, seed === 0 ? 0.35 : 0.5);
       gfx.beginPath();
       gfx.moveTo(points[0].x, bottomY);
-      for (let i = 0; i < points.length; i++) {
-        gfx.lineTo(
-          points[i].x + (wobble[i]?.dx ?? 0),
-          points[i].y + (wobble[i]?.dy ?? 0),
-        );
-      }
+      for (const pt of points) gfx.lineTo(pt.x, pt.y);
       gfx.lineTo(points[points.length - 1].x, bottomY);
       gfx.closePath();
       gfx.fillPath();
-
-      // Ink outline on top (2-3px)
-      gfx.lineStyle(2.5, P.INK, 0.3);
-      gfx.beginPath();
-      for (let i = 0; i < points.length; i++) {
-        const px = points[i].x + (wobble[i]?.dx ?? 0);
-        const py = points[i].y + (wobble[i]?.dy ?? 0);
-        if (i === 0) gfx.moveTo(px, py);
-        else gfx.lineTo(px, py);
-      }
       gfx.strokePath();
-
-      // Subtle body hatch
-      if (points.length >= 2) {
-        const left = points[0].x;
-        const right = points[points.length - 1].x;
-        const topY = Math.min(...points.map(p => p.y));
-        drawSimpleHatch(gfx, left, topY, right - left, bottomY - topY, P.INK, 0.04, 12);
-      }
     },
 
     drawMoon(gfx, cx, cy, radius, phase, seed) {
       drawOrganicBlob(gfx, cx, cy, radius, seed, P.MOON, P.INK, 2);
+    },
+
+    /** Mustard ink-outlined disc with twelve radiating pen strokes — the
+     *  demo's hand-drawn sun. Replaces the (style-gated-off) Preetham sky
+     *  as the only daytime sun. */
+    drawSun(gfx, cx, cy, radius, seed) {
+      gfx.fillStyle(P.SUN, 1);
+      gfx.fillCircle(cx, cy, radius);
+      gfx.lineStyle(3, P.INK, 0.8);
+      gfx.strokeCircle(cx, cy, radius);
+
+      gfx.lineStyle(2.5, P.INK, 0.7);
+      for (let i = 0; i < 12; i++) {
+        const a = (i / 12) * Math.PI * 2 + 0.2;
+        const r1 = radius + 7 + seededRandom(seed + i) * 3;
+        const r2 = r1 + 9 + seededRandom(seed + i * 31) * 6;
+        gfx.lineBetween(
+          cx + Math.cos(a) * r1, cy + Math.sin(a) * r1,
+          cx + Math.cos(a) * r2, cy + Math.sin(a) * r2,
+        );
+      }
     },
 
     drawStar(gfx, x, y, size, brightness, seed) {
@@ -462,166 +773,96 @@ export function createCupheadStyle(): PhaserStyleStrategy {
       return { w: CYCLIST_W, h: CYCLIST_H };
     },
 
+    /** The demo's ink noodle rider, ported 1:1 — big 3.5px ink wheels with
+     *  rotating spokes, a solid red watercolour jersey patch, straight noodle
+     *  limbs, cream head under a leather half-cap, one ink-dot eye. The pose
+     *  params map to small offsets so the pose system still reads (standing
+     *  rocks the body, aero leans it, headTilt nods the head). */
     generateCyclistFrame(ctx, ox, frame, _pose, params) {
       const cx = ox + CYCLIST_W / 2;
       const groundY = CYCLIST_H - 2;
-
-      const rockOffset = params.rockAmplitude * Math.sin((frame / FRAME_COUNT) * Math.PI * 2);
+      const R = 11;                    // demo wheel radius
+      const axleY = groundY - R;       // demo's origin: the wheel axle line
       const pedalAngle = (frame / FRAME_COUNT) * Math.PI * 2;
+      const rock = params.rockAmplitude * Math.sin(pedalAngle);
+      const lift = params.hipOffsetY * 0.6;
+      const lean = Math.sin(params.torsoAngle * (Math.PI / 180)) * 6;
+      const X = (dx: number) => cx + dx;
+      const Y = (dy: number) => axleY + dy;
 
-      // Pedal top/bottom squash/stretch
-      const squash = 1 + Math.sin(pedalAngle) * 0.05;
+      const bodyHex = `#${P.CYCLIST_BODY.toString(16).padStart(6, '0')}`;
+      const skinHex = `#${P.CYCLIST_SKIN.toString(16).padStart(6, '0')}`;
+      const capHex = `#${P.CYCLIST_HELMET.toString(16).padStart(6, '0')}`;
 
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
 
-      // ── Bicycle ──
-      const wheelR = 10;
-      const wheelY = groundY - wheelR;
-      const rearWheelX = cx - 10;
-      const frontWheelX = cx + 13;
-      const bbX = cx;
-      const bbY = wheelY - 5;
-
-      // Wheels — ink circles
+      // ── Wheels + rotating spokes ──
       ctx.strokeStyle = INK_HEX;
-      ctx.lineWidth = 2.5;
-      ctx.beginPath(); ctx.arc(rearWheelX, wheelY, wheelR, 0, Math.PI * 2); ctx.stroke();
-      ctx.beginPath(); ctx.arc(frontWheelX, wheelY, wheelR, 0, Math.PI * 2); ctx.stroke();
-
-      // Spokes
-      ctx.lineWidth = 0.8;
-      for (let s = 0; s < 4; s++) {
-        const sa = (s / 4) * Math.PI * 2 + pedalAngle;
-        ctx.beginPath(); ctx.moveTo(rearWheelX, wheelY);
-        ctx.lineTo(rearWheelX + Math.cos(sa) * wheelR * 0.8, wheelY + Math.sin(sa) * wheelR * 0.8);
-        ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(frontWheelX, wheelY);
-        ctx.lineTo(frontWheelX + Math.cos(sa) * wheelR * 0.8, wheelY + Math.sin(sa) * wheelR * 0.8);
-        ctx.stroke();
+      ctx.lineWidth = 3.5;
+      for (const wx of [-15, 15]) {
+        ctx.beginPath(); ctx.arc(X(wx), Y(0), R, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.lineWidth = 2;
+      for (const wx of [-15, 15]) {
+        for (let i = 0; i < 4; i++) {
+          const a = pedalAngle + (i / 4) * Math.PI * 2;
+          ctx.beginPath();
+          ctx.moveTo(X(wx), Y(0));
+          ctx.lineTo(X(wx) + Math.cos(a) * (R - 2), Y(0) + Math.sin(a) * (R - 2));
+          ctx.stroke();
+        }
       }
 
-      // Frame — ink lines
-      const seatX = cx - 4;
-      const seatY = bbY - 16;
-      const headX = cx + 8;
-      const headY = bbY - 14;
+      // ── Frame ──
+      ctx.lineWidth = 3;
+      const seg = (x1: number, y1: number, x2: number, y2: number) => {
+        ctx.beginPath(); ctx.moveTo(X(x1), Y(y1)); ctx.lineTo(X(x2), Y(y2)); ctx.stroke();
+      };
+      seg(-15, 0, 0, -3);
+      seg(0, -3, 15, 0);
+      seg(0, -3, -4, -14);
+      seg(15, 0, 10, -15);
 
-      drawInkLineCtx(ctx, bbX, bbY, seatX, seatY, frame * 100, 2.5, INK_HEX);
-      drawInkLineCtx(ctx, bbX, bbY, headX, headY, frame * 100 + 10, 2.5, INK_HEX);
-      drawInkLineCtx(ctx, seatX, seatY, headX, headY, frame * 100 + 20, 2, INK_HEX);
-      drawInkLineCtx(ctx, bbX, bbY, rearWheelX, wheelY, frame * 100 + 30, 2.5, INK_HEX);
-      drawInkLineCtx(ctx, seatX, seatY, rearWheelX, wheelY, frame * 100 + 40, 1.5, INK_HEX);
-      drawInkLineCtx(ctx, headX, headY, frontWheelX, wheelY, frame * 100 + 50, 2.5, INK_HEX);
+      // ── Noodle legs (two phases of the same pedal circle) ──
+      ctx.lineWidth = 3;
+      const hipY = -13 - lift;
+      seg(-2, hipY, Math.cos(pedalAngle) * 7, -3 + Math.sin(pedalAngle) * 7);
+      seg(-2, hipY, -Math.cos(pedalAngle) * 7, -3 - Math.sin(pedalAngle) * 7);
 
-      // Handlebar
-      drawInkLineCtx(ctx, headX - 2, headY - 2, headX + 5, headY - 4, frame * 100 + 60, 2, INK_HEX);
-
-      // ── Pedals + cranks ──
-      const crankR = 6;
-      const p1X = bbX + Math.cos(pedalAngle) * crankR;
-      const p1Y = bbY + Math.sin(pedalAngle) * crankR;
-      const p2X = bbX + Math.cos(pedalAngle + Math.PI) * crankR;
-      const p2Y = bbY + Math.sin(pedalAngle + Math.PI) * crankR;
-
+      // ── Jersey: solid red watercolour patch, ink outlined ──
+      const quad: [number, number][] = [
+        [-6 + rock, -14 - lift],
+        [2 + rock + lean, -28 - lift],
+        [9 + rock + lean, -24 - lift],
+        [4 + rock, -12 - lift],
+      ];
+      ctx.fillStyle = bodyHex;
       ctx.strokeStyle = INK_HEX;
       ctx.lineWidth = 2.5;
-      ctx.beginPath(); ctx.moveTo(p1X, p1Y); ctx.lineTo(p2X, p2Y); ctx.stroke();
-
-      // Dark brown shoes on pedals
-      const shoeHex = '#3a2a1a';
-      ctx.fillStyle = shoeHex;
-      ctx.fillRect(p1X - 3, p1Y - 2, 6, 4);
-      ctx.fillRect(p2X - 3, p2Y - 2, 6, 4);
-
-      // ── Rider body (rubber-hose style) ──
-      const hipX = seatX + rockOffset;
-      const hipY = seatY - params.hipOffsetY;
-
-      const torsoRad = params.torsoAngle * (Math.PI / 180);
-      const torsoLen = 16;
-      const shoulderX = hipX + Math.sin(torsoRad) * torsoLen * 0.6 + rockOffset * 0.5;
-      const shoulderY = hipY - Math.cos(torsoRad) * torsoLen;
-
-      // Legs — rounded, thick ink
-      const bodyHex = `#${P.CYCLIST_BODY.toString(16).padStart(6, '0')}`;
-      const skinHex = `#${P.CYCLIST_SKIN.toString(16).padStart(6, '0')}`;
-      const helmetHex = `#${P.CYCLIST_HELMET.toString(16).padStart(6, '0')}`;
-
-      ctx.strokeStyle = bodyHex;
-      ctx.lineWidth = 4.5;
-      const k1X = (hipX + p1X) / 2 + 4;
-      const k1Y = (hipY + p1Y) / 2 + 2;
-      ctx.beginPath(); ctx.moveTo(hipX, hipY); ctx.quadraticCurveTo(k1X, k1Y, p1X, p1Y); ctx.stroke();
-      const k2X = (hipX + p2X) / 2 + 4;
-      const k2Y = (hipY + p2Y) / 2 + 2;
-      ctx.beginPath(); ctx.moveTo(hipX, hipY); ctx.quadraticCurveTo(k2X, k2Y, p2X, p2Y); ctx.stroke();
-
-      // Re-trace legs with ink outline
-      ctx.strokeStyle = INK_HEX;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.moveTo(hipX, hipY); ctx.quadraticCurveTo(k1X, k1Y, p1X, p1Y); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(hipX, hipY); ctx.quadraticCurveTo(k2X, k2Y, p2X, p2Y); ctx.stroke();
-
-      // Torso — tapered bezier with body color
-      ctx.strokeStyle = bodyHex;
-      ctx.lineWidth = 5 * squash;
       ctx.beginPath();
-      ctx.moveTo(hipX, hipY);
-      const midX = (hipX + shoulderX) / 2 + rockOffset * 0.3;
-      const midY = (hipY + shoulderY) / 2;
-      ctx.quadraticCurveTo(midX, midY, shoulderX, shoulderY);
-      ctx.stroke();
-
-      // Torso ink re-trace
-      ctx.strokeStyle = INK_HEX;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(hipX, hipY);
-      ctx.quadraticCurveTo(midX, midY, shoulderX, shoulderY);
-      ctx.stroke();
-
-      // Arms → handlebars (skin color with ink re-trace)
-      ctx.strokeStyle = skinHex;
-      ctx.lineWidth = 3.5;
-      ctx.beginPath(); ctx.moveTo(shoulderX, shoulderY); ctx.lineTo(headX + 2, headY - 3); ctx.stroke();
-      ctx.strokeStyle = INK_HEX;
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(shoulderX, shoulderY); ctx.lineTo(headX + 2, headY - 3); ctx.stroke();
-
-      // White gloves on handlebars
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath(); ctx.arc(headX + 2, headY - 3, 3, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = INK_HEX;
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.arc(headX + 2, headY - 3, 3, 0, Math.PI * 2); ctx.stroke();
-
-      // ── Head (organic blob with pie-cut eyes) ──
-      const headCX = shoulderX - 1;
-      const headCY = shoulderY - 6 + params.headTilt;
-      const headR = 5;
-
-      // Leather cap (helmet)
-      drawOrganicBlobCtx(ctx, headCX, headCY - 1, headR * 0.9, frame * 100 + 70, helmetHex, INK_HEX, 1.5);
-
-      // Face (skin)
-      ctx.fillStyle = skinHex;
-      ctx.beginPath();
-      ctx.arc(headCX + 1, headCY + 1, headR * 0.65, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Pie-cut eye (classic 1930s style)
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(headCX + 2, headCY, 2.2, 0, Math.PI * 2);
-      ctx.fill();
-      // Pie cut — black wedge
-      ctx.fillStyle = INK_HEX;
-      ctx.beginPath();
-      ctx.moveTo(headCX + 2, headCY);
-      ctx.arc(headCX + 2, headCY, 2.2, -Math.PI * 0.3, Math.PI * 0.3);
+      ctx.moveTo(X(quad[0][0]), Y(quad[0][1]));
+      for (let i = 1; i < quad.length; i++) ctx.lineTo(X(quad[i][0]), Y(quad[i][1]));
       ctx.closePath();
       ctx.fill();
+      ctx.stroke();
+
+      // ── Arm to the bars ──
+      ctx.lineWidth = 3;
+      seg(5 + rock + lean, -24 - lift, 11, -16);
+
+      // ── Head: cream disc + leather half-cap + ink-dot eye ──
+      const hx = X(6 + rock + lean);
+      const hy = Y(-33 - lift + params.headTilt);
+      ctx.fillStyle = skinHex;
+      ctx.beginPath(); ctx.arc(hx, hy, 7, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = INK_HEX;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(hx, hy, 7, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = capHex;
+      ctx.beginPath(); ctx.arc(hx, hy - 2, 7.5, Math.PI, 0); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = INK_HEX;
+      ctx.beginPath(); ctx.arc(hx + 2.5, hy, 1.8, 0, Math.PI * 2); ctx.fill();
     },
 
     getCyclistZone5Tint(isDarkened) {

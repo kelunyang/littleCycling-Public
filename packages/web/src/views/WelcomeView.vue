@@ -83,6 +83,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick } from 'vue';
+import { ElMessageBox } from 'element-plus';
 import RouteList from '@/components/welcome/RouteList.vue';
 import StartChecklist from '@/components/welcome/StartChecklist.vue';
 import StartBar from '@/components/welcome/StartBar.vue';
@@ -95,12 +96,14 @@ import WelcomeBackdrop from '@/components/welcome/WelcomeBackdrop.vue';
 import { usePlanStore } from '@/stores/planStore';
 import { useRouteStore } from '@/stores/routeStore';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { useAnalysisStore } from '@/stores/analysisStore';
 import { useWebSocket } from '@/composables/useWebSocket';
 import { useCalendar } from '@/composables/useCalendar';
 
 const routeStore = useRouteStore();
 const settingsStore = useSettingsStore();
 const planStore = usePlanStore();
+const analysisStore = useAnalysisStore();
 const ws = useWebSocket();
 const settingsOpen = ref(false);
 const presetOpen = ref(false);
@@ -109,7 +112,7 @@ const calendar = useCalendar();
 
 /** Welcome theme follows the world style picked in StartChecklist. */
 const worldStyle = computed(
-  () => settingsStore.config.map.phaserStyle ?? 'plastic',
+  () => settingsStore.config.map.worldStyle ?? 'plastic',
 );
 
 const bodyRef = ref<HTMLElement | null>(null);
@@ -126,12 +129,40 @@ async function handleRouteSelected() {
   body.scrollTo({ top: offset, behavior: 'smooth' });
 }
 
-onMounted(() => {
+/**
+ * Prompt a `git pull` when the server's update check found a newer public
+ * release. The check itself runs on the backend (result lives in config.update);
+ * here we only render the reminder. Same version nags once — we remember the
+ * dismissed commit hash so only a genuinely newer commit prompts again.
+ */
+async function maybePromptUpdate() {
+  const u = settingsStore.config.update;
+  if (!u?.updateAvailable || !u.remoteHash) return;
+  if (localStorage.getItem('lc-update-dismissed') === u.remoteHash) return;
+  ElMessageBox.alert(
+    '偵測到 littleCycling 有新版本。請在專案目錄執行 git pull 取得最新更新。',
+    '有可用更新',
+    { confirmButtonText: '知道了' },
+  ).finally(() => localStorage.setItem('lc-update-dismissed', u.remoteHash!));
+}
+
+onMounted(async () => {
   routeStore.fetchRoutes();
-  settingsStore.fetchConfig();
   planStore.fetchPlans();
   planStore.fetchActivePlans();
   ws.connect();
+  await settingsStore.fetchConfig();
+  settingsStore.fetchLlmProviders();
+  // 首次使用:後端回報必填個人化設定尚未填齊 → 自動打開設定 drawer 提示。
+  // 非強制,使用者仍可關掉繼續玩,下次啟動再提示(直到設定完成)。
+  if ((settingsStore.config.missingSettings?.length ?? 0) > 0) {
+    settingsOpen.value = true;
+  }
+  maybePromptUpdate();
+  // 從遊戲結束「讓 AI 評論」帶旗標回來 → 自動開 PresetDrawer(內部再開 picker、預勾)。
+  if (analysisStore.autoAnalyzeRideId != null) {
+    presetOpen.value = true;
+  }
 });
 </script>
 
@@ -316,75 +347,75 @@ onMounted(() => {
 
 /* ── Plastic theme: welcome-specific decoration (tokens live in App.vue) ── */
 .welcome[data-world-style="plastic"] .welcome__card {
-  border: 3px solid #1a1140;
+  border: 3px solid var(--pl-ink);
 }
 
 .welcome[data-world-style="plastic"] .welcome__title {
-  color: #ff3b8d;
-  text-shadow: 2px 2px 0 #1a1140, 4px 4px 0 #00d8ff;
+  color: var(--pl-pink);
+  text-shadow: 2px 2px 0 var(--pl-ink), 4px 4px 0 var(--pl-cyan);
   letter-spacing: 1px;
   font-weight: 700;
 }
 
 .welcome[data-world-style="plastic"] .welcome__layer-heading {
-  color: #1a1140;
-  text-shadow: 2px 2px 0 #ffea00;
+  color: var(--pl-ink);
+  text-shadow: 2px 2px 0 var(--pl-yellow);
   letter-spacing: 0.5px;
   text-transform: none;
 }
 
 .welcome[data-world-style="plastic"] .welcome__layer-action {
-  background: linear-gradient(180deg, #00e5ff 0%, #00b4d8 100%);
-  border: 2px solid #1a1140;
+  background: linear-gradient(180deg, #00e5ff 0%, var(--pl-cyan-deep) 100%);
+  border: 2px solid var(--pl-ink);
   color: #ffffff;
-  box-shadow: 0 3px 0 #1a1140;
+  box-shadow: 0 3px 0 var(--pl-ink);
 }
 
 .welcome[data-world-style="plastic"] .welcome__layer-action:hover {
-  background: linear-gradient(180deg, #76ff03 0%, #4caf50 100%);
+  background: linear-gradient(180deg, var(--pl-green) 0%, var(--pl-green-2) 100%);
   transform: translateY(-2px);
-  box-shadow: 0 5px 0 #1a1140;
+  box-shadow: 0 5px 0 var(--pl-ink);
 }
 
 .welcome[data-world-style="plastic"] .welcome__top-btn {
-  background: linear-gradient(180deg, #ffea00 0%, #ffb300 100%);
-  border: 2px solid #1a1140;
-  color: #1a1140;
-  box-shadow: 0 3px 0 #1a1140;
+  background: linear-gradient(180deg, var(--pl-yellow) 0%, var(--pl-amber) 100%);
+  border: 2px solid var(--pl-ink);
+  color: var(--pl-ink);
+  box-shadow: 0 3px 0 var(--pl-ink);
 }
 
 .welcome[data-world-style="plastic"] .welcome__top-btn:hover {
-  background: linear-gradient(180deg, #ff3b8d 0%, #d500f9 100%);
+  background: linear-gradient(180deg, var(--pl-pink) 0%, var(--pl-purple) 100%);
   color: #ffffff;
-  border-color: #1a1140;
+  border-color: var(--pl-ink);
 }
 
 .welcome[data-world-style="plastic"] .welcome__footer {
-  border-top: 2px dashed rgba(26, 17, 64, 0.3);
-  color: #1a1140;
+  border-top: 2px dashed rgba(var(--pl-ink-rgb), 0.3);
+  color: var(--pl-ink);
   text-transform: none;
   letter-spacing: 0.5px;
 }
 
 .welcome[data-world-style="plastic"] .welcome__github-link {
-  color: #1a1140;
+  color: var(--pl-ink);
 }
 
 .welcome[data-world-style="plastic"] .welcome__github-link:hover {
-  color: #ff3b8d;
+  color: var(--pl-pink);
 }
 
 /* ── Cuphead theme: welcome-specific decoration (tokens live in App.vue) ── */
 .welcome[data-world-style="cuphead"] .welcome__card {
-  border: 4px double #2a2420;
+  border: 4px double var(--ck-ink);
   padding: 26px 30px;
   font-family: var(--font-body);
   color: var(--hud-text);
 }
 
 .welcome[data-world-style="cuphead"] .welcome__title {
-  color: #a0523c;
-  text-shadow: 3px 3px 0 #2a2420, 6px 6px 0 #c4a035;
+  color: var(--ck-rust);
+  text-shadow: 3px 3px 0 var(--ck-ink), 6px 6px 0 var(--ck-gold);
   letter-spacing: 1px;
   font-weight: 700;
   text-transform: none;
@@ -392,7 +423,7 @@ onMounted(() => {
 }
 
 .welcome[data-world-style="cuphead"] .welcome__layer-heading {
-  color: #2a2420;
+  color: var(--ck-ink);
   letter-spacing: 0.5px;
   text-transform: none;
   font-weight: 700;
@@ -400,51 +431,51 @@ onMounted(() => {
 }
 
 .welcome[data-world-style="cuphead"] .welcome__layer-action {
-  background: #c4a035;
-  border: 2px solid #2a2420;
-  color: #2a2420;
-  box-shadow: 2px 2px 0 #2a2420;
+  background: var(--ck-gold);
+  border: 2px solid var(--ck-ink);
+  color: var(--ck-ink);
+  box-shadow: 2px 2px 0 var(--ck-ink);
   transition: transform 0.1s, box-shadow 0.1s;
 }
 
 .welcome[data-world-style="cuphead"] .welcome__layer-action:hover {
-  background: #a0523c;
-  color: #f0e4cc;
+  background: var(--ck-rust);
+  color: var(--ck-paper-hi);
   transform: translate(1px, 1px);
-  box-shadow: 1px 1px 0 #2a2420;
+  box-shadow: 1px 1px 0 var(--ck-ink);
 }
 
 .welcome[data-world-style="cuphead"] .welcome__top-btn {
-  background: #6b7f3b;
-  border: 2px solid #2a2420;
-  color: #f0e4cc;
-  box-shadow: 2px 2px 0 #2a2420;
+  background: var(--ck-olive);
+  border: 2px solid var(--ck-ink);
+  color: var(--ck-paper-hi);
+  box-shadow: 2px 2px 0 var(--ck-ink);
 }
 
 .welcome[data-world-style="cuphead"] .welcome__top-btn:hover {
-  background: #a0523c;
-  color: #f0e4cc;
-  border-color: #2a2420;
+  background: var(--ck-rust);
+  color: var(--ck-paper-hi);
+  border-color: var(--ck-ink);
 }
 
 .welcome[data-world-style="cuphead"] .welcome__footer {
-  border-top: 2px solid #2a2420;
-  color: #4a3a2a;
+  border-top: 2px solid var(--ck-ink);
+  color: var(--ck-ink-soft);
   text-transform: none;
   letter-spacing: 0.5px;
   font-size: 14px;
 }
 
 .welcome[data-world-style="cuphead"] .welcome__github-link {
-  color: #4a3a2a;
+  color: var(--ck-ink-soft);
 }
 
 .welcome[data-world-style="cuphead"] .welcome__github-link:hover {
-  color: #a0523c;
+  color: var(--ck-rust);
 }
 
 .welcome[data-world-style="cuphead"] .welcome__heart {
-  color: #a0523c;
+  color: var(--ck-rust);
 }
 </style>
 
@@ -453,12 +484,12 @@ onMounted(() => {
 
 /* Soften the dark page gradient for cuphead so the paper card stands out. */
 .welcome[data-world-style="cuphead"] {
-  background: radial-gradient(ellipse at center, #2a2418 0%, #100c08 70%) !important;
+  background: radial-gradient(ellipse at center, var(--ck-page-hi) 0%, var(--ck-page-lo) 70%) !important;
 }
 
 /* Plastic: brighter playful page gradient. */
 .welcome[data-world-style="plastic"] {
-  background: radial-gradient(ellipse at center, #261a55 0%, #0a081a 70%) !important;
+  background: radial-gradient(ellipse at center, var(--pl-page-hi) 0%, var(--pl-page-lo) 70%) !important;
 }
 
 /* Buttons inside Element Plus pick up the plastic / cuphead vibe via tokens.
@@ -466,29 +497,29 @@ onMounted(() => {
 
 /* Start ride button — plastic: candy gradient */
 .welcome[data-world-style="plastic"] .start-bar .el-button--success {
-  background: linear-gradient(180deg, #76ff03 0%, #00c853 100%) !important;
+  background: linear-gradient(180deg, var(--pl-green) 0%, var(--pl-green-deep) 100%) !important;
   color: #ffffff !important;
-  border: 2px solid #1a1140 !important;
+  border: 2px solid var(--pl-ink) !important;
   border-radius: 16px !important;
   font-family: 'Fredoka', 'Noto Sans TC', sans-serif !important;
   font-weight: 700 !important;
   letter-spacing: 1px !important;
   text-shadow: 1px 1px 0 rgba(0,0,0,0.25) !important;
-  box-shadow: 0 4px 0 #1a1140, 0 8px 16px rgba(118, 255, 3, 0.45) !important;
+  box-shadow: 0 4px 0 var(--pl-ink), 0 8px 16px rgba(var(--pl-green-rgb), 0.45) !important;
   animation: none !important;
   transition: transform 0.1s, box-shadow 0.1s !important;
 }
 
 .welcome[data-world-style="plastic"] .start-bar .el-button--success:hover {
   transform: translateY(-2px);
-  box-shadow: 0 6px 0 #1a1140, 0 12px 20px rgba(118, 255, 3, 0.55) !important;
+  box-shadow: 0 6px 0 var(--pl-ink), 0 12px 20px rgba(var(--pl-green-rgb), 0.55) !important;
 }
 
 /* Start ride button — cuphead: solid mustard brick with sketchy lettering */
 .welcome[data-world-style="cuphead"] .start-bar .el-button--success {
-  background: #c4a035 !important;
-  color: #2a2420 !important;
-  border: 3px solid #2a2420 !important;
+  background: var(--ck-gold) !important;
+  color: var(--ck-ink) !important;
+  border: 3px solid var(--ck-ink) !important;
   border-radius: 0 !important;
   font-family: 'Cabin Sketch', 'Noto Sans TC', cursive !important;
   font-weight: 700 !important;
@@ -496,49 +527,49 @@ onMounted(() => {
   text-transform: none !important;
   font-size: 18px !important;
   text-shadow: none !important;
-  box-shadow: 4px 4px 0 #2a2420 !important;
+  box-shadow: 4px 4px 0 var(--ck-ink) !important;
   animation: none !important;
   transition: transform 0.1s, box-shadow 0.1s !important;
 }
 
 .welcome[data-world-style="cuphead"] .start-bar .el-button--success:hover {
-  background: #a0523c !important;
-  color: #f0e4cc !important;
+  background: var(--ck-rust) !important;
+  color: var(--ck-paper-hi) !important;
   transform: translate(2px, 2px);
-  box-shadow: 2px 2px 0 #2a2420 !important;
+  box-shadow: 2px 2px 0 var(--ck-ink) !important;
 }
 
 .welcome[data-world-style="plastic"] .route-card {
   border-radius: 14px;
-  border: 2px solid #1a1140;
-  background: linear-gradient(180deg, #ffffff 0%, #ffe5f1 100%);
+  border: 2px solid var(--pl-ink);
+  background: linear-gradient(180deg, #ffffff 0%, var(--pl-paper) 100%);
 }
 
 .welcome[data-world-style="plastic"] .route-card .route-card__name {
-  color: #1a1140;
+  color: var(--pl-ink);
 }
 
 .welcome[data-world-style="plastic"] .route-card--selected {
-  background: linear-gradient(180deg, #b9f6ca 0%, #76ff03 100%);
-  border-color: #1a1140;
+  background: linear-gradient(180deg, var(--pl-mint) 0%, var(--pl-green) 100%);
+  border-color: var(--pl-ink);
   filter: none;
-  box-shadow: 0 4px 0 #1a1140;
+  box-shadow: 0 4px 0 var(--pl-ink);
 }
 
 .welcome[data-world-style="cuphead"] .route-card {
   border-radius: 0;
-  border: 2px solid #2a2420;
+  border: 2px solid var(--ck-ink);
   background: rgba(255, 250, 235, 0.55);
 }
 
 .welcome[data-world-style="cuphead"] .route-card--selected {
-  background: #c4a035;
-  border-color: #2a2420;
+  background: var(--ck-gold);
+  border-color: var(--ck-ink);
   filter: none;
-  box-shadow: 3px 3px 0 #2a2420;
+  box-shadow: 3px 3px 0 var(--ck-ink);
 }
 
 .welcome[data-world-style="cuphead"] .route-card .route-card__name {
-  color: #2a2420;
+  color: var(--ck-ink);
 }
 </style>

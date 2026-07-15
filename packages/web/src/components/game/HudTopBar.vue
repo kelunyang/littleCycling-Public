@@ -9,25 +9,8 @@
         @click="emit('togglePin', 'hr')"
       >
         <font-awesome-icon icon="heart" class="hud-metric__icon" :style="{ color: zoneColor }" />
-        <div class="hud-metric__values">
-          <span class="hud-metric__minmax hud-metric__minmax--max">MAX {{ hrMax || '--' }}</span>
-          <span class="hud-metric__value">{{ hr ?? '--' }}</span>
-          <span class="hud-metric__minmax hud-metric__minmax--min">MIN {{ hrMin ?? '--' }}</span>
-        </div>
+        <span class="hud-metric__value">{{ hr ?? '--' }}</span>
         <span class="hud-metric__unit">BPM</span>
-        <div v-if="hr != null" class="hud-zone-bar">
-          <font-awesome-icon
-            v-for="z in 5"
-            :key="z"
-            icon="heart-pulse"
-            class="hud-zone-bar__icon"
-            :class="{ 'hud-zone-bar__icon--active': currentZone?.zone === z }"
-            :style="{ color: ZONE_COLORS[z - 1] }"
-          />
-          <span v-if="currentZone" class="hud-zone-bar__label">
-            Z{{ currentZone.zone }} {{ currentZone.name.toUpperCase() }}
-          </span>
-        </div>
       </div>
 
       <div
@@ -37,11 +20,7 @@
         @click="emit('togglePin', 'speed')"
       >
         <font-awesome-icon icon="gauge" class="hud-metric__icon" />
-        <div class="hud-metric__values">
-          <span class="hud-metric__minmax hud-metric__minmax--max">MAX {{ speedMax > 0 ? speedMax.toFixed(1) : '--' }}</span>
-          <span class="hud-metric__value">{{ speed ?? '--' }}</span>
-          <span class="hud-metric__minmax hud-metric__minmax--min">MIN {{ speedMin != null ? speedMin.toFixed(1) : '--' }}</span>
-        </div>
+        <span class="hud-metric__value">{{ speed ?? '--' }}</span>
         <span class="hud-metric__unit">KM/H</span>
       </div>
 
@@ -52,11 +31,7 @@
         @click="emit('togglePin', 'cadence')"
       >
         <font-awesome-icon icon="rotate" class="hud-metric__icon" />
-        <div class="hud-metric__values">
-          <span class="hud-metric__minmax hud-metric__minmax--max">MAX {{ cadenceMax ? Math.round(cadenceMax) : '--' }}</span>
-          <span class="hud-metric__value">{{ cadence ?? '--' }}</span>
-          <span class="hud-metric__minmax hud-metric__minmax--min">MIN {{ cadenceMin != null ? Math.round(cadenceMin) : '--' }}</span>
-        </div>
+        <span class="hud-metric__value">{{ cadence ?? '--' }}</span>
         <span class="hud-metric__unit">RPM</span>
       </div>
 
@@ -67,81 +42,49 @@
         @click="emit('togglePin', 'power')"
       >
         <font-awesome-icon icon="bolt" class="hud-metric__icon" />
-        <div class="hud-metric__values">
-          <span class="hud-metric__minmax hud-metric__minmax--max">MAX {{ powerMax ? Math.round(powerMax) : '--' }}</span>
-          <span class="hud-metric__value">{{ power ?? '--' }}</span>
-          <span class="hud-metric__minmax hud-metric__minmax--min">MIN {{ powerMin != null ? Math.round(powerMin) : '--' }}</span>
-        </div>
+        <span class="hud-metric__value">{{ power ?? '--' }}</span>
         <span class="hud-metric__unit">W</span>
       </div>
 
       <div v-else-if="id === 'leftPower'" class="hud-metric">
         <font-awesome-icon icon="arrow-left" class="hud-metric__icon" />
-        <div class="hud-metric__values">
-          <span class="hud-metric__minmax hud-metric__minmax--max">MAX --</span>
-          <span class="hud-metric__value">{{ leftPower ?? '--' }}</span>
-          <span class="hud-metric__minmax hud-metric__minmax--min">MIN --</span>
-        </div>
+        <span class="hud-metric__value">{{ leftPower ?? '--' }}</span>
         <span class="hud-metric__unit">W L</span>
       </div>
 
       <div v-else-if="id === 'rightPower'" class="hud-metric">
         <font-awesome-icon icon="arrow-right" class="hud-metric__icon" />
-        <div class="hud-metric__values">
-          <span class="hud-metric__minmax hud-metric__minmax--max">MAX --</span>
-          <span class="hud-metric__value">{{ rightPower ?? '--' }}</span>
-          <span class="hud-metric__minmax hud-metric__minmax--min">MIN --</span>
-        </div>
+        <span class="hud-metric__value">{{ rightPower ?? '--' }}</span>
         <span class="hud-metric__unit">W R</span>
       </div>
 
       <div v-else-if="id === 'balance'" class="hud-metric">
         <font-awesome-icon icon="scale-balanced" class="hud-metric__icon" />
-        <div class="hud-metric__values">
-          <span class="hud-metric__minmax hud-metric__minmax--max">MAX --</span>
-          <span class="hud-metric__value">{{ balance ?? '--' }}</span>
-          <span class="hud-metric__minmax hud-metric__minmax--min">MIN --</span>
-        </div>
+        <span class="hud-metric__value">{{ balance ?? '--' }}</span>
         <span class="hud-metric__unit">L/R %</span>
       </div>
 
       <div v-else-if="id === 'pwrCadence'" class="hud-metric">
         <font-awesome-icon icon="rotate" class="hud-metric__icon" />
-        <div class="hud-metric__values">
-          <span class="hud-metric__minmax hud-metric__minmax--max">MAX --</span>
-          <span class="hud-metric__value">{{ pwrCadence ?? '--' }}</span>
-          <span class="hud-metric__minmax hud-metric__minmax--min">MIN --</span>
-        </div>
+        <span class="hud-metric__value">{{ pwrCadence ?? '--' }}</span>
         <span class="hud-metric__unit">PM RPM</span>
       </div>
 
       <div v-else-if="id === 'fps'" class="hud-metric hud-metric--debug">
         <font-awesome-icon icon="gauge" class="hud-metric__icon" />
-        <div class="hud-metric__values">
-          <span class="hud-metric__minmax hud-metric__minmax--max">MAX {{ fpsMax || '--' }}</span>
-          <span class="hud-metric__value">{{ fps }}</span>
-          <span class="hud-metric__minmax hud-metric__minmax--min">MIN {{ fpsMin ?? '--' }}</span>
-        </div>
+        <span class="hud-metric__value">{{ fps }}</span>
         <span class="hud-metric__unit">FPS</span>
       </div>
 
       <div v-else-if="id === 'pitch'" class="hud-metric hud-metric--debug">
         <font-awesome-icon icon="arrow-trend-up" class="hud-metric__icon" />
-        <div class="hud-metric__values">
-          <span class="hud-metric__minmax hud-metric__minmax--max">MAX --</span>
-          <span class="hud-metric__value">{{ props.cameraPitch.toFixed(1) }}</span>
-          <span class="hud-metric__minmax hud-metric__minmax--min">MIN --</span>
-        </div>
+        <span class="hud-metric__value">{{ props.cameraPitch.toFixed(1) }}</span>
         <span class="hud-metric__unit">PITCH</span>
       </div>
 
       <div v-else-if="id === 'cameraHeight'" class="hud-metric hud-metric--debug">
         <font-awesome-icon icon="mountain" class="hud-metric__icon" />
-        <div class="hud-metric__values">
-          <span class="hud-metric__minmax hud-metric__minmax--max">MAX --</span>
-          <span class="hud-metric__value">{{ props.cameraHeight.toFixed(1) }}</span>
-          <span class="hud-metric__minmax hud-metric__minmax--min">MIN --</span>
-        </div>
+        <span class="hud-metric__value">{{ props.cameraHeight.toFixed(1) }}</span>
         <span class="hud-metric__unit">CAM H</span>
       </div>
     </template>
@@ -250,7 +193,7 @@ const zoneColor = computed(() => {
 <style scoped>
 .hud-top {
   display: flex;
-  gap: 6px;
+  gap: 20px;
   pointer-events: auto;
   position: relative;
   flex-wrap: wrap;
@@ -258,83 +201,63 @@ const zoneColor = computed(() => {
   align-items: center;
 }
 
+/* Borderless, background-free overlay: the top HUD reads as glowing/embossed
+   text floating over the world, keeping it distinct from the boxed bottom info
+   panels. Only a little vertical padding remains for the pin click target. */
 .hud-metric {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  background: var(--hud-bg);
-  clip-path: var(--clip-panel-sm);
-  border: 1.5px solid var(--hud-border);
+  gap: 8px;
+  padding: 2px 2px 4px;
   cursor: pointer;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  transition: filter 0.2s, opacity 0.2s;
   position: relative;
 }
 
-.hud-metric::before {
+/* Pinned state: no box border — a short accent underline bar + brighter text. */
+.hud-metric--active::after {
   content: '';
   position: absolute;
-  inset: 0;
-  clip-path: var(--clip-panel-sm);
-  border: 1.5px solid var(--hud-border);
-  pointer-events: none;
+  left: 2px;
+  right: 2px;
+  bottom: 0;
+  height: 2px;
+  background: #00e5ff;
+  box-shadow: 0 0 6px rgba(0, 229, 255, 0.8);
 }
 
-.hud-metric:hover {
-  border-color: var(--hud-border-bright);
-}
+.hud-metric:hover { filter: brightness(1.15); }
 
-.hud-metric--active {
-  border-color: var(--hud-cyan);
-  box-shadow: var(--hud-glow-cyan);
-}
-
+/* ── 3D (default): neon glow, hardcoded cyberpunk cyan so the overlay stays
+      "fluorescent" regardless of the world-style palette. ── */
 .hud-metric__icon {
-  font-size: 12px;
-  color: var(--hud-cyan);
-  filter: drop-shadow(0 0 3px currentColor);
+  font-size: 20px;
+  color: #00e5ff;
+  filter: drop-shadow(0 0 5px rgba(0, 229, 255, 0.8));
 }
 
 .hud-metric__value {
   font-family: var(--font-display);
-  font-size: 18px;
+  font-size: 30px;
   font-weight: 700;
-  color: var(--hud-text-bright);
-  text-shadow: 0 0 8px rgba(var(--accent-rgb), 0.4);
+  color: #eafcff;
+  text-shadow: 0 0 8px rgba(0, 229, 255, 0.8), 0 0 22px rgba(0, 229, 255, 0.45);
   font-variant-numeric: tabular-nums;
-  min-width: 36px;
+  min-width: 52px;
   text-align: right;
   letter-spacing: 0.5px;
   line-height: 1;
 }
 
-.hud-metric__values {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-}
-
-.hud-metric__minmax {
-  font-family: var(--font-body);
-  font-size: 9px;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-  letter-spacing: 0.5px;
-  color: var(--hud-cyan);
-}
-
-.hud-metric__minmax--max { color: var(--hud-text-bright); opacity: 0.7; }
-.hud-metric__minmax--min { color: var(--hud-cyan); opacity: 0.5; }
-
 .hud-metric__unit {
   font-family: var(--font-body);
-  font-size: 10px;
-  font-weight: 500;
-  color: var(--hud-cyan);
-  opacity: 0.6;
+  font-size: 14px;
+  font-weight: 600;
+  color: #00e5ff;
+  opacity: 0.75;
   text-transform: uppercase;
   letter-spacing: 1px;
+  text-shadow: 0 0 6px rgba(0, 229, 255, 0.5);
 }
 
 .hud-metric--debug {
@@ -342,39 +265,49 @@ const zoneColor = computed(() => {
   cursor: default;
 }
 
-/* ── HR Zone indicator bar ── */
-
-.hud-metric--hr {
-  flex-wrap: wrap;
+/* ── 2D (Phaser world): embossed text. Like the coins, the whole metric shares
+      ONE vivid colour across icon + value + unit, so it reads clearly on the
+      flat hand-drawn / plastic world. A highlight/shadow ring around each glyph
+      lifts it off the background. Colour is set per world-style below. ── */
+.game-view[data-hud-mode="2d"] .hud-metric__value,
+.game-view[data-hud-mode="2d"] .hud-metric__unit {
+  text-shadow:
+    -1px -1px 0 rgba(255, 255, 255, 0.7),
+    1px -1px 0 rgba(255, 255, 255, 0.4),
+    -1px 1px 0 rgba(0, 0, 0, 0.3),
+    1px 1px 0 rgba(0, 0, 0, 0.5),
+    0 2px 3px rgba(0, 0, 0, 0.4);
 }
 
-.hud-zone-bar {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  width: 100%;
-  margin-top: 2px;
+.game-view[data-hud-mode="2d"] .hud-metric__icon {
+  filter:
+    drop-shadow(-1px -1px 0 rgba(255, 255, 255, 0.6))
+    drop-shadow(1px 1px 1px rgba(0, 0, 0, 0.45));
 }
 
-.hud-zone-bar__icon {
-  font-size: 8px;
-  opacity: 0.2;
-  transition: opacity 0.3s, filter 0.3s;
+.game-view[data-hud-mode="2d"] .hud-metric--active::after {
+  box-shadow: 1px 1px 0 rgba(0, 0, 0, 0.35);
 }
 
-.hud-zone-bar__icon--active {
-  opacity: 1;
-  filter: drop-shadow(0 0 4px currentColor);
+/* Plastic: the theme accent (hot pink) is already vivid. */
+.game-view[data-world-style="plastic"][data-hud-mode="2d"] .hud-metric__value,
+.game-view[data-world-style="plastic"][data-hud-mode="2d"] .hud-metric__unit,
+.game-view[data-world-style="plastic"][data-hud-mode="2d"] .hud-metric__icon {
+  color: var(--hud-cyan);
+}
+.game-view[data-world-style="plastic"][data-hud-mode="2d"] .hud-metric--active::after {
+  background: var(--hud-cyan);
 }
 
-.hud-zone-bar__label {
-  font-family: var(--font-display);
-  font-size: 8px;
-  font-weight: 600;
-  color: var(--hud-text);
-  opacity: 0.6;
-  letter-spacing: 0.5px;
-  margin-left: 2px;
+/* Cuphead: the token accent (olive) is too muted here — use a vivid ink red so
+   the metrics pop as hard as the mustard-yellow coins do. */
+.game-view[data-world-style="cuphead"][data-hud-mode="2d"] .hud-metric__value,
+.game-view[data-world-style="cuphead"][data-hud-mode="2d"] .hud-metric__unit,
+.game-view[data-world-style="cuphead"][data-hud-mode="2d"] .hud-metric__icon {
+  color: #d83a2b;
+}
+.game-view[data-world-style="cuphead"][data-hud-mode="2d"] .hud-metric--active::after {
+  background: #d83a2b;
 }
 
 /* ── Customize button ── */
@@ -383,22 +316,29 @@ const zoneColor = computed(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  background: var(--hud-bg);
-  color: var(--hud-cyan);
-  border: 1.5px solid var(--hud-border);
-  clip-path: var(--clip-panel-sm);
+  width: 28px;
+  height: 28px;
+  background: none;
+  color: #00e5ff;
+  border: none;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 18px;
   align-self: center;
-  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+  opacity: 0.7;
+  filter: drop-shadow(0 0 5px rgba(0, 229, 255, 0.7));
+  transition: opacity 0.2s, transform 0.2s;
 }
 
 .hud-customize-btn:hover,
 .hud-customize-btn--open {
-  border-color: var(--hud-cyan);
-  box-shadow: var(--hud-glow-cyan);
-  background: rgba(var(--accent-rgb), 0.12);
+  opacity: 1;
+  transform: rotate(30deg);
+}
+
+.game-view[data-hud-mode="2d"] .hud-customize-btn {
+  color: var(--hud-cyan);
+  filter:
+    drop-shadow(-1px -1px 0 rgba(255, 255, 255, 0.5))
+    drop-shadow(1px 1px 1px rgba(0, 0, 0, 0.4));
 }
 </style>

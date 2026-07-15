@@ -13,17 +13,21 @@
 import * as THREE from 'three';
 import type { RoutePoint } from '@littlecycling/shared';
 import type { ElevationSampler } from './elevation-sampler';
-import { terrainVertexColor, createTerrainToonMaterial } from './cartoon-materials';
+import type { TerrainStyleStrategy } from './terrain-style-strategy';
+import {
+  buildQuantizedCorridorGeometry,
+  quantizedDataToGeometry,
+} from './quantized-terrain';
 import { computeSmoothedBearing } from '../route-geometry';
 
 /** Default half-width of the corridor in meters. */
 const DEFAULT_CORRIDOR_HALF_WIDTH = 500;
 
-/** Number of cross-section sample points (across the corridor). */
-const CROSS_SAMPLES = 21;
-
-/** Approximate spacing between cross-sections along the route (meters). */
-const ALONG_SPACING = 30;
+/** Clamp the cross-column count (across the corridor) for perf/stitching. */
+const MIN_CROSS = 5;
+const MAX_CROSS = 81;
+/** Clamp the along-route section count. */
+const MAX_SECTIONS = 240;
 
 
 export interface ChunkBuildInput {
@@ -45,12 +49,15 @@ export interface ChunkBuildInput {
 
 /** Vertex data for one cross-section edge, used to stitch chunks seamlessly. */
 export interface ChunkEdgeData {
-  /** Flat array of xyz positions (length = CROSS_SAMPLES * 3). */
+  /** Flat array of xyz positions (length = crossCount * 3). */
   positions: number[];
-  /** Flat array of rgb colors (length = CROSS_SAMPLES * 3). */
+  /** Flat array of rgb colors (length = crossCount * 3). */
   colors: number[];
-  /** Geographic coords for each vertex in the edge (length = CROSS_SAMPLES). */
+  /** Geographic coords for each vertex in the edge (length = crossCount). */
   geoCoords: { lat: number; lon: number }[];
+  /** ABSOLUTE elevation per edge vertex (length = crossCount). Used by the
+   *  quantised builder so the shared edge snaps to the same layer either side. */
+  eles: number[];
 }
 
 export interface TerrainChunkResult {
@@ -79,41 +86,73 @@ export async function buildTerrainChunk(
   originLat: number,
   originLon: number,
   originEle: number,
+  strategy: TerrainStyleStrategy,
 ): Promise<TerrainChunkResult> {
   const { points, startIdx, endIdx, chunkIndex } = input;
   const corridorHalfWidth = input.corridorHalfWidth ?? DEFAULT_CORRIDOR_HALF_WIDTH;
   const segPoints = points.slice(startIdx, endIdx + 1);
+  const params = strategy.params;
 
-  // Sample cross-sections along the route segment
+  // Grid resolution driven by the style's gridSize (world-aligned cell size).
+  const gridSize = Math.max(4, params.gridSize);
+  let crossCount = Math.round((corridorHalfWidth * 2) / gridSize) + 1;
+  crossCount = Math.max(MIN_CROSS, Math.min(MAX_CROSS, crossCount));
+  if (crossCount % 2 === 0) crossCount += 1; // keep a center column for the GPX blend
+  const centerCol = Math.floor(crossCount / 2);
+
   const segLength =
     input.cumulativeDistances[endIdx] - input.cumulativeDistances[startIdx];
-  const numSections = Math.max(2, Math.round(segLength / ALONG_SPACING) + 1);
+  let numSections = Math.max(2, Math.round(segLength / gridSize) + 1);
+  numSections = Math.min(numSections, MAX_SECTIONS);
 
-  // Build cross-section sample points
-  const positions: number[] = [];
-  const colors: number[] = [];
-  const indices: number[] = [];
-  // Track geographic coordinates for UV mapping
+  // Sampled corridor grid (row-major over sections × cross columns).
+  const gx: number[] = [];
+  const gz: number[] = [];
+  const gele: number[] = [];       // ABSOLUTE elevation
+  const gcol: number[] = [];       // rgb per vertex
   const geoCoords: { lat: number; lon: number }[] = [];
 
   const cosOrigin = Math.cos((originLat * Math.PI) / 180);
 
-  const { prevEdge } = input;
+  // Prefetch every DEM tile covering this corridor up front, so the per-vertex
+  // sampling loop below can read elevations synchronously (getElevationSync)
+  // instead of awaiting a microtask per vertex (~10k awaits/chunk). One await
+  // here replaces thousands and keeps the main thread from thrashing mid-build.
+  {
+    let bs = Infinity, bn = -Infinity, bw = Infinity, be = -Infinity;
+    for (const p of segPoints) {
+      if (p.lat < bs) bs = p.lat;
+      if (p.lat > bn) bn = p.lat;
+      if (p.lon < bw) bw = p.lon;
+      if (p.lon > be) be = p.lon;
+    }
+    const latPad = (corridorHalfWidth + gridSize) / 111320;
+    const lonPad = latPad / Math.max(0.1, cosOrigin);
+    try {
+      await sampler.prefetchBounds({
+        south: bs - latPad, north: bn + latPad,
+        west: bw - lonPad, east: be + lonPad,
+      });
+    } catch {
+      // Offline / tile fetch failed — sync sampling falls back to GPX per vertex.
+    }
+  }
+
+  // Only reuse the previous edge if its width matches (else the grid resolution
+  // changed — e.g. a live gridSize tweak — and we sample a fresh edge).
+  const prevEdge =
+    input.prevEdge && input.prevEdge.geoCoords.length === crossCount
+      ? input.prevEdge
+      : undefined;
 
   for (let s = 0; s < numSections; s++) {
-    // First section: use previous chunk's last edge if available (seamless join)
+    // First section: reuse previous chunk's last edge for a seamless join.
     if (s === 0 && prevEdge) {
-      for (let c = 0; c < CROSS_SAMPLES; c++) {
-        positions.push(
-          prevEdge.positions[c * 3],
-          prevEdge.positions[c * 3 + 1],
-          prevEdge.positions[c * 3 + 2],
-        );
-        colors.push(
-          prevEdge.colors[c * 3],
-          prevEdge.colors[c * 3 + 1],
-          prevEdge.colors[c * 3 + 2],
-        );
+      for (let c = 0; c < crossCount; c++) {
+        gx.push(prevEdge.positions[c * 3]);
+        gz.push(prevEdge.positions[c * 3 + 2]);
+        gele.push(prevEdge.eles[c]);
+        gcol.push(prevEdge.colors[c * 3], prevEdge.colors[c * 3 + 1], prevEdge.colors[c * 3 + 2]);
         geoCoords.push(prevEdge.geoCoords[c]);
       }
       continue;
@@ -124,8 +163,7 @@ export async function buildTerrainChunk(
       Math.floor(t * (segPoints.length - 1)),
       segPoints.length - 2,
     );
-    const localT =
-      t * (segPoints.length - 1) - ptIdx;
+    const localT = t * (segPoints.length - 1) - ptIdx;
 
     // Interpolate position on route
     const a = segPoints[ptIdx];
@@ -138,24 +176,20 @@ export async function buildTerrainChunk(
     const bearing = computeSmoothedBearing(points, input.cumulativeDistances, absDistance);
     const perpRad = ((bearing + 90) * Math.PI) / 180;
 
-    for (let c = 0; c < CROSS_SAMPLES; c++) {
-      const offset =
-        ((c / (CROSS_SAMPLES - 1)) * 2 - 1) * corridorHalfWidth;
+    for (let c = 0; c < crossCount; c++) {
+      const offset = ((c / (crossCount - 1)) * 2 - 1) * corridorHalfWidth;
 
       // Offset point perpendicular to route
       const sampleLat = lat + (offset * Math.cos(perpRad)) / 111320;
       const sampleLon = lon + (offset * Math.sin(perpRad)) / (111320 * cosOrigin);
 
-      // Get elevation from DEM
-      let ele: number;
-      try {
-        ele = await sampler.getElevation(sampleLat, sampleLon);
-      } catch {
-        ele = a.ele + (b.ele - a.ele) * localT; // fallback to GPX
-      }
+      // Get elevation from DEM (synchronous — tiles were prefetched above).
+      // Null (uncached tile / fetch failure) falls back to GPX interpolation.
+      const sampled = sampler.getElevationSync(sampleLat, sampleLon);
+      let ele = sampled !== null ? sampled : a.ele + (b.ele - a.ele) * localT;
 
       // For the center column, blend with GPX elevation to prevent ball floating/sinking
-      if (c === Math.floor(CROSS_SAMPLES / 2)) {
+      if (c === centerCol) {
         const gpxEle = a.ele + (b.ele - a.ele) * localT;
         ele = ele * 0.5 + gpxEle * 0.5;
       }
@@ -163,53 +197,77 @@ export async function buildTerrainChunk(
       // Convert to scene coordinates (meters from origin)
       const x = (sampleLon - originLon) * 111320 * cosOrigin;
       const z = -(sampleLat - originLat) * 111320; // negate: +lat = north = -z in Three.js
-      const y = ele - originEle;
 
-      positions.push(x, y, z);
+      gx.push(x);
+      gz.push(z);
+      gele.push(ele);
       geoCoords.push({ lat: sampleLat, lon: sampleLon });
 
-      // Neon/graffiti procedural vertex color with noise variation
-      const color = terrainVertexColor(ele, x, z);
-      colors.push(color.r, color.g, color.b);
+      // Procedural vertex color from the active style (same-zone-same-colour).
+      const color = strategy.terrainVertexColor(ele, x, z);
+      gcol.push(color.r, color.g, color.b);
     }
   }
 
-  // Capture last section edge data for next chunk stitching
-  const lastEdgeStart = (numSections - 1) * CROSS_SAMPLES;
+  // Capture last section edge data for next chunk stitching (absolute eles too).
+  const lastEdgeStart = (numSections - 1) * crossCount;
+  const edgePositions: number[] = [];
+  for (let c = 0; c < crossCount; c++) {
+    const gi = lastEdgeStart + c;
+    edgePositions.push(gx[gi], gele[gi] - originEle, gz[gi]);
+  }
   const lastEdge: ChunkEdgeData = {
-    positions: positions.slice(lastEdgeStart * 3, (lastEdgeStart + CROSS_SAMPLES) * 3),
-    colors: colors.slice(lastEdgeStart * 3, (lastEdgeStart + CROSS_SAMPLES) * 3),
-    geoCoords: geoCoords.slice(lastEdgeStart, lastEdgeStart + CROSS_SAMPLES),
+    positions: edgePositions,
+    colors: gcol.slice(lastEdgeStart * 3, (lastEdgeStart + crossCount) * 3),
+    geoCoords: geoCoords.slice(lastEdgeStart, lastEdgeStart + crossCount),
+    eles: gele.slice(lastEdgeStart, lastEdgeStart + crossCount),
   };
 
-  // Build triangle indices (grid topology)
-  for (let s = 0; s < numSections - 1; s++) {
-    for (let c = 0; c < CROSS_SAMPLES - 1; c++) {
-      const i0 = s * CROSS_SAMPLES + c;
-      const i1 = i0 + 1;
-      const i2 = i0 + CROSS_SAMPLES;
-      const i3 = i2 + 1;
-
-      indices.push(i0, i2, i1);
-      indices.push(i1, i2, i3);
+  // Build geometry — quantised blocks/sheets, or the smooth ramp fallback.
+  let geometry: THREE.BufferGeometry;
+  let material: THREE.Material | THREE.Material[];
+  if (params.quantEnabled) {
+    const data = buildQuantizedCorridorGeometry(
+      { gx, gz, gele, gcol, along: numSections, cross: crossCount },
+      strategy,
+      originEle,
+    );
+    geometry = quantizedDataToGeometry(data);
+    // Group 0 = printed top faces, group 1 = cut-edge walls. A style may give
+    // the walls their own material (paper → raw corrugated cardboard).
+    material = [
+      strategy.createTerrainMaterial(),
+      strategy.createTerrainWallMaterial?.() ?? strategy.createTerrainMaterial(),
+    ];
+  } else {
+    const positions: number[] = [];
+    const uvs: number[] = [];
+    for (let i = 0; i < gx.length; i++) {
+      positions.push(gx[i], gele[i] - originEle, gz[i]);
+      // World-plane UVs (raw metres) — same convention as the quantised tops.
+      uvs.push(gx[i], gz[i]);
     }
+    const indices: number[] = [];
+    for (let s = 0; s < numSections - 1; s++) {
+      for (let c = 0; c < crossCount - 1; c++) {
+        const i0 = s * crossCount + c;
+        const i1 = i0 + 1;
+        const i2 = i0 + crossCount;
+        const i3 = i2 + 1;
+        indices.push(i0, i2, i1);
+        indices.push(i1, i2, i3);
+      }
+    }
+    geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(gcol, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+    // Smooth ramp: single style material with procedural vertex colors.
+    material = strategy.createTerrainMaterial();
   }
 
-  // Build geometry
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute(
-    'position',
-    new THREE.Float32BufferAttribute(positions, 3),
-  );
-  geometry.setAttribute(
-    'color',
-    new THREE.Float32BufferAttribute(colors, 3),
-  );
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals();
-
-  // Toon material with procedural vertex colors (no raster tiles needed)
-  const material = createTerrainToonMaterial();
   const mesh = new THREE.Mesh(geometry, material);
 
   // Chunk center for reference

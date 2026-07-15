@@ -1,102 +1,133 @@
 /**
- * Landuse renderer: builds flat polygon meshes for water, parks, forests,
- * sand, and urban zones from MVT features.
+ * Landuse renderer: builds flat polygon meshes for the ground cover the map
+ * gives us — water, parks, forests, sand, urban zones, and (since the MVT survey
+ * showed we were downloading and dropping them) wetland, farmland, and pitches.
  * Overlaid on terrain with slight height offsets to prevent z-fighting.
  */
 
 import * as THREE from 'three';
 import type { ElevationSampler } from './elevation-sampler';
 import type { MVTFeature } from './mvt-fetcher';
-import {
-  createWaterToonMaterial,
-  createParkToonMaterial,
-  createForestToonMaterial,
-  createSandToonMaterial,
-  createUrbanToonMaterial,
-  urbanColorForClass,
-} from './cartoon-materials';
+import type { TerrainStyleStrategy } from './terrain-style-strategy';
 
-/** Height offsets above terrain to prevent z-fighting. */
+/** Height offsets above terrain to prevent z-fighting. Wetter/lower first. */
 const WATER_HEIGHT_OFFSET = 0.1;
+const WETLAND_HEIGHT_OFFSET = 0.09;
 const PARK_HEIGHT_OFFSET = 0.05;
 const FOREST_HEIGHT_OFFSET = 0.04;
+const SPORTS_HEIGHT_OFFSET = 0.035;
 const SAND_HEIGHT_OFFSET = 0.03;
+const FARMLAND_HEIGHT_OFFSET = 0.025;
 const URBAN_HEIGHT_OFFSET = 0.02;
 
-export interface LanduseRenderResult {
-  waterMesh: THREE.Mesh;
-  parkMesh: THREE.Mesh;
-  forestMesh: THREE.Mesh;
-  sandMesh: THREE.Mesh;
-  urbanMesh: THREE.Mesh;
-  waterCount: number;
-  parkCount: number;
-  forestCount: number;
-  sandCount: number;
-  urbanCount: number;
+/** One ground-cover kind: its features, the mesh built from them. */
+export interface LanduseLayer {
+  kind: string;
+  mesh: THREE.Mesh;
+  count: number;
 }
 
-/**
- * Build flat overlay meshes for water, park, forest, sand, and urban features.
- */
+export interface LanduseRenderResult {
+  /** Every overlay mesh, so callers never have to enumerate the kinds by hand. */
+  layers: LanduseLayer[];
+}
+
+/** All overlay meshes of a result — add/remove/shift/dispose iterate this. */
+export function landuseMeshes(result: LanduseRenderResult): THREE.Mesh[] {
+  return result.layers.map((l) => l.mesh);
+}
+
+/** Build flat overlay meshes for every ground-cover class we render. */
 export async function buildLanduseMeshes(
   features: MVTFeature[],
   sampler: ElevationSampler,
   originLat: number,
   originLon: number,
   originEle: number,
+  strategy: TerrainStyleStrategy,
 ): Promise<LanduseRenderResult> {
   const cosOrigin = Math.cos((originLat * Math.PI) / 180);
-
-  // Classify features into categories
-  const waterFeatures = features.filter((f) => f.layer === 'water');
-
-  const forestFeatures = features.filter(
-    (f) => f.layer === 'landcover' && isForestLandcover(f),
-  );
-
-  const parkFeatures = features.filter(
-    (f) => f.layer === 'park' || (f.layer === 'landcover' && isParkLandcover(f)),
-  );
-
-  const sandFeatures = features.filter(
-    (f) => f.layer === 'landcover' && f.properties.class === 'sand',
-  );
 
   const urbanFeatures = features.filter(
     (f) => f.layer === 'landuse' && isUrbanLanduse(f),
   );
 
-  // Build geometry groups in parallel
-  const [waterGeoms, forestGeoms, parkGeoms, sandGeoms, urbanGeoms] = await Promise.all([
-    buildGeometryGroup(waterFeatures, sampler, originLat, originLon, originEle, cosOrigin, WATER_HEIGHT_OFFSET),
-    buildGeometryGroup(forestFeatures, sampler, originLat, originLon, originEle, cosOrigin, FOREST_HEIGHT_OFFSET),
-    buildGeometryGroup(parkFeatures, sampler, originLat, originLon, originEle, cosOrigin, PARK_HEIGHT_OFFSET),
-    buildGeometryGroup(sandFeatures, sampler, originLat, originLon, originEle, cosOrigin, SAND_HEIGHT_OFFSET),
-    buildGeometryGroup(urbanFeatures, sampler, originLat, originLon, originEle, cosOrigin, URBAN_HEIGHT_OFFSET),
-  ]);
+  // One spec per ground cover: what to match, how high to float it, and the
+  // material. Adding a class means adding a row here — nothing else.
+  const specs: {
+    kind: string;
+    match: (f: MVTFeature) => boolean;
+    offset: number;
+    material: () => THREE.Material;
+  }[] = [
+    {
+      kind: 'water',
+      match: (f) => f.layer === 'water',
+      offset: WATER_HEIGHT_OFFSET,
+      material: () => strategy.createWaterMaterial(),
+    },
+    {
+      kind: 'wetland',
+      match: (f) => f.layer === 'landcover' && isWetlandLandcover(f),
+      offset: WETLAND_HEIGHT_OFFSET,
+      material: () => strategy.createWetlandMaterial(),
+    },
+    {
+      kind: 'forest',
+      match: (f) => f.layer === 'landcover' && isForestLandcover(f),
+      offset: FOREST_HEIGHT_OFFSET,
+      material: () => strategy.createForestMaterial(),
+    },
+    {
+      kind: 'park',
+      match: (f) => f.layer === 'park' || (f.layer === 'landcover' && isParkLandcover(f)),
+      offset: PARK_HEIGHT_OFFSET,
+      material: () => strategy.createParkMaterial(),
+    },
+    {
+      kind: 'sports',
+      match: (f) => f.layer === 'landuse' && isSportsLanduse(f),
+      offset: SPORTS_HEIGHT_OFFSET,
+      material: () => strategy.createSportsFieldMaterial(),
+    },
+    {
+      kind: 'sand',
+      match: (f) => f.layer === 'landcover' && f.properties.class === 'sand',
+      offset: SAND_HEIGHT_OFFSET,
+      material: () => strategy.createSandMaterial(),
+    },
+    {
+      kind: 'farmland',
+      match: (f) => f.layer === 'landcover' && isFarmlandLandcover(f),
+      offset: FARMLAND_HEIGHT_OFFSET,
+      material: () => strategy.createFarmlandMaterial(),
+    },
+    {
+      kind: 'urban',
+      match: (f) => f.layer === 'landuse' && isUrbanLanduse(f),
+      offset: URBAN_HEIGHT_OFFSET,
+      // Dominant class tints the whole zone (residential ≠ industrial).
+      material: () => strategy.createUrbanMaterial(getDominantUrbanColor(urbanFeatures, strategy)),
+    },
+  ];
 
-  // Determine dominant urban color (most frequent class)
-  const urbanColor = getDominantUrbanColor(urbanFeatures);
+  const matched = specs.map((s) => features.filter(s.match));
 
-  const waterMesh = createMeshFromGeoms(waterGeoms, createWaterToonMaterial());
-  const forestMesh = createMeshFromGeoms(forestGeoms, createForestToonMaterial());
-  const parkMesh = createMeshFromGeoms(parkGeoms, createParkToonMaterial());
-  const sandMesh = createMeshFromGeoms(sandGeoms, createSandToonMaterial());
-  const urbanMesh = createMeshFromGeoms(urbanGeoms, createUrbanToonMaterial(urbanColor));
+  const geomGroups = await Promise.all(
+    specs.map((s, i) =>
+      buildGeometryGroup(
+        matched[i], sampler, originLat, originLon, originEle, cosOrigin, s.offset, strategy,
+      ),
+    ),
+  );
 
-  return {
-    waterMesh,
-    parkMesh,
-    forestMesh,
-    sandMesh,
-    urbanMesh,
-    waterCount: waterFeatures.length,
-    parkCount: parkFeatures.length,
-    forestCount: forestFeatures.length,
-    sandCount: sandFeatures.length,
-    urbanCount: urbanFeatures.length,
-  };
+  const layers: LanduseLayer[] = specs.map((s, i) => ({
+    kind: s.kind,
+    mesh: createMeshFromGeoms(geomGroups[i], s.material()),
+    count: matched[i].length,
+  }));
+
+  return { layers };
 }
 
 // ── Feature classification ──
@@ -113,15 +144,43 @@ function isParkLandcover(feature: MVTFeature): boolean {
   return cls === 'grass' || cls === 'park';
 }
 
-/** Check if a landuse feature is urban. */
+/** Marsh/bog. */
+function isWetlandLandcover(feature: MVTFeature): boolean {
+  return feature.properties.class === 'wetland';
+}
+
+/** Fields — nurseries read as fields too. */
+function isFarmlandLandcover(feature: MVTFeature): boolean {
+  const cls = feature.properties.class;
+  return cls === 'farmland' || cls === 'plant_nursery';
+}
+
+/** Pitches, playgrounds, running tracks, stadiums — all get the court plate. */
+function isSportsLanduse(feature: MVTFeature): boolean {
+  const cls = feature.properties.class;
+  return cls === 'pitch' || cls === 'playground' || cls === 'track' || cls === 'stadium';
+}
+
+/**
+ * Urban ground. Institutional grounds (schools, hospitals, campuses) are folded
+ * in deliberately: they read as built-up land, and their buildings already come
+ * from the `building` layer — no separate art needed for the ground they sit on.
+ */
 function isUrbanLanduse(feature: MVTFeature): boolean {
   const cls = feature.properties.class;
-  return cls === 'residential' || cls === 'commercial' || cls === 'industrial' || cls === 'retail';
+  return (
+    cls === 'residential' || cls === 'commercial' || cls === 'industrial' || cls === 'retail' ||
+    cls === 'school' || cls === 'hospital' || cls === 'university' || cls === 'college' ||
+    cls === 'kindergarten' || cls === 'library' || cls === 'education'
+  );
 }
 
 /** Get the most common urban color from a set of urban features. */
-function getDominantUrbanColor(urbanFeatures: MVTFeature[]): number {
-  if (urbanFeatures.length === 0) return 0xb0bec5; // default residential gray
+function getDominantUrbanColor(
+  urbanFeatures: MVTFeature[],
+  strategy: TerrainStyleStrategy,
+): number {
+  if (urbanFeatures.length === 0) return strategy.urbanColor('residential');
   const counts: Record<string, number> = {};
   for (const f of urbanFeatures) {
     const cls = (f.properties.class as string) || 'residential';
@@ -132,7 +191,7 @@ function getDominantUrbanColor(urbanFeatures: MVTFeature[]): number {
   for (const [cls, count] of Object.entries(counts)) {
     if (count > maxCount) { dominant = cls; maxCount = count; }
   }
-  return urbanColorForClass(dominant);
+  return strategy.urbanColor(dominant);
 }
 
 // ── Geometry helpers ──
@@ -146,13 +205,14 @@ async function buildGeometryGroup(
   originEle: number,
   cosOrigin: number,
   heightOffset: number,
+  strategy: TerrainStyleStrategy,
 ): Promise<THREE.BufferGeometry[]> {
   const geometries: THREE.BufferGeometry[] = [];
   for (const feature of features) {
     const polys = extractPolygonCoords(feature);
     for (const coords of polys) {
       const geom = await buildFlatPolygon(
-        coords, sampler, originLat, originLon, originEle, cosOrigin, heightOffset,
+        coords, sampler, originLat, originLon, originEle, cosOrigin, heightOffset, strategy,
       );
       if (geom) geometries.push(geom);
     }
@@ -199,6 +259,7 @@ async function buildFlatPolygon(
   originEle: number,
   cosOrigin: number,
   heightOffset: number,
+  strategy: TerrainStyleStrategy,
 ): Promise<THREE.BufferGeometry | null> {
   if (coords.length < 3) return null;
 
@@ -235,7 +296,7 @@ async function buildFlatPolygon(
     baseEle = originEle;
   }
 
-  const y = baseEle - originEle + heightOffset;
+  const y = strategy.quantizeElevation(baseEle) - originEle + heightOffset;
 
   // ShapeGeometry produces geometry in XY plane, we need XZ
   // Rotate -90° around X to lay flat, then translate to correct height
@@ -299,11 +360,7 @@ function mergeGeometries(geometries: THREE.BufferGeometry[]): THREE.BufferGeomet
 
 /** Dispose all landuse mesh resources. */
 export function disposeLanduseMeshes(result: LanduseRenderResult): void {
-  const meshes = [
-    result.waterMesh, result.parkMesh, result.forestMesh,
-    result.sandMesh, result.urbanMesh,
-  ];
-  for (const mesh of meshes) {
+  for (const mesh of landuseMeshes(result)) {
     mesh.geometry.dispose();
     if (mesh.material instanceof THREE.Material) mesh.material.dispose();
   }

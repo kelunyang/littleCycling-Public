@@ -11,6 +11,8 @@ import { ref, watch, onUnmounted, type Ref, type ComputedRef } from 'vue';
 import {
   GAME_MESSAGE_TYPES,
   fillTemplate,
+  IDLE_SCOLD_MS,
+  IDLE_SCOLD_REPEAT_MS,
   type GameMessageType,
   type HrZone,
   type WorkoutSegment,
@@ -39,6 +41,8 @@ export interface GameMessagesDeps {
   maxPower: Ref<number>;
   isOnTarget: Ref<boolean>;
   weatherType: Ref<string>;
+  /** ms the rider has been not-pedalling (server-authoritative). 0 when pedalling/paused. */
+  idleMs: Ref<number>;
 }
 
 const MAX_QUEUE = 3;
@@ -180,6 +184,10 @@ export function useGameMessages(deps: GameMessagesDeps) {
   let onTargetStartMs: number | null = null;
   let zone1StartMs: number | null = null;
   let highHrStartMs: number | null = null;
+  // Idle scolding: the server-authoritative idleMs at which we last scolded, so
+  // we fire once at IDLE_SCOLD_MS then re-nag every IDLE_SCOLD_REPEAT_MS. Reset
+  // to null whenever the rider resumes (idleMs → 0).
+  let lastScoldIdleMs: number | null = null;
   let prevWeather: string | null = null;
   let lastDistanceMilestone = 0;
   let prevMaxSpeed = 0;
@@ -343,6 +351,22 @@ export function useGameMessages(deps: GameMessagesDeps) {
       }
     } else {
       highHrStartMs = null;
+    }
+  });
+
+  // Stopped-pedalling scold: fire once at IDLE_SCOLD_MS, then re-nag every
+  // IDLE_SCOLD_REPEAT_MS while still idle (→ ~3s, 13s, 23s before the 30s
+  // auto-pause). idleMs is server-authoritative; it resets to 0 on resume.
+  watch(deps.idleMs, (idleMs) => {
+    if (!preloaded) return;
+    if (idleMs <= 0) {
+      lastScoldIdleMs = null;
+      return;
+    }
+    if (idleMs < IDLE_SCOLD_MS) return;
+    if (lastScoldIdleMs === null || idleMs - lastScoldIdleMs >= IDLE_SCOLD_REPEAT_MS) {
+      pushMessage('stopped-pedaling');
+      lastScoldIdleMs = idleMs;
     }
   });
 

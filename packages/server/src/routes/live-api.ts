@@ -21,6 +21,11 @@ interface StartGameBody {
   targetDurationMs: number;
   randomEventsEnabled: boolean;
   selectedWorkoutId: string;
+  /**
+   * 課表訓練時帶上：由此組出 rides.workout_id = `plan:<planId>:<day>`，
+   * 優先於 selectedWorkoutId。自由騎 / 一般 workout 不帶。
+   */
+  planRef?: { planId: string; day: number };
 }
 
 interface StartBody {
@@ -38,7 +43,21 @@ function validateGameConfig(game: StartGameBody): string | null {
   if (typeof game.targetDurationMs !== 'number' || game.targetDurationMs <= 0) return 'game.targetDurationMs must be a positive number';
   if (typeof game.randomEventsEnabled !== 'boolean') return 'game.randomEventsEnabled must be a boolean';
   if (typeof game.selectedWorkoutId !== 'string') return 'game.selectedWorkoutId is required';
+  if (game.planRef !== undefined) {
+    if (typeof game.planRef !== 'object' || game.planRef === null) return 'game.planRef must be an object';
+    if (typeof game.planRef.planId !== 'string' || game.planRef.planId.length === 0) return 'game.planRef.planId must be a non-empty string';
+    if (!Number.isInteger(game.planRef.day) || game.planRef.day <= 0) return 'game.planRef.day must be a positive integer';
+  }
   return null;
+}
+
+/**
+ * 由 game config 推導 rides.workout_id：課表訓練優先用 planRef 組
+ * `plan:<planId>:<day>`；否則存 workout profile id（'none' 自由騎存 undefined）。
+ */
+function deriveWorkoutId(game: StartGameBody): string | undefined {
+  if (game.planRef) return `plan:${game.planRef.planId}:${game.planRef.day}`;
+  return game.selectedWorkoutId !== 'none' ? game.selectedWorkoutId : undefined;
 }
 
 export default async function liveApi(
@@ -66,6 +85,8 @@ export default async function liveApi(
       // failures are loud 400s — a silently-defaulted config or missing
       // route would corrupt the entire ride's simulation.
       let game: { routePoints: RoutePoint[]; config: GameSimConfig } | undefined;
+      // 訓練模式標記：由 game config 推導（課表訓練 / workout profile / 自由騎）。
+      let workoutId: string | undefined;
       if (body.game) {
         const configError = validateGameConfig(body.game);
         if (configError) {
@@ -79,11 +100,13 @@ export default async function liveApi(
           return reply.code(400).send({ error: `route not found or has no points: ${body.routeId}` });
         }
         game = { routePoints: route.points, config: body.game };
+        workoutId = deriveWorkoutId(body.game);
       }
 
       const rideId = await liveSession.startRecording({
         routeId: body.routeId,
         routeName: body.routeName,
+        workoutId,
         game,
       });
       return { rideId };

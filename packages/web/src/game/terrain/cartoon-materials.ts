@@ -8,6 +8,7 @@
  */
 
 import * as THREE from 'three';
+import { injectCloudShadow } from './cloud-shadow';
 
 // ── Gradient map (shared by all toon materials) ──
 
@@ -103,13 +104,14 @@ export const TREE_CANOPY_COLORS = [
 
 // ── Material factories ──
 
-/** Create a toon material for terrain with vertex colors. */
+/** Create a toon material for terrain with vertex colors. Cloud shadows (F3)
+ *  are injected so clear-day terrain gets drifting soft dark patches. */
 export function createTerrainToonMaterial(): THREE.MeshToonMaterial {
-  return new THREE.MeshToonMaterial({
+  return injectCloudShadow(new THREE.MeshToonMaterial({
     vertexColors: true,
     gradientMap: GRADIENT_MAP,
     side: THREE.DoubleSide,
-  });
+  }));
 }
 
 /** Create a toon material for buildings. Color is set per-building. */

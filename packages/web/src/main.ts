@@ -1,5 +1,10 @@
+import * as Vue from 'vue';
 import { createApp } from 'vue';
 import { createPinia } from 'pinia';
+
+// 把 app 打包的 Vue 實例掛到 window,供 public/vue-cdn-shim.mjs 轉發給
+// esm.sh 上的 md-editor-v3（見 index.html 的 import map）,確保只有一份 Vue。
+(window as unknown as { __vueForCdn?: typeof Vue }).__vueForCdn = Vue;
 import { library } from '@fortawesome/fontawesome-svg-core';
 import { FontAwesomeIcon } from '@fortawesome/vue-fontawesome';
 import {
@@ -9,6 +14,7 @@ import {
   faBicycle,
   faBolt,
   faCoins,
+  faCouch,
   faPlay,
   faPause,
   faStop,
@@ -49,6 +55,8 @@ import {
   faSun,
   faCloud,
   faGlasses,
+  faPaintbrush,
+  faDice,
   faCube,
   faVolumeHigh,
   faHeartPulse,
@@ -58,6 +66,7 @@ import {
   faArrowLeft,
   faArrowRight,
   faUpRightFromSquare,
+  faWindowRestore,
   faArrowTrendUp,
   faArrowTrendDown,
   faFire,
@@ -74,6 +83,7 @@ import {
   faRotateLeft,
   faFileImport,
   faList,
+  faListCheck,
   faCirclePlay,
   faMugHot,
   faCircleCheck,
@@ -81,6 +91,7 @@ import {
   faBug,
   faScaleBalanced,
   faCloudArrowDown,
+  faMagnifyingGlass,
   // Random-event + workout-segment theme icons
   faWind,
   faCircleXmark,
@@ -89,9 +100,19 @@ import {
   faCarSide,
   faFeather,
   faMoon,
+  // Render-mode picker (3D / classic / 2D)
+  faMountainSun,
+  faChessBoard,
+  // 騎後 RPE 主觀感受臉譜(很輕鬆 → 力竭)
+  faFaceGrinBeam,
+  faFaceSmile,
+  faFaceMeh,
+  faFaceFrown,
+  faFaceDizzy,
 } from '@fortawesome/free-solid-svg-icons';
 import { faGithub, faBluetooth } from '@fortawesome/free-brands-svg-icons';
 
+import './styles/themes.scss';
 import 'element-plus/theme-chalk/dark/css-vars.css';
 // Imperative Element Plus APIs (ElMessageBox, ElMessage, ElNotification) bypass
 // unplugin-vue-components, so their styles must be pulled in manually.
@@ -111,6 +132,7 @@ library.add(
   faBicycle,
   faBolt,
   faCoins,
+  faCouch,
   faPlay,
   faPause,
   faStop,
@@ -151,6 +173,8 @@ library.add(
   faSun,
   faCloud,
   faGlasses,
+  faPaintbrush,
+  faDice,
   faCube,
   faVolumeHigh,
   faHeartPulse,
@@ -160,6 +184,7 @@ library.add(
   faArrowLeft,
   faArrowRight,
   faUpRightFromSquare,
+  faWindowRestore,
   faArrowTrendUp,
   faArrowTrendDown,
   faFire,
@@ -176,6 +201,7 @@ library.add(
   faRotateLeft,
   faFileImport,
   faList,
+  faListCheck,
   faCirclePlay,
   faMugHot,
   faCircleCheck,
@@ -183,6 +209,7 @@ library.add(
   faBug,
   faScaleBalanced,
   faCloudArrowDown,
+  faMagnifyingGlass,
   faWind,
   faCircleXmark,
   faCloudShowersHeavy,
@@ -190,6 +217,13 @@ library.add(
   faCarSide,
   faFeather,
   faMoon,
+  faMountainSun,
+  faChessBoard,
+  faFaceGrinBeam,
+  faFaceSmile,
+  faFaceMeh,
+  faFaceFrown,
+  faFaceDizzy,
   faGithub as unknown as import('@fortawesome/fontawesome-svg-core').IconDefinition,
   faBluetooth as unknown as import('@fortawesome/fontawesome-svg-core').IconDefinition,
 );

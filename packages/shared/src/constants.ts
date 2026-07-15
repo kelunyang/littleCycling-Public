@@ -36,6 +36,13 @@ export const DEFAULT_TRAINING_DURATION = 30 * 60 * 1000;
 /** Coin award interval (ms) — award coins every N seconds while in target zone */
 export const COIN_TICK_INTERVAL = 5000;
 
+/** 停止踩踏多久（ms）後自動暫停遊戲（功率與踏頻皆 0 或感測 stale）。 */
+export const IDLE_AUTOPAUSE_MS = 30_000;
+/** 停止踩踏多久（ms）後開始跳「罵人」訊息。 */
+export const IDLE_SCOLD_MS = 3_000;
+/** 開始罵之後，每隔多久（ms）再撈叨一次。 */
+export const IDLE_SCOLD_REPEAT_MS = 10_000;
+
 /** Default HRmax */
 export const DEFAULT_HR_MAX = 190;
 
@@ -62,3 +69,22 @@ export const COIN_SPACING: Record<number, number> = {
   3: 50,
   4: 30,
 };
+
+// ── AI 訓練分析 ──
+
+/**
+ * user 一次最多可指定幾筆騎乘餵給 AI 分析。每筆騎乘 agent 都會另外呼叫工具
+ * 查詳細數據,勾太多會拖慢分析且噴 token;AI 需要更多背景可自行用工具查詢。
+ */
+export const MAX_ANALYSIS_RIDES = 3;
+
+// ── Public release / update-check ──
+
+/** GitHub "owner/repo" slug of the public release repo, polled for updates. */
+export const PUBLIC_REPO_SLUG = 'kelunyang/littleCycling-Public';
+
+/** Default branch of the public repo (publish-public.sh pushes to main). */
+export const PUBLIC_REPO_BRANCH = 'main';
+
+/** Human-facing URL of the public repo (shown in the update prompt). */
+export const PUBLIC_REPO_URL = 'https://github.com/kelunyang/littleCycling-Public';

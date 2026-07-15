@@ -27,6 +27,7 @@ export const GAME_MESSAGE_TYPES: Record<string, GameMessageType> = {
   'power-record':       { id: 'power-record',       baseTemplate: '最高功率 {power} W!',           icon: 'bolt',                     color: 'var(--hud-cyan)',    priority: 3, durationMs: 3000, placeholders: ['power'] },
   'on-target':          { id: 'on-target',          baseTemplate: '穩定輸出中!',                    icon: 'thumbs-up',                color: 'var(--hud-cyan)',    priority: 2, durationMs: 3000, placeholders: [] },
   'zone1-idle':         { id: 'zone1-idle',         baseTemplate: '該加速囉!',                      icon: 'person-running',           color: 'var(--hud-cyan)',    priority: 2, durationMs: 3000, placeholders: [] },
+  'stopped-pedaling':   { id: 'stopped-pedaling',   baseTemplate: '喂!怎麼不踩了?再偷懶就自動暫停囉!',  icon: 'couch',                    color: 'var(--hud-magenta)', priority: 4, durationMs: 3000, placeholders: [] },
   'high-hr-warning':    { id: 'high-hr-warning',    baseTemplate: '心率偏高，注意恢復',              icon: 'heart-circle-exclamation', color: 'var(--hud-magenta)', priority: 3, durationMs: 4000, placeholders: [] },
   'game-start':         { id: 'game-start',         baseTemplate: '出發!',                          icon: 'flag',                     color: 'var(--hud-cyan)',    priority: 5, durationMs: 3000, placeholders: [] },
   'game-end':           { id: 'game-end',           baseTemplate: '辛苦了!',                        icon: 'medal',                    color: 'var(--hud-yellow)',  priority: 5, durationMs: 3000, placeholders: [] },

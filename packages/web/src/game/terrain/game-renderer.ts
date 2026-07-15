@@ -7,6 +7,7 @@
 
 import * as THREE from 'three';
 import { CHUNK_LENGTH, CHUNKS_AHEAD } from './terrain-chunk-manager';
+import { TONE_MAPPING_EXPOSURE } from './day-night-lighting';
 
 export interface GameRendererOptions {
   canvas: HTMLCanvasElement;
@@ -15,6 +16,9 @@ export interface GameRendererOptions {
   /** Enable antialiasing. */
   antialias?: boolean;
 }
+
+/** Default field of view — the demos' 55° chase lens. */
+export const DEFAULT_FOV = 55;
 
 export class GameRenderer {
   readonly renderer: THREE.WebGLRenderer;
@@ -30,7 +34,10 @@ export class GameRenderer {
   private disposed = false;
 
   constructor(options: GameRendererOptions) {
-    const { canvas, fov = 75, antialias = true } = options;
+    // 55°, the demos' lens. The old 75° was a first-person wide angle: it pushes
+    // the world away and exaggerates perspective, which is what kept the chase
+    // camera looking like the old bird's-eye view no matter where we put it.
+    const { canvas, fov = DEFAULT_FOV, antialias = true } = options;
 
     // Renderer
     this.renderer = new THREE.WebGLRenderer({
@@ -38,11 +45,16 @@ export class GameRenderer {
       antialias,
       alpha: false,
     });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // Cap at 1.5 rather than 2: post-processing runs several full-screen passes
+    // (bloom chain + glasses + tunnel + optional paper), so fill rate dominates.
+    // 1.5 cuts ~44% of shaded pixels vs 2.0 with little perceptible quality loss.
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     this.renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.0;
+    // Constant — the day/night system no longer modulates exposure (see
+    // day-night-lighting.ts). Matches the demos.
+    this.renderer.toneMappingExposure = TONE_MAPPING_EXPOSURE;
 
     // Scene
     this.scene = new THREE.Scene();

@@ -17,7 +17,16 @@ const MVT_ZOOM = 14;
 const TILEJSON_URL = 'https://tiles.openfreemap.org/planet';
 
 /** Layers we care about from the OpenMapTiles schema. */
-const WANTED_LAYERS = ['transportation', 'building', 'water', 'landcover', 'landuse', 'park'] as const;
+/**
+ * Layers we decode. Kept tight on purpose: a tile also carries `housenumber`,
+ * `poi`, `boundary`, `transportation_name`… which are label data with nothing to
+ * draw in a 3D toy world (a survey of three routes put them at ~2/3 of all
+ * features). `waterway` and `aeroway` earn their place — see
+ * plan/map-elements-expansion.md.
+ */
+const WANTED_LAYERS = [
+  'transportation', 'building', 'water', 'waterway', 'landcover', 'landuse', 'park', 'aeroway',
+] as const;
 export type MVTLayerName = (typeof WANTED_LAYERS)[number];
 
 export interface MVTFeature {

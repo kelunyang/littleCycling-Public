@@ -51,6 +51,9 @@ export {
   DEFAULT_SCAN_TIMEOUT,
   DEFAULT_TRAINING_DURATION,
   COIN_TICK_INTERVAL,
+  IDLE_AUTOPAUSE_MS,
+  IDLE_SCOLD_MS,
+  IDLE_SCOLD_REPEAT_MS,
   DEFAULT_HR_MAX,
   DEFAULT_FTP,
   DEFAULT_DEV_PROXY_PORT,
@@ -59,6 +62,10 @@ export {
   COIN_COLLECT_THRESHOLD,
   COIN_CLEANUP_BEHIND,
   COIN_SPACING,
+  MAX_ANALYSIS_RIDES,
+  PUBLIC_REPO_SLUG,
+  PUBLIC_REPO_BRANCH,
+  PUBLIC_REPO_URL,
 } from './constants.js';
 
 // Power curves
@@ -84,11 +91,16 @@ export {
   getHrZone,
   getCoinsForHr,
   isRedLine,
+  hrMaxFromAge,
 } from './hr-zones.js';
 
 // Config
-export type { AppConfig, LlmProvider } from './config.js';
+export type { AppConfig, LlmProvider, UpdateStatus } from './config.js';
 export { DEFAULT_CONFIG } from './config.js';
+
+// Data-source attribution (map / terrain / weather)
+export type { DataSourceAttribution, AttributionLink } from './attributions.js';
+export { DATA_ATTRIBUTIONS } from './attributions.js';
 
 // Route geometry
 export type { InterpolatedPosition } from './route-geometry.js';
@@ -127,9 +139,33 @@ export {
   workoutGrade,
 } from './workouts.js';
 
+// Ride metrics（進階功率/心率分析純函式）
+export type {
+  Resampled1Hz,
+  ZoneBucket,
+  ZoneDistribution,
+  PowerZoneBucket,
+  PowerMetrics,
+  BestEffort,
+  HrDriftResult,
+  ComplianceSegmentResult,
+  WorkoutComplianceResult,
+} from './ride-metrics.js';
+export {
+  resampleTo1Hz,
+  zoneDistribution,
+  powerMetrics,
+  bestEfforts,
+  hrDrift,
+  workoutCompliance,
+} from './ride-metrics.js';
+
 // Game message types
 export type { GameMessageType } from './game-message-types.js';
 export { GAME_MESSAGE_TYPES, fillTemplate } from './game-message-types.js';
+
+// Agentic tool-use loop 進度事件（前後端共用）
+export type { AgentEvent, AgentEventPhase } from './agent-events.js';
 
 // Training plans
 export type {
@@ -151,6 +187,13 @@ export {
   createPlanFromInput,
   validatePlanInput,
 } from './training-plan.js';
+
+// Analysis reports（LLM 訓練分析,markdown）
+export type {
+  AnalysisFocus,
+  AnalysisReport,
+  AnalysisReportSummary,
+} from './analysis.js';
 
 // Random events
 export type { RandomEventDef, RandomEventVisual, PickContext } from './random-events.js';

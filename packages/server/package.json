@@ -12,7 +12,7 @@
     "ble:test": "tsx src/ble-hr-test.ts",
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "npm run build && node --test \"test/*.test.mjs\""
+    "test": "npm run build && node --test \"dist/lib/agent/__tests__/*.test.js\""
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",

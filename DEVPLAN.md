@@ -966,14 +966,75 @@ interface PhaserBridge {
 
 | 層面 | 風格 | 說明 |
 |------|------|------|
-| **3D 場景渲染** | 塑膠玩具世界 | `MeshToonMaterial` 離散色階塑膠光澤、螢光噴漆配色、簡潔幾何建模、卡通日夜循環（永遠明亮） |
+| **3D 場景渲染** | 積木 / 瓦楞紙（可切換） | Strategy 模式雙風格：**積木**＝階梯量化地形 + 凸點 studs + 亮面塑膠原色;**瓦楞紙**＝等高線疊層 + 牛皮霧面 + 墨線描邊。全程序化 vertex color、零貼圖 |
 | **2D 場景渲染** | 塑膠風 / 手繪風（可切換） | Strategy 模式雙風格：塑膠風延續 3D 霓虹配色，手繪風為 1930s Cuphead 風格（搖擺墨線 + 復古暖色） |
 | **UI / HUD** | Cyberpunk 2077 | 深色底 + 霓虹青/黃/品紅光暈、Orbitron 字型、大寫字距、斜切角 `clip-path`、掃描線動畫、故障閃爍 |
 
-**3D 塑膠玩具世界**（Phase 4.5 詳述）：
-- 建築是螢光色方塊、道路是平滑帶狀、水面有果凍動態
-- Perlin noise 地形色彩變化（螢光綠 / 酸黃 / 噴漆橘）
-- 不使用衛星圖磚貼圖，完全程序化 vertex color
+### 3D 世界風格策略（`TerrainStyleStrategy`）
+
+3D 渲染改採與 Phaser 2D（`PhaserStyleStrategy`）對稱的 Strategy 模式——一套建構邏輯、兩種「手作拼裝」風格，由 config `map.worldStyle` 跨模式統一驅動：
+
+| `worldStyle` | Phaser 2D | Three.js 3D |
+|---|---|---|
+| `plastic` | 霓虹平塗 | **積木**（cubic step + studs + 亮面原色） |
+| `cuphead` | 手繪墨線 | **瓦楞紙**（contour sheet + 牛皮霧面 + 反殼墨線） |
+
+- **共用量化引擎**（`game/terrain/quantized-terrain.ts`）：把走廊高程量化成**平頂 cell + 垂直落差面 + 邊界裙邊**;以**絕對高程**量化 → 層相位固定世界座標、跨 chunk 無縫（不受 floating origin 影響）。積木＝小格 + studs、瓦楞紙＝大層 + 墨線,一引擎兩組參數。
+- **策略介面**（`game/terrain/terrain-style-strategy.ts` + `plastic-terrain-style.ts` / `paper-terrain-style.ts`）:各 renderer（terrain-chunk / building / road / landuse / tree）向注入的 strategy 取材質 / 顏色 / 幾何 / studs 裝飾 / 墨線 / 後處理;`createTerrainStyleStrategy()` dynamic import code-split。
+- **紙後處理**解耦於「騎行眼鏡」效果:屬 strategy(`createPostPass`),`CyclingGlassesEffect.setStylePass()` 掛為最後 pass,關眼鏡不消失。
+- **即時調參面板**（`StyleTuningPanel.vue`,掛 `config.debug`）:層高 / 格子 / studs / 瓦楞 / 墨線 / 紙後處理滑桿——後處理即時、幾何 debounce 觸發地形重建。實機由 user 在 Windows 拉「好看又不卡」的甜蜜點後固化 `defaultStyleParams()`。
+- **命名債**:舊 config key `map.phaserStyle` 已改名 `map.worldStyle`(server `ConfigStore.load` 自動遷移舊值);值 `cuphead` 與 DOM `data-world-style` / CSS 主題不動。
+- **版權**:全程序化、零外部模型 / 貼圖;積木相關程式碼 / UI 一律用通用詞 blocks / studs / brick,不掛任何商標。
+
+**3D 積木 / 瓦楞紙世界**（Phase 4.5 + 世界風格策略詳述）：
+- 地形量化成階梯 / 疊層 cell,建築坐落階梯,樹為方塊 / 卡紙,不使用衛星圖磚貼圖,完全程序化 vertex color
+- 積木:cell 頂鋪 InstancedMesh 凸點 studs、亮面原色;瓦楞紙:牛皮霧面 + 反殼法(inverted hull)墨線輪廓
+
+### 3D 第三人稱「書桌小世界」（diorama 模式,現行唯一 3D 模式）
+
+3D 從「第一人稱寫實地圖」改為 **3DS 遊戲風的第三人稱 diorama**:世界骨架(MVT 建築 / 道路 / 森林 + DEM 真實高程)完全不動,只換造型與視角。造型全部掛在 `TerrainStyleStrategy` 上,renderer 骨架零改動。
+
+| 元件 | `cuphead`(瓦楞紙文具都市) | `plastic`(塑膠積木糖果都市) |
+|---|---|---|
+| 單車擺件 `bike-ornament.ts` | 迴紋針單車(TubeGeometry 一筆彎折車架 + Torus 輪 + 橡皮擦座墊) | 玩具積木單車(黑胎 + 黃輪轂 + 亮面粉紅車架) |
+| 遠山 / 地平線 `mountain-ring.ts` | 三角尖峰 + 10% 平頂、書桌木色收尾盤 | sine 疊合量化成 6 階積木階梯、玩具紫地墊 |
+| 建築裝飾 | 摺蓋屋頂 + 封箱膠帶 + 蠟筆窗戶 | 斜屋頂 / 凸點頂蓋 + 亮面白窗 |
+| 道路 | 紙膠帶(斜紋)+ 立可白虛線 | 亮面路板 + 白虛線 |
+| 路線標記 `route-line-mesh.ts` | 螢光筆塗痕(黃綠 1.8m + 淡暈 4.0m) | 霓虹膠帶(粉紅 1.6m + 紫暈 4.2m) |
+| 樹 | 剪紙十字插樹(alphaTest 卡片) | 堆疊方塊樹 |
+| 街燈 `street-lamp.ts` | 鉛筆路燈(筆尖夜間發光) | 積木街燈(透明黃磚頭) |
+| 金幣 / Checkpoint | 金色圖釘 / 大頭針 + 便利貼旗 | 凸點圓磚 / 積木旗座 |
+
+- **相機**(`fps-camera.ts`):預設 `mode: 'third'`,**完全照 demo 的「跟騎」相機**——
+  - **FOV 55°**(`game-renderer.ts` `DEFAULT_FOV`)。舊的 75° 是第一人稱廣角,會把世界推遠、透視誇張——**相機放哪都還是像舊鳥瞰視角,元兇就是它**。
+  - 幾何 = demo 值 × 0.66(demo 是 7m 車、後 17 / 高 9.5 / 看車前 8m @ y=4;我們的車 ~4.6m):**後 11.2m / 高 6.3m / 看車前 5.3m @ y=2.6**。
+  - **手感來自不對稱**:位置 `lerp(target, min(dt × 3.2, 1))`(每幀只追 ~5.3%,過彎時鏡頭甩出弧線再收回),**視線每幀硬 `lookAt` 不做 slerp**。舊版兩者都平滑 → 鏡頭像鎖在軌道上。
+  - `cameraHeight` 滑桿改成**純縮放**(15 → 1.0 = demo 構圖,clamp 0.45–2.2),不再有「視高」語意;pitch 滑桿只微調視線目標高度。
+  - `mode: 'first'` 保留(第一人稱時單車自動隱藏),仍用原本的即時跟隨 + slerp。
+  - **`mode: 'orbit'` 自由視角**(`orbit-camera.ts`,HUD 的「跟車/自由」segmented):拖曳旋轉、滾輪縮放、永遠看向單車。指標事件**只在自由視角期間掛載**,否則正常騎乘的滾輪會被沒人在用的相機吃掉。
+  - **視線淨空**(`camera-collision.ts`):判斷的是**相機到單車那條視線有沒有被地形擋住**,不是「地形有沒有高過相機」。**下坡時兩者不等價**——剛翻過的坡頂會擋在相機與單車之間,但它可能還低於相機,「相機有沒有埋進地裡」永遠不會觸發,單車就這樣消失在紙板後面。作法:沿視線取樣 5 點,解出「要抬多高整條視線才越得過去」,抬高相機 + 視線壓向單車(變俯視)。**升快(12/s)落慢(2/s)**:地面在階梯間跳動,逐幀跟隨會讓鏡頭上下抖。
+  - **升鏡**(`camera-lift.ts`):課表換段 → `peek`(1.2s 升 / 2.6s 停 / 1.2s 落);剩 10 秒 → `finale`(升起並保持,結算 dialog 開在俯瞰畫面上)。優先序 **自由視角(使用者) > 升鏡 > 跟車**,使用者隨時能奪回相機。刻意**不碰 gameStore 狀態機**(`state='ended'` 會立刻開結算 + 寫 DB,插 cinematic 相位風險大)—— 這也是 F6 flyover 當初被砍掉的原因。
+- **單車動畫**:輪子 / 曲柄隨速度轉,過彎依 yaw 變化率傾斜。本體 local forward = +x、輪軸 = z;`bike-ornament.ts` 負責行為,造型由 strategy 的 `buildBikeOrnament()` 提供。
+- **遠山**:兩圈環形剪影**只平移不旋轉** → 自然視差(對齊 Phaser 2D 雙層山脈);seed 每 session 隨機。地平線收尾盤是**環形**(內徑 > 走廊半寬),避免下坡時蓋掉山谷地形;**必須寫深度**——three 的 `Sky` 是 BackSide 天空盒,連下半球都畫,不寫深度會被天空蓋掉。
+- **街燈**:回收式 pool(~10 盞沿路滑動),長路線成本恆定;白天 `light.visible = false`,不讓十幾顆 PointLight 空轉。
+- **路線標記**:照 demo —— **畫在路面上的靜態塗痕**(窄實色 core + 寬淡暈 glow 兩層 ribbon,`MeshBasicMaterial`、`depthWrite: false`、renderOrder 10 / 9),離地 0.6m(路面在 terrain + 0.3m)。**沒有箭頭跑道燈、沒有追逐動畫、沒有 bloom**——舊的發光引導線浮在 5m 高、像 HUD 疊在世界上,與 diorama 不合。因此 **bloom layer 現在無人使用**,`setBloomEnabled(false)`(兩套皮皆是);`BLOOM_LAYER` 常數保留給未來的發光物件。
+- **天空 / 日夜**(2026-07-14 改版,`gradient-sky.ts` + `day-night-lighting.ts`):
+  - **拆掉 three 的 Preetham `Sky`**,換成 demo 的**漸層天空盒**(BackSide 球 + 兩色垂直漸層量化成 5 階)。Preetham 是物理大氣模型:低於民用曙暮光就**全黑**、陰天在地平線**爆 HDR 白**——所以舊管線必須「夜晚藏天空、非晴天藏天空」,並把 `toneMappingExposure` 壓到 0.6–0.9。**那個壓低的曝光就是整個場景發黑的主因。**
+  - **曝光恆定 1.05**(demo 值,`TONE_MAPPING_EXPOSURE`),日夜/天氣**一律不再動曝光**;氣氛全部交給色票 + 霧。
+  - 日夜端點下放 strategy:`skyPalette: { day, night }`(SkyMood = 天空上下色 / 霧 / 主光 / 半球光 / 環境光),值直接取自兩個 demo 的 DAY/NIGHT。**夜晚下限 = demo 夜**(ambient 0.18),寫死在 `day-night-lighting` 出口的 `Math.max`,任何(時段 × 天氣)組合都不得更暗。
+  - **陰天 = 平光 + 灰 + 霧,但亮**:雲會散射光,`ambientMul` 往**上**調(cloudy 1.3)、`directionalMul` 只壓主光(0.5)。舊版陰天把 ambient 和曝光一起壓 → 灰天變黑天。
+  - 日夜關閉時走**同一條** palette 管線(`legacyCelestial()`),不再有另一套寫死的 legacy 燈光/霧(舊的 `updateSky`/`updateLightingLegacy`/`updateFogLegacy` 已刪)。
+- **地圖元素涵蓋率**(2026-07-14 擴充,依 `scripts/mvt-survey/survey.mjs` 的全量盤點):
+  - `mvt-fetcher` 抓 8 個 layer:transportation / building / water / **waterway** / landcover / landuse / park / **aeroway**。刻意**不抓** housenumber / poi / boundary / transportation_name —— 那是文字標籤資料,3D 世界用不到(佔圖磚全部 feature 的約 2/3)。
+  - **河流溪流**(`waterway-renderer.ts`):既有的 water layer 是**面**(湖泊),流動的水是**線** —— 這是盤點裡最大的視覺洞(~1,290 筆)。ribbon 寬度按 class(river 6m…ditch 1.5m),離地 0.15m(**低於道路 0.3m**,水從橋下過)。**`brunnel=tunnel`/`culvert` 一律跳過**——那是路面底下的涵管,畫出來會是橫躺在柏油路上的藍帶子。
+  - **地面色塊**(`landuse-renderer.ts`):新增濕地 / 農田 / 運動場;機構用地(school/hospital/…)併入 urban(它們就是建成地,房子本來就走 building layer)。**LanduseRenderResult 是 `layers[]` 陣列**——以前是 5 個具名 mesh 欄位、chunk-manager 有 5 處逐一列舉,加一種地物就得改 5 個地方、漏一個就洩漏。加地物現在只要在 specs 表加一列。
+  - **機場**(`aeroway-renderer.ts`):跑道 30m / 滑行道 15m 灰帶 + 停機坪;每個 aerodrome 質心停一台玩具飛機(紙=繫留飛機氣球、積木=積木小飛機)。
+  - **隧道不畫幾何**,改用「一整排密集亮著的燈」表現(見上方街燈)。
+  - 盤點對帳:rendered **28.5% → 38.3%**、fetched_ignored **1,126 → 323**。改 renderer 後請同步更新 `survey.mjs` 的 `classify()` 並重跑。
+- **環境 zone 只染色、不調暗**(`cycling-glasses-effect.ts` `ZONE_MODIFIERS`):原本 tunnel 會把**整個畫面 ×0.45**、forest ×0.80。那是第一人稱的沉浸設計(你人在隧道裡);diorama 俯瞰玩具世界、世界裡根本沒有隧道幾何,畫面無故變黑就是 bug——**「有些地區突然變很黑」就是它**。而且後處理的亮度乘算是繞過 `day-night-lighting` 那條「不得比 demo 夜更暗」硬地板的後門。現在 `brightnessMul` 一律 1.0,只保留極淡 tint(forest 綠)。zone 偵測本身保留(鏡片痕跡等仍在用)。
+- **天氣粒子 / 後處理**:`sky-and-fog.ts` 的雨雪雲星、`lightning-bolt.ts`、紙後處理沿用。
+- **自檢**:`npm run check:3d` —— headless(Node + stub canvas,不開 WebGL)實際建出兩套皮的單車 / 遠山 / 街燈 / 金幣 / 建築裝飾,驗證幾何朝向、相機在騎手後方、遠山視差錨定、收尾盤畫序。WSL 可跑(繞開只裝了 Windows 版的 esbuild / rollup native binary)。
+- **視覺規格來源**:`paper-town-demo.html` / `plastic-town-demo.html`(repo 根目錄)與 `plan/ref-demo-*-src.js`。
 
 **2D 雙風格**（Phase 7 詳述）：
 - **塑膠風**：3D 塑膠世界「壓扁」成 2D — 螢光配色、幾何形狀、CRT 掃描線覆蓋層
@@ -988,6 +1049,22 @@ interface PhaserBridge {
 - Welcome 頁面 + Game HUD + 訓練摘要 均使用此風格
 
 ---
+
+## 外部資料源與版權（圖資 / 地形 / 天氣）
+
+> 以下為目前實際使用的外部資料源，**皆已確認授權乾淨**（免費 / 開放授權，無 API key，無商業盜用）。
+> 新增或更換任何圖資 / 地形 / 天氣來源前，務必先確認版權並取得開發者同意 —— 見 CLAUDE.md「外部資料源版權規範」。
+
+| 用途 | 來源 | Endpoint | 授權 | 署名處 |
+|------|------|----------|------|--------|
+| 向量底圖 + 樣式 | **OpenFreeMap**（資料為 OSM） | `tiles.openfreemap.org/styles/*`、`/planet` | 免費公開實例;資料 OSM **ODbL** | 設定面板 Data Sources |
+| 3D 地形高程（DEM） | **AWS Terrain Tiles**（Terrarium 編碼,底層 SRTM/GMTED 等） | `s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png` | AWS Open Data,免費 | 設定面板 Data Sources |
+| 即時天氣 / 風 | **Open-Meteo** | `api.open-meteo.com/v1/forecast` | 免費(**僅限非商用**);資料 **CC-BY 4.0** | 設定面板 Data Sources |
+| 路線 GPX | **EuroVelo** | `en.eurovelo.com/route/get-gpx/{id}` | **ODbL** | 路線目錄抽屜 + 匯出 GPX metadata |
+
+- 署名字串集中定義於 `packages/shared/src/attributions.ts`(`DATA_ATTRIBUTIONS`),由後端經 `/api/config` 注入、前端只 render;EuroVelo 走 catalog API(`eurovelo-catalog.ts`)。
+- **明確禁用**:OpenStreetMap 官方 raster 圖磚伺服器 `tile.openstreetmap.org` —— 其 [Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/) 禁止遊戲這類重度 / 高頻自動化取圖(會被封 IP)。底圖一律走 OpenFreeMap。
+- **商業化注意**:Open-Meteo 免費授權僅限非商用;若日後商業化,天氣來源需改付費訂閱或換供應商。
 
 ## 注意事項
 

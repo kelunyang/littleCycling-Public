@@ -54,6 +54,31 @@ interface Star {
 
 const STAR_TEXTURE_KEY = '__phaser_starfield__';
 
+/** Recompute sun/moon position at most every 250ms — they move ~0.25°/min, so
+ *  60 Hz astronomical math is wasted. Real-time driven, so throttle by wall clock. */
+const CELESTIAL_INTERVAL_MS = 250;
+
+/** Quantise sun elevation to a 0.25° grid for dirty checks. The raw value drifts
+ *  by a tiny float every recompute, so `!==` never matches and the expensive sky
+ *  gradient + parallax silhouettes were repainting every frame. Redraw only when
+ *  the quantised value actually changes (minutes apart at real sun speed). */
+function sunKey(elevationDeg: number): number {
+  return Math.round(elevationDeg * 4);
+}
+
+// ── Rainbow (F4) / meteor (F5) tuning ──
+const RAINBOW_FADE_IN = 5;    // seconds
+const RAINBOW_HOLD = 70;
+const RAINBOW_FADE_OUT = 15;
+const RAINBOW_MAX_ALPHA = 0.85;
+const METEOR_STAR_ALPHA_MIN = 0.8;
+const METEOR_MIN_GAP = 60;    // seconds
+const METEOR_MAX_GAP = 240;
+
+function randRange(min: number, max: number): number {
+  return min + Math.random() * (max - min);
+}
+
 export class PhaserWeatherSystem {
   private scene: Phaser.Scene;
   private strategy: PhaserStyleStrategy;
@@ -97,6 +122,10 @@ export class PhaserWeatherSystem {
   // Wind state (drives cloud drift offset + rain/snow speedX)
   private windState: PhaserWindState = { speedKmh: 0, directionDeg: 0, gust: 1 };
 
+  // Cloud shadows (world-space, wind-driven)
+  private cloudShadowGfx!: Phaser.GameObjects.Graphics;
+  private cloudShadows: { x: number; w: number; speed: number }[] = [];
+
   // Lightning graphics layer (additive, sky-area only)
   private lightningGfx: Phaser.GameObjects.Graphics | null = null;
 
@@ -107,11 +136,38 @@ export class PhaserWeatherSystem {
   private clouds: { x: number; y: number; baseW: number; baseH: number; speed: number; phase: number }[] = [];
   private cloudsEnabled = true;
 
-  // Dirty flags — skip redraws when values haven't changed
+  // Dirty flags — skip redraws when values haven't changed. The sun-elevation
+  // ones hold the QUANTISED key (sunKey), not the raw degrees, so a sub-0.25°
+  // per-frame drift doesn't force a repaint.
   private lastSunElev = NaN;
   private lastWeatherType = '';
   private lastParallaxSunElev = NaN;
   private lastParallaxWeather = '';
+
+  /** Wall-clock ms of the last celestial recompute (throttle gate). */
+  private lastCelestialMs = -Infinity;
+  /** Quantised sun elev/azimuth last pushed into the Preetham shader. */
+  private lastPreethamElevKey = NaN;
+  private lastPreethamAzKey = NaN;
+
+  /** Wall-clock ms of the previous update() — yields a frame dt (update() gets none). */
+  private lastUpdateMs = -1;
+  /** Latest star opacity (0..1) — meteor night gate. */
+  private currentStarAlpha = 0;
+
+  // Rainbow (F4) — spawned on rain→sun, drawn once, alpha animated per frame.
+  private rainbowGfx: Phaser.GameObjects.Graphics | null = null;
+  private rainbowActive = false;
+  private rainbowAge = 0;
+
+  // Meteor (F5) — one reused streak Graphics, fired at random deep-night gaps.
+  private meteorGfx: Phaser.GameObjects.Graphics | null = null;
+  private meteorActive = false;
+  private meteorAge = 0;
+  private meteorLife = 0.8;
+  private meteorNextIn = -1;
+  private meteorVX = 0;
+  private meteorVY = 0;
 
   /** Random seed for mountain shapes — fixed per session so parallax redraws are stable. */
   private mountainSeed = Math.floor(Math.random() * 100000);
@@ -145,6 +201,12 @@ export class PhaserWeatherSystem {
     this.fogGfx = scene.add.graphics();
     this.fogGfx.setScrollFactor(0);
     this.fogGfx.setDepth(900);
+
+    // Cloud shadows — world-space dark patches sweeping the ground (the 2D
+    // cousin of the 3D cloud-shadow texture). Above the terrain and chunk
+    // scenery (0/15), below the cyclist (500).
+    this.cloudShadowGfx = scene.add.graphics();
+    this.cloudShadowGfx.setDepth(20);
 
     // Parallax background layers
     this.farMountainGfx = scene.add.graphics();
@@ -316,6 +378,10 @@ export class PhaserWeatherSystem {
     if (state.type && state.type !== prevType) {
       this.updateParticles();
       this.updateWindEmitters();
+      // Rain → sun in daylight: spawn a rainbow (F4).
+      if (prevType === 'rainy' && state.type === 'sunny' && this.state.sunElevation > 5) {
+        this.spawnRainbow();
+      }
     }
   }
 
@@ -342,17 +408,61 @@ export class PhaserWeatherSystem {
     this.cloudsEnabled = enabled;
   }
 
+  /** Current day factor (0 = deep night, 1 = noon) — drives 2D night lights. */
+  getDayFactor(): number {
+    return this.state.dayFactor;
+  }
+
+  /**
+   * Fade the backdrop in during the scene's entrance animation: the paper
+   * (or the arcade grid) starts blank and the world arrives in layers —
+   * sky first, then the distant hills, then the near ones and the clouds.
+   *
+   * `t` is seconds since the intro started; call with a value past the last
+   * stage (or not at all) and everything sits at full opacity.
+   */
+  setIntroT(t: number): void {
+    const fade = (start: number, dur: number) =>
+      Math.min(1, Math.max(0, (t - start) / dur));
+
+    const sky = fade(0.15, 0.9);
+    const far = fade(0.5, 0.8);
+    const near = fade(0.8, 0.8);
+    const cloud = fade(1.1, 0.8);
+
+    this.skyGfx.setAlpha(sky);
+    this.moonGfx.setAlpha(sky);
+    this.farMountainGfx.setAlpha(far);
+    this.nearHillGfx.setAlpha(near);
+    this.cloudGfx.setAlpha(cloud);
+    // The Preetham shader can't be alpha-faded (a Shader game object ignores
+    // alpha), and it renders IN FRONT of skyGfx — so hold it back until the
+    // gradient has fully faded in, then let update() own its visibility again.
+    if (sky < 1) this.preethamSky?.setVisible(false);
+    // Stars are left alone: updateStars() owns their alpha every frame, and
+    // they only show at night — long after this fade has finished.
+  }
+
   update() {
-    // Drive sun/moon from real time + location when available. This must run
-    // before any sky/star/moon redraw so they all see the same celestial state.
+    // Frame dt from wall clock (update() receives none). Clamp against hitches.
+    const nowMs = performance.now();
+    const dt = this.lastUpdateMs < 0 ? 0.016 : Math.min(0.1, (nowMs - this.lastUpdateMs) / 1000);
+    this.lastUpdateMs = nowMs;
+
+    // Drive sun/moon from real time + location when available. Throttled to
+    // ~4 Hz — the sun barely moves between frames. This must run before any
+    // sky/star/moon redraw so they all see the same celestial state.
     if (this.latitude !== null && this.longitude !== null) {
-      const c = getCelestialState(this.latitude, this.longitude);
-      this.state.sunElevation = c.sunElevation;
-      this.state.sunAzimuth = c.sunAzimuth;
-      this.state.moonPhase = c.moonPhase;
-      this.state.moonElevation = c.moonElevation;
-      this.state.moonAzimuth = c.moonAzimuth;
-      this.state.dayFactor = c.dayFactor;
+      if (nowMs - this.lastCelestialMs >= CELESTIAL_INTERVAL_MS) {
+        this.lastCelestialMs = nowMs;
+        const c = getCelestialState(this.latitude, this.longitude);
+        this.state.sunElevation = c.sunElevation;
+        this.state.sunAzimuth = c.sunAzimuth;
+        this.state.moonPhase = c.moonPhase;
+        this.state.moonElevation = c.moonElevation;
+        this.state.moonAzimuth = c.moonAzimuth;
+        this.state.dayFactor = c.dayFactor;
+      }
     }
 
     const w = this.scene.game.canvas.width;
@@ -364,15 +474,22 @@ export class PhaserWeatherSystem {
     this.updateStars();
     this.drawMoon(w, skyH);
     this.drawClouds(w, skyH);
+    this.updateCloudShadows(dt);
     this.drawFog(w, h);
 
-    // Parallax — only redraw when sky colors change
-    if (this.state.sunElevation !== this.lastParallaxSunElev
+    // Parallax — only redraw when the quantised sky color key changes (minutes
+    // apart), not on every sub-0.25° drift of the raw sun elevation.
+    const parallaxKey = sunKey(this.state.sunElevation);
+    if (parallaxKey !== this.lastParallaxSunElev
         || this.state.type !== this.lastParallaxWeather) {
-      this.lastParallaxSunElev = this.state.sunElevation;
+      this.lastParallaxSunElev = parallaxKey;
       this.lastParallaxWeather = this.state.type;
       this.drawParallax(w, skyH);
     }
+
+    // Rainbow (F4) + meteor (F5) — both draw once and only mutate alpha/position.
+    if (this.rainbowActive) this.updateRainbow(dt);
+    this.updateMeteor(dt, w, skyH);
   }
 
   /**
@@ -382,18 +499,81 @@ export class PhaserWeatherSystem {
    */
   private updatePreethamSky() {
     if (!this.preethamSky) return;
-    const showPreetham = this.state.type === 'sunny' && this.state.sunElevation > -6;
+    // Style gate first: a photorealistic sky over ink-and-watercolour (or the
+    // neon Tetris world) buries the whole art direction. Only a style that
+    // opts in gets it.
+    const showPreetham = this.strategy.wantsRealisticSky === true
+      && this.state.type === 'sunny' && this.state.sunElevation > -6;
     this.preethamSky.setVisible(showPreetham);
-    if (showPreetham) {
-      this.preethamSky.setSun(this.state.sunElevation, this.state.sunAzimuth);
+    if (!showPreetham) return;
+    // Recompute betaR/betaM + push 6 uniforms only when the sun actually moved
+    // (quantised elev + azimuth — azimuth alone sweeps near solar noon).
+    const elevKey = sunKey(this.state.sunElevation);
+    const azKey = Math.round((((this.state.sunAzimuth % 360) + 360) % 360) * 4);
+    if (elevKey === this.lastPreethamElevKey && azKey === this.lastPreethamAzKey) return;
+    this.lastPreethamElevKey = elevKey;
+    this.lastPreethamAzKey = azKey;
+    this.preethamSky.setSun(this.state.sunElevation, this.state.sunAzimuth);
+  }
+
+  /**
+   * Cloud shadows: a few soft dark ellipses lying on the terrain, drifting
+   * with the wind. World-space — the ground scrolls under them, they don't
+   * follow the rider. Daytime + sunny/cloudy only (rain/snow means a solid
+   * overcast: no crisp shadows to cast).
+   */
+  private updateCloudShadows(dt: number) {
+    const g = this.cloudShadowGfx;
+    g.clear();
+
+    const day = this.state.dayFactor;
+    if (day < 0.3) return;
+    if (this.state.type === 'rainy' || this.state.type === 'snowy') return;
+
+    const view = this.scene.cameras.main.worldView;
+    const margin = 700;
+    const left = view.x - margin;
+    const right = view.right + margin;
+
+    // Lazy init: spread a handful of blobs across the (padded) view.
+    if (this.cloudShadows.length === 0) {
+      for (let i = 0; i < 4; i++) {
+        this.cloudShadows.push({
+          x: left + ((right - left) * (i + Math.random())) / 4,
+          w: 280 + Math.random() * 320,
+          speed: 4 + Math.random() * 8, // px/s of cloud drift
+        });
+      }
+    }
+
+    // Same wind mapping as the clouds themselves, so shadows track them.
+    const dirRad = (this.windState.directionDeg + 180) * Math.PI / 180;
+    const windPxPerSec = (this.windState.speedKmh / 3.6) * Math.sin(dirRad) * 3;
+    // Host scene is Phaser2DScene in practice; fall back gracefully if not.
+    const scene = this.scene as Phaser.Scene & { getTerrainY?: (d: number) => number };
+    const PXM = 3; // mirrors PX_PER_METER (phaser2d-scene) — avoid a second value import
+    const alpha = 0.07 * Math.min(1, (day - 0.3) / 0.3);
+
+    for (const b of this.cloudShadows) {
+      b.x += (b.speed + windPxPerSec) * dt;
+      // Wrap around the padded view so there is always a shadow inbound.
+      if (b.x - b.w / 2 > right) b.x = left - b.w / 2;
+      if (b.x + b.w / 2 < left) b.x = right + b.w / 2;
+      if (b.x + b.w / 2 < view.x || b.x - b.w / 2 > view.right) continue;
+
+      const groundY = scene.getTerrainY
+        ? scene.getTerrainY(b.x / PXM)
+        : view.bottom - view.height * 0.25;
+      g.fillStyle(0x000000, alpha);
+      g.fillEllipse(b.x, groundY + 4, b.w, 22);
     }
   }
 
-  /** Only redraw sky gradient when sun elevation or weather type changes. */
+  /** Only redraw sky gradient when the quantised sun elevation or weather changes. */
   private updateSky(w: number, skyH: number) {
-    if (this.state.sunElevation === this.lastSunElev
-        && this.state.type === this.lastWeatherType) return;
-    this.lastSunElev = this.state.sunElevation;
+    const key = sunKey(this.state.sunElevation);
+    if (key === this.lastSunElev && this.state.type === this.lastWeatherType) return;
+    this.lastSunElev = key;
     this.lastWeatherType = this.state.type;
 
     this.skyGfx.clear();
@@ -402,14 +582,23 @@ export class PhaserWeatherSystem {
       this.state.type,
     );
 
+    // 2× overscan on both axes: camera-lift zoom scales scrollFactor(0)
+    // layers too, and the vertical camera follow can transiently show the
+    // region above y=0 / beside x=0 — the sky must cover all of it. The sky
+    // sits behind the terrain, so overdraw below the baseline is harmless.
+    const h = this.scene.game.canvas.height;
+    this.skyGfx.fillStyle(topColor, 1);
+    this.skyGfx.fillRect(-w * 0.5, -h * 0.5, w * 2, h * 0.5);
     const bands = 20;
     for (let i = 0; i < bands; i++) {
       const t = i / bands;
       const color = lerpColor(topColor, bottomColor, t);
       const y = t * skyH;
       this.skyGfx.fillStyle(color, 1);
-      this.skyGfx.fillRect(0, y, w, skyH / bands + 1);
+      this.skyGfx.fillRect(-w * 0.5, y, w * 2, skyH / bands + 1);
     }
+    this.skyGfx.fillStyle(bottomColor, 1);
+    this.skyGfx.fillRect(-w * 0.5, skyH, w * 2, h * 1.5 - skyH);
   }
 
   /** Update star visibility via alpha + per-frame twinkle on the brightest stars. */
@@ -418,6 +607,7 @@ export class PhaserWeatherSystem {
 
     const sunElev = this.state.sunElevation;
     if (sunElev > 6) {
+      this.currentStarAlpha = 0;
       this.starImage.setAlpha(0);
       this.starTwinkleGfx?.clear();
       return;
@@ -436,6 +626,7 @@ export class PhaserWeatherSystem {
     };
     starAlpha *= weatherOcclusion[this.state.type] ?? 1;
 
+    this.currentStarAlpha = starAlpha; // meteor night gate reads this
     this.starImage.setAlpha(starAlpha);
 
     if (!this.starTwinkleGfx || starAlpha < 0.05) {
@@ -457,12 +648,40 @@ export class PhaserWeatherSystem {
     }
   }
 
+  /** Map an azimuth to a screen X, assuming a south-facing view (E→S→W arc
+   *  maps to left→center→right). Off-arc azimuths get parked off-screen. */
+  private azimuthToX(azimuth: number, w: number): number {
+    const wrappedAz = ((azimuth % 360) + 360) % 360;
+    if (wrappedAz < 90) return -w * 0.1;
+    if (wrappedAz > 270) return w * 1.1;
+    return w * ((wrappedAz - 90) / 180);
+  }
+
+  /** Map an elevation to a screen Y within the sky band. Clamped to [0, 60]°;
+   *  higher is rare and keeping the disc below the very top edge looks better
+   *  than pinning it. */
+  private elevationToY(elevation: number, skyH: number): number {
+    const elevForY = Math.max(0, Math.min(60, elevation));
+    return skyH * (1 - elevForY / 60 * 0.7);
+  }
+
   private drawMoon(w: number, skyH: number) {
     this.moonGfx.clear();
 
     const sunElev = this.state.sunElevation;
     const moonElev = this.state.moonElevation;
     const moonAz = this.state.moonAzimuth;
+
+    // Stylised sun (hand-drawn styles provide the hook; the analytic Preetham
+    // sky is style-gated off for them, so this is their only daytime sun).
+    // Shares the moon's layer: at most a short dawn/dusk window shows both.
+    if (this.strategy.drawSun && sunElev > 0 && this.state.type === 'sunny') {
+      const sunX = this.azimuthToX(this.state.sunAzimuth, w);
+      const sunY = this.elevationToY(sunElev, skyH);
+      this.moonGfx.setAlpha(Math.min(1, sunElev / 5)); // ease over the horizon
+      this.strategy.drawSun(this.moonGfx, sunX, sunY, 26, 7);
+      this.moonGfx.setAlpha(1);
+    }
 
     // Match Three.js sky-and-fog.ts:391 — moon visible when sun is going
     // down and moon is above horizon.
@@ -471,21 +690,8 @@ export class PhaserWeatherSystem {
 
     const moonPhase = this.state.moonPhase;
 
-    // Position from celestial state, assuming a south-facing view (E→S→W
-    // arc maps to left→center→right). Off-arc azimuths get parked off-screen.
-    const wrappedAz = ((moonAz % 360) + 360) % 360;
-    let moonX: number;
-    if (wrappedAz < 90) {
-      moonX = -w * 0.1;
-    } else if (wrappedAz > 270) {
-      moonX = w * 1.1;
-    } else {
-      moonX = w * ((wrappedAz - 90) / 180);
-    }
-    // Clamp elevation to [0, 60] for screen mapping; higher than 60° is rare
-    // and keeping the moon below the very top edge looks better than pinning it.
-    const elevForY = Math.max(0, Math.min(60, moonElev));
-    const moonY = skyH * (1 - elevForY / 60 * 0.7);
+    const moonX = this.azimuthToX(moonAz, w);
+    const moonY = this.elevationToY(moonElev, skyH);
 
     // Brightness from phase fullness (matches Three.js sky-and-fog.ts:403-405)
     const fullness = 1 - 2 * Math.abs(moonPhase - 0.5);
@@ -511,11 +717,14 @@ export class PhaserWeatherSystem {
     this.cloudGfx.clear();
 
     if (!this.cloudsEnabled) return;
-    if (this.state.type === 'sunny') return;
+    // A sunny sky is empty by default, but the hand-drawn style keeps a few
+    // ink clouds drifting through it — a 1930s cartoon sky is never bare.
+    if (this.state.type === 'sunny' && !this.strategy.cloudsOnSunny) return;
 
     const cloudAlpha = this.state.type === 'cloudy' ? 0.5 :
       this.state.type === 'rainy' ? 0.7 :
-        this.state.type === 'snowy' ? 0.6 : 0.3;
+        this.state.type === 'snowy' ? 0.6 :
+          this.state.type === 'sunny' ? 0.85 : 0.3;
 
     const t = performance.now() * 0.001;
     // Screen-X component of wind (positive = blow right, negative = blow left).
@@ -586,7 +795,128 @@ export class PhaserWeatherSystem {
     if (fogAlpha < 0.01) return;
 
     this.fogGfx.fillStyle(this.strategy.palette.fogColor, fogAlpha);
-    this.fogGfx.fillRect(0, 0, w, h);
+    // 2× overscan — stays edge-to-edge during the camera-lift zoom-out.
+    this.fogGfx.fillRect(-w * 0.5, -h * 0.5, w * 2, h * 2);
+  }
+
+  // ── Rainbow (F4) ──
+
+  /** Draw the arc once; updateRainbow only animates its alpha. */
+  private spawnRainbow(): void {
+    const w = this.scene.game.canvas.width;
+    const skyH = this.scene.game.canvas.height * getBaseline(this.scene);
+    if (!this.rainbowGfx) {
+      this.rainbowGfx = this.scene.add.graphics();
+      this.rainbowGfx.setScrollFactor(0.1, 0); // slight parallax, like the mountains
+      this.rainbowGfx.setDepth(-96);            // in the sky, behind parallax layers
+    }
+    const g = this.rainbowGfx;
+    g.clear();
+    // 7 concentric upper-half arcs; center below the horizon so only the crown shows.
+    const cx = w * 0.5;
+    const cy = skyH * 1.08;
+    const bands = [0xff3b30, 0xff9500, 0xffe000, 0x34c759, 0x30a0ff, 0x3040e0, 0x8f30d0];
+    const bandW = Math.max(3, w * 0.008);
+    const rOuter = w * 0.42;
+    for (let i = 0; i < bands.length; i++) {
+      g.lineStyle(bandW, bands[i], 0.55);
+      g.beginPath();
+      g.arc(cx, cy, rOuter - i * bandW, Math.PI, Math.PI * 2, false);
+      g.strokePath();
+    }
+    g.setAlpha(0);
+    this.rainbowActive = true;
+    this.rainbowAge = 0;
+  }
+
+  private updateRainbow(dt: number): void {
+    if (!this.rainbowGfx) { this.rainbowActive = false; return; }
+    this.rainbowAge += dt;
+    const total = RAINBOW_FADE_IN + RAINBOW_HOLD + RAINBOW_FADE_OUT;
+    let k: number;
+    if (this.rainbowAge < RAINBOW_FADE_IN) {
+      k = this.rainbowAge / RAINBOW_FADE_IN;
+    } else if (this.rainbowAge < RAINBOW_FADE_IN + RAINBOW_HOLD) {
+      k = 1;
+    } else if (this.rainbowAge < total) {
+      k = 1 - (this.rainbowAge - RAINBOW_FADE_IN - RAINBOW_HOLD) / RAINBOW_FADE_OUT;
+    } else {
+      this.rainbowGfx.clear();
+      this.rainbowGfx.setAlpha(0);
+      this.rainbowActive = false;
+      return;
+    }
+    this.rainbowGfx.setAlpha(k * RAINBOW_MAX_ALPHA);
+  }
+
+  // ── Meteor (F5) ──
+
+  private updateMeteor(dt: number, w: number, skyH: number): void {
+    const isNight = this.currentStarAlpha >= METEOR_STAR_ALPHA_MIN;
+
+    if (this.meteorActive && this.meteorGfx) {
+      this.meteorAge += dt;
+      const t = this.meteorAge / this.meteorLife;
+      if (t >= 1 || !isNight) {
+        this.meteorGfx.clear();
+        this.meteorGfx.setAlpha(0);
+        this.meteorActive = false;
+        this.meteorNextIn = randRange(METEOR_MIN_GAP, METEOR_MAX_GAP);
+        return;
+      }
+      this.meteorGfx.x += this.meteorVX * dt;
+      this.meteorGfx.y += this.meteorVY * dt;
+      this.meteorGfx.setAlpha(Math.sin(t * Math.PI)); // 0 → 1 → 0
+      return;
+    }
+
+    if (!isNight) return;
+    if (this.meteorNextIn < 0) { // first night frame — schedule, don't fire yet
+      this.meteorNextIn = randRange(METEOR_MIN_GAP, METEOR_MAX_GAP);
+      return;
+    }
+    this.meteorNextIn -= dt;
+    if (this.meteorNextIn <= 0) this.spawnMeteor(w, skyH);
+  }
+
+  private spawnMeteor(w: number, skyH: number): void {
+    if (!this.meteorGfx) {
+      this.meteorGfx = this.scene.add.graphics();
+      this.meteorGfx.setScrollFactor(0);
+      this.meteorGfx.setDepth(-98); // among the stars
+      this.meteorGfx.setBlendMode(Phaser.BlendModes.ADD);
+    }
+    const g = this.meteorGfx;
+    g.clear();
+
+    this.meteorLife = randRange(0.6, 1.0);
+    // Downward diagonal (screen space); head leads.
+    const dirX = (Math.random() - 0.5) * 1.2;
+    const dirY = 0.7 + Math.random() * 0.5;
+    const len = Math.hypot(dirX, dirY);
+    const nx = dirX / len, ny = dirY / len;
+    const travel = w * 0.5; // total px over life
+    this.meteorVX = (nx * travel) / this.meteorLife;
+    this.meteorVY = (ny * travel) / this.meteorLife;
+
+    // Streak in local space: head at origin, thinning tail behind.
+    const tailLen = 60;
+    const segs = 6;
+    for (let s = 0; s < segs; s++) {
+      const a0 = 1 - s / segs;
+      g.lineStyle(3 * a0 + 0.5, 0xdfeaff, a0 * 0.9);
+      g.lineBetween(
+        -nx * tailLen * (s / segs), -ny * tailLen * (s / segs),
+        -nx * tailLen * ((s + 1) / segs), -ny * tailLen * ((s + 1) / segs),
+      );
+    }
+    g.fillStyle(0xffffff, 1);
+    g.fillCircle(0, 0, 2.5);
+
+    g.setPosition(w * (0.2 + Math.random() * 0.5), skyH * (0.05 + Math.random() * 0.2));
+    g.setAlpha(0);
+    this.meteorActive = true;
+    this.meteorAge = 0;
   }
 
   private initParticles() {
@@ -803,6 +1133,7 @@ export class PhaserWeatherSystem {
   }
 
   dispose() {
+    this.cloudShadowGfx?.destroy();
     this.skyGfx.destroy();
     this.starImage?.destroy();
     this.starTwinkleGfx?.destroy();
@@ -817,6 +1148,8 @@ export class PhaserWeatherSystem {
     this.leafEmitter?.destroy();
     this.lightningGfx?.destroy();
     this.preethamSky?.destroy();
+    this.rainbowGfx?.destroy();
+    this.meteorGfx?.destroy();
   }
 }
 

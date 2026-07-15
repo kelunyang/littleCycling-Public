@@ -4,7 +4,6 @@
 
 import type { FastifyInstance } from 'fastify';
 import type { RideDatabase } from '../lib/database.js';
-import type { ConfigStore } from '../lib/config-store.js';
 import { GAME_MESSAGE_TYPES } from '@littlecycling/shared';
 import { LlmService } from '../lib/llm-service.js';
 
@@ -12,15 +11,14 @@ const DELAY_BETWEEN_TYPES_MS = 500;
 
 export default async function llmApi(
   fastify: FastifyInstance,
-  opts: { db: RideDatabase; configStore: ConfigStore },
+  opts: { db: RideDatabase },
 ): Promise<void> {
-  const { db, configStore } = opts;
+  const { db } = opts;
   const llm = new LlmService();
 
-  /** Get first enabled LLM provider from config. */
+  /** Get first enabled LLM provider from SQLite. */
   function getProvider() {
-    const config = configStore.get();
-    return config.llm.find((p) => p.enabled);
+    return db.listLlmProviders().find((p) => p.enabled);
   }
 
   /** Generate variants for a single message type. */

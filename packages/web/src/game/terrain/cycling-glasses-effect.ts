@@ -35,11 +35,20 @@ interface ZoneModifier {
   contrastAdd: number;
 }
 
-const ZONE_MODIFIERS: Record<ZoneType, ZoneModifier> = {
-  open:   { tintMul: [1, 1, 1],       brightnessMul: 1.0,  contrastAdd: 0 },
-  urban:  { tintMul: [1, 0.98, 0.95], brightnessMul: 1.05, contrastAdd: 0.02 },
-  forest: { tintMul: [0.85, 1, 0.85], brightnessMul: 0.80, contrastAdd: -0.03 },
-  tunnel: { tintMul: [0.7, 0.7, 0.75], brightnessMul: 0.45, contrastAdd: 0.05 },
+/**
+ * Zones tint, they do NOT dim. These used to darken the whole frame — tunnel
+ * ×0.45, forest ×0.80 — which made sense in first person (you were *inside* the
+ * tunnel) but not in the diorama, where you look down at a toy world that has no
+ * tunnel geometry: the picture just went black for no visible reason. Worse, a
+ * post-pass multiplier is a back door around the "never darker than the demos'
+ * night" floor in `day-night-lighting.ts`. Brightness lives in the palette now;
+ * all this may do is tint.
+ */
+export const ZONE_MODIFIERS: Record<ZoneType, ZoneModifier> = {
+  open:   { tintMul: [1, 1, 1],          brightnessMul: 1.0, contrastAdd: 0 },
+  urban:  { tintMul: [1, 0.99, 0.97],    brightnessMul: 1.0, contrastAdd: 0 },
+  forest: { tintMul: [0.94, 1, 0.94],    brightnessMul: 1.0, contrastAdd: 0 },
+  tunnel: { tintMul: [1, 1, 1],          brightnessMul: 1.0, contrastAdd: 0 },
 };
 
 /** Zone transition speed (per second). ~500ms to complete. */
@@ -233,12 +242,21 @@ const WEATHER_TO_LENS: Record<WeatherType, Exclude<GlassesLens, 'auto'>> = {
 /** Coin glow fade speed (intensity per second). ~0.33s full fade. */
 const COIN_GLOW_FADE_SPEED = 3.0;
 
+/** Bloom composite strength when bloom is active (neon route line). */
+const BLOOM_COMPOSITE_STRENGTH = 0.5;
+
 export class CyclingGlassesEffect {
   // Main composer: RenderPass → BloomComposite → Glasses → Tunnel
   private composer: EffectComposer;
   private glassesPass: ShaderPass;
   private tunnelPass: TunnelVisionPass;
   private bloomCompositePass: ShaderPass;
+  /**
+   * World-style post pass (paper-craft etc.), owned by the TerrainStyleStrategy
+   * and injected via setStylePass(). Decoupled from the glasses effect so the
+   * style survives with glasses off. Appended as the final composer pass.
+   */
+  private stylePass: ShaderPass | null = null;
 
   // Bloom composer: renders only BLOOM_LAYER objects → UnrealBloomPass
   private bloomComposer: EffectComposer;
@@ -296,7 +314,7 @@ export class CyclingGlassesEffect {
 
     // Bloom composite — blends bloom texture onto main render
     this.bloomCompositePass = new ShaderPass(BloomCompositeShader);
-    this.bloomCompositePass.uniforms['uBloomStrength'].value = 0.5;
+    this.bloomCompositePass.uniforms['uBloomStrength'].value = BLOOM_COMPOSITE_STRENGTH;
     this.composer.addPass(this.bloomCompositePass);
 
     // Glasses pass
@@ -307,6 +325,9 @@ export class CyclingGlassesEffect {
     this.tunnelPass = new TunnelVisionPass();
     this.composer.addPass(this.tunnelPass);
 
+    // NOTE: the world-style post pass (paper-craft) is appended later via
+    // setStylePass() — it belongs to the strategy, not the glasses effect.
+
     // Lens marks
     this.marksManager = new LensMarksManager();
     this.glassesPass.uniforms['uMarksTexture'].value = this.marksManager.texture;
@@ -315,6 +336,17 @@ export class CyclingGlassesEffect {
     const initialPreset = LENS_PRESETS[WEATHER_TO_LENS['sunny']];
     this.applyPresetImmediate(initialPreset);
     this.currentValues = { ...initialPreset, tint: [...initialPreset.tint] };
+  }
+
+  /**
+   * Enable/disable the selective bloom chain. Setting strength to 0 makes
+   * render() skip the entire second scene render + UnrealBloom blur chain — a
+   * large saving in styles with no bloom-layer objects (paper/crayon route
+   * line). The neon (plastic) route line needs it on.
+   */
+  setBloomEnabled(enabled: boolean): void {
+    this.bloomCompositePass.uniforms['uBloomStrength'].value =
+      enabled ? BLOOM_COMPOSITE_STRENGTH : 0;
   }
 
   /** Set the lens mode. */
@@ -441,6 +473,23 @@ export class CyclingGlassesEffect {
     this.composer.setSize(width, height);
     this.bloomComposer.setSize(width, height);
     this.bloomPass.resolution.set(width, height);
+    const res = this.stylePass?.uniforms['uResolution'];
+    if (res) res.value.set(width, height);
+  }
+
+  /**
+   * Install (or replace/clear) the strategy's world-style post pass as the
+   * final composer pass. Pass null to remove it (e.g. switching to plastic).
+   */
+  setStylePass(pass: ShaderPass | null): void {
+    if (this.stylePass) {
+      this.composer.removePass(this.stylePass);
+      this.stylePass = null;
+    }
+    if (pass) {
+      this.composer.addPass(pass);
+      this.stylePass = pass;
+    }
   }
 
   dispose(): void {

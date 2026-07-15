@@ -13,6 +13,11 @@ const coinMaterial = new THREE.MeshPhongMaterial({
   specular: 0xffffff,
 });
 
+// Module-level singletons: every renderer's coins share them, so no pool may
+// dispose them (CoinPool checks this flag).
+coinGeometry.userData.shared = true;
+coinMaterial.userData.shared = true;
+
 export function createCoinMesh(): THREE.Mesh {
   const mesh = new THREE.Mesh(coinGeometry, coinMaterial);
   mesh.userData.isCoin = true;

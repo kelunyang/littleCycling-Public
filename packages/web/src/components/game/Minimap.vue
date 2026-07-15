@@ -10,8 +10,9 @@
           </feMerge>
         </filter>
       </defs>
-      <!-- Static opaque black backdrop — does NOT rotate, so no corners sweep through -->
-      <rect x="0" y="0" :width="svgW" :height="svgH" fill="#050a14" />
+      <!-- Backdrop lives on the container (solid black), so the SVG itself is
+           transparent — any letterboxing from stretching just shows black,
+           never a seam. -->
       <g :transform="rotateTransform">
         <polyline
           :points="routePolyline"
@@ -24,6 +25,24 @@
           opacity="0.8"
         />
       </g>
+      <!-- Sonar ping: rings ripple outward from the current position. Two,
+           staggered, so a ring is always mid-flight. -->
+      <circle
+        class="sonar-ring"
+        :cx="ballPos.x"
+        :cy="ballPos.y"
+        fill="none"
+        stroke="#ff2d6b"
+        stroke-width="1.5"
+      />
+      <circle
+        class="sonar-ring sonar-ring--delayed"
+        :cx="ballPos.x"
+        :cy="ballPos.y"
+        fill="none"
+        stroke="#ff2d6b"
+        stroke-width="1.5"
+      />
       <!-- Ball stays fixed at center (not rotated) -->
       <circle
         :cx="ballPos.x"
@@ -170,10 +189,9 @@ const directionArrow = computed(() => {
   width: 180px;
   height: 120px;
   overflow: hidden;
-  background: #050a14;
+  background: #000;
   border: 1.5px solid var(--hud-border);
   clip-path: var(--clip-panel);
-  box-shadow: var(--hud-glow-cyan);
 }
 
 .minimap {
@@ -183,5 +201,24 @@ const directionArrow = computed(() => {
 
 .minimap g {
   transition: transform 0.3s ease;
+}
+
+/* Sonar ping — radius grows from the ball outward while fading. Animating the
+   SVG `r` geometry property (supported in Chromium, which is what we ship). */
+.sonar-ring {
+  animation: minimap-sonar 2.4s ease-out infinite;
+}
+
+.sonar-ring--delayed {
+  animation-delay: 1.2s;
+}
+
+@keyframes minimap-sonar {
+  0% { r: 4; opacity: 0.7; }
+  100% { r: 26; opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sonar-ring { display: none; }
 }
 </style>

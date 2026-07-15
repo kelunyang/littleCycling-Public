@@ -32,21 +32,19 @@ watch(
 </script>
 
 <style scoped>
+/* Borderless overlay, matching the top metrics — glowing (3D) or embossed (2D)
+   coin count floating over the world, no card. */
 .hud-coins {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  background: var(--hud-bg);
-  clip-path: var(--clip-panel-sm);
-  border: 1.5px solid rgba(252, 238, 9, 0.25);
+  gap: 10px;
+  padding: 2px;
   pointer-events: auto;
   transition: transform 0.15s ease;
 }
 
 .hud-coins--pulse {
   animation: coin-grow 0.3s ease;
-  box-shadow: var(--hud-glow-yellow);
 }
 
 @keyframes coin-grow {
@@ -55,37 +53,53 @@ watch(
   }
   40% {
     transform: scale(1.25);
+    filter: brightness(1.5);
   }
   100% {
     transform: scale(1);
   }
 }
 
+/* ── 3D: yellow neon glow ── */
 .hud-coins__icon {
   color: var(--accent-coin);
-  font-size: 16px;
-  filter: drop-shadow(0 0 4px rgba(252, 238, 9, 0.6));
+  font-size: 24px;
+  filter: drop-shadow(0 0 6px rgba(252, 238, 9, 0.8));
 }
 
 .hud-coins__count {
   font-family: var(--font-display);
-  font-size: 20px;
+  font-size: 30px;
   font-weight: 700;
   color: var(--accent-coin);
-  text-shadow: 0 0 10px rgba(252, 238, 9, 0.5);
+  text-shadow: 0 0 10px rgba(252, 238, 9, 0.7), 0 0 24px rgba(252, 238, 9, 0.35);
   font-variant-numeric: tabular-nums;
   letter-spacing: 1px;
 }
 
 .hud-coins__combo {
   font-family: var(--font-display);
-  font-size: 13px;
+  font-size: 18px;
   font-weight: 700;
   color: var(--accent-coin);
-  background: rgba(252, 238, 9, 0.12);
-  padding: 2px 8px;
-  clip-path: var(--clip-panel-sm);
-  text-shadow: 0 0 6px rgba(252, 238, 9, 0.4);
+  text-shadow: 0 0 8px rgba(252, 238, 9, 0.6);
   letter-spacing: 0.5px;
+}
+
+/* ── 2D: embossed coins ── */
+.game-view[data-hud-mode="2d"] .hud-coins__count,
+.game-view[data-hud-mode="2d"] .hud-coins__combo {
+  text-shadow:
+    -1px -1px 0 rgba(255, 255, 255, 0.6),
+    1px -1px 0 rgba(255, 255, 255, 0.3),
+    -1px 1px 0 rgba(0, 0, 0, 0.25),
+    1px 1px 0 rgba(0, 0, 0, 0.45),
+    0 2px 3px rgba(0, 0, 0, 0.35);
+}
+
+.game-view[data-hud-mode="2d"] .hud-coins__icon {
+  filter:
+    drop-shadow(-1px -1px 0 rgba(255, 255, 255, 0.5))
+    drop-shadow(1px 1px 1px rgba(0, 0, 0, 0.4));
 }
 </style>

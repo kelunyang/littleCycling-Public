@@ -53,3 +53,19 @@ export function isRedLine(heartRate: number, hrMax: number): boolean {
   const zone = getHrZone(heartRate, hrMax);
   return zone?.zone === 5;
 }
+
+/**
+ * Estimate maximum heart rate from age using the Tanaka formula
+ * (Tanaka, Monahan & Seals, 2001): HRmax = 208 − 0.7 × age.
+ *
+ * More accurate across age groups than the classic 220 − age, which
+ * overestimates for older and underestimates for younger riders. Only an
+ * estimate — a measured HRmax (or an observed max during a ride) always wins.
+ *
+ * @param age - Age in years
+ * @returns Estimated HRmax (bpm), rounded; 0 for a non-positive age.
+ */
+export function hrMaxFromAge(age: number): number {
+  if (age <= 0) return 0;
+  return Math.round(208 - 0.7 * age);
+}

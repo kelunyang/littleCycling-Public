@@ -5,8 +5,22 @@
 
 import Database from 'better-sqlite3';
 import type BetterSqlite3 from 'better-sqlite3';
-import type { Ride, RideSample, RideDayCount, ComparisonSample, ActivePlanState, PlanDayCompletion, DetectedSensor } from '@littlecycling/shared';
-import { getHrZone } from '@littlecycling/shared';
+import dayjs from 'dayjs';
+import type {
+  Ride, RideSample, RideDayCount, ComparisonSample, ActivePlanState, PlanDayCompletion,
+  DetectedSensor, LlmProvider, TrainingPlan, TrainingPlanSummary,
+  AnalysisReport, AnalysisReportSummary, AnalysisFocus,
+} from '@littlecycling/shared';
+import { getHrZone, resampleTo1Hz } from '@littlecycling/shared';
+
+/** 由課表名稱產生 URL/檔名友善的 slug（原 PlanStore 搬過來，供課表 id 用）。 */
+export function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 60);
+}
 
 export interface CreateRideOpts {
   startedAt: number;
@@ -14,6 +28,29 @@ export interface CreateRideOpts {
   routeName?: string;
   /** Sensors active at the start of the ride; serialised to JSON in the DB. */
   sensors?: DetectedSensor[];
+  /**
+   * 訓練模式標記：workout profile id（如 'ftp_test'）或
+   * `plan:<planId>:<day>`（課表訓練）。自由騎不帶（NULL）。
+   */
+  workoutId?: string;
+}
+
+/** listRides 查詢選項；全部選填，維持既有預設行為。 */
+export interface ListRidesOpts {
+  limit?: number;
+  offset?: number;
+  routeId?: string;
+  /** 起始時間 ms（含）— started_at >= from。 */
+  from?: number;
+  /** 結束時間 ms（含）— started_at <= to。 */
+  to?: number;
+  /** true 時排除 0 距離 / 0 功率的空紀錄。 */
+  excludeEmpty?: boolean;
+  /**
+   * 訓練模式過濾：'plan'（課表訓練）、'free'（自由騎）、
+   * 或指定的 workout profile id（如 'ftp_test'）。
+   */
+  mode?: string;
 }
 
 export interface EndRideSummary {
@@ -113,6 +150,43 @@ export class RideDatabase {
         manual        INTEGER NOT NULL DEFAULT 0,
         UNIQUE(plan_id, day)
       );
+
+      -- LLM provider settings (moved out of config.json so plaintext API keys
+      -- live only in SQLite). sort_order preserves the original array order so
+      -- the "llmIndex" used by the plan/analysis APIs stays stable.
+      CREATE TABLE IF NOT EXISTS llm_providers (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL DEFAULT '',
+        key         TEXT NOT NULL DEFAULT '',
+        endpoint    TEXT NOT NULL DEFAULT '',
+        model       TEXT NOT NULL DEFAULT '',
+        enabled     INTEGER NOT NULL DEFAULT 0,
+        sort_order  INTEGER NOT NULL DEFAULT 0
+      );
+
+      -- Training plans (課表本體；原本存 data/plans/*.json，改存 SQLite).
+      -- weeks_json 整包 JSON：全 repo 不查 weeks 內部，課表一律整份讀寫。
+      CREATE TABLE IF NOT EXISTS plans (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        total_days  INTEGER NOT NULL,
+        created_at  INTEGER NOT NULL,
+        source      TEXT NOT NULL DEFAULT 'manual',
+        weeks_json  TEXT NOT NULL
+      );
+
+      -- LLM 訓練分析報告（markdown 內容，供前端瀏覽/刪除歷史）.
+      CREATE TABLE IF NOT EXISTS analysis_reports (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at     INTEGER NOT NULL,
+        focus          TEXT NOT NULL DEFAULT 'review',
+        question       TEXT,
+        content        TEXT NOT NULL,
+        provider_name  TEXT NOT NULL DEFAULT '',
+        provider_model TEXT NOT NULL DEFAULT '',
+        ride_ids       TEXT
+      );
     `);
 
     this.runMigrations();
@@ -133,6 +207,21 @@ export class RideDatabase {
     }
     if (!cols.some((c) => c.name === 'zone_sustain_pct')) {
       this.db.exec(`ALTER TABLE rides ADD COLUMN zone_sustain_pct REAL`);
+    }
+    if (!cols.some((c) => c.name === 'workout_id')) {
+      this.db.exec(`ALTER TABLE rides ADD COLUMN workout_id TEXT`);
+    }
+    if (!cols.some((c) => c.name === 'rpe')) {
+      // 騎後自覺強度 RPE 1-5（Strava「你的感受」概念）；追加式遷移。
+      this.db.exec(`ALTER TABLE rides ADD COLUMN rpe INTEGER`);
+    }
+
+    // analysis_reports.ride_ids — 額外 guard：CREATE TABLE 已含此欄，但若 user
+    // 之前已在 Windows 建出舊表（無此欄），CREATE TABLE IF NOT EXISTS 不會補欄，
+    // 故在此追加式補上。init() 先建表、才呼叫 runMigrations，表必存在。
+    const reportCols = this.db.prepare(`PRAGMA table_info(analysis_reports)`).all() as { name: string }[];
+    if (!reportCols.some((c) => c.name === 'ride_ids')) {
+      this.db.exec(`ALTER TABLE analysis_reports ADD COLUMN ride_ids TEXT`);
     }
   }
 
@@ -225,8 +314,8 @@ export class RideDatabase {
 
   createRide(opts: CreateRideOpts): number {
     const stmt = this.db.prepare(`
-      INSERT INTO rides (started_at, route_id, route_name, sensors)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO rides (started_at, route_id, route_name, sensors, workout_id)
+      VALUES (?, ?, ?, ?, ?)
     `);
     const sensorsJson = opts.sensors && opts.sensors.length > 0
       ? JSON.stringify(opts.sensors)
@@ -236,6 +325,7 @@ export class RideDatabase {
       opts.routeId ?? null,
       opts.routeName ?? null,
       sensorsJson,
+      opts.workoutId ?? null,
     );
     return result.lastInsertRowid as number;
   }
@@ -281,16 +371,51 @@ export class RideDatabase {
     return row ? this.mapRide(row) : undefined;
   }
 
-  listRides(limit = 20, offset = 0, routeId?: string): Ride[] {
-    let sql = 'SELECT * FROM rides';
+  /**
+   * 列出騎乘（分頁 + 過濾）。LEFT JOIN plan_completions 把課表連結
+   * （planId/planDay）順帶填回每筆 ride，並支援日期區間、模式與 0km/0W 過濾。
+   */
+  listRides(opts: ListRidesOpts = {}): Ride[] {
+    const { limit = 20, offset = 0, routeId, from, to, excludeEmpty, mode } = opts;
+
+    const where: string[] = [];
     const params: unknown[] = [];
 
     if (routeId) {
-      sql += ' WHERE route_id = ?';
+      where.push('rides.route_id = ?');
       params.push(routeId);
     }
+    if (from != null) {
+      where.push('rides.started_at >= ?');
+      params.push(from);
+    }
+    if (to != null) {
+      where.push('rides.started_at <= ?');
+      params.push(to);
+    }
+    if (excludeEmpty) {
+      where.push('rides.distance_m > 0 AND COALESCE(rides.avg_power_w, 0) > 0');
+    }
+    if (mode === 'plan') {
+      // 課表訓練：workout_id 以 plan: 開頭，或有 plan_completions 連結（舊紀錄）。
+      where.push(`(rides.workout_id LIKE 'plan:%' OR pc.ride_id IS NOT NULL)`);
+    } else if (mode === 'free') {
+      // 自由騎：無 workout_id 且無課表連結。
+      where.push('rides.workout_id IS NULL AND pc.ride_id IS NULL');
+    } else if (mode) {
+      // 指定 workout profile id。
+      where.push('rides.workout_id = ?');
+      params.push(mode);
+    }
 
-    sql += ' ORDER BY started_at DESC LIMIT ? OFFSET ?';
+    let sql = `
+      SELECT rides.*, pc.plan_id AS pc_plan_id, pc.day AS pc_day
+      FROM rides
+      LEFT JOIN plan_completions pc ON pc.ride_id = rides.id
+    `;
+    if (where.length > 0) sql += ` WHERE ${where.join(' AND ')}`;
+    // GROUP BY 避免一筆 ride 對多個課表連結時被複製成多列。
+    sql += ' GROUP BY rides.id ORDER BY rides.started_at DESC LIMIT ? OFFSET ?';
     params.push(limit, offset);
 
     const rows = this.db.prepare(sql).all(...params) as any[];
@@ -299,6 +424,27 @@ export class RideDatabase {
 
   deleteRide(id: number): boolean {
     const result = this.db.prepare('DELETE FROM rides WHERE id = ?').run(id);
+    return result.changes > 0;
+  }
+
+  /**
+   * 更新騎後回饋（部分更新）：rpe（1-5）與 / 或 notes。兩者皆選填，但至少要帶
+   * 一個欄位。回傳是否有更新到列（false = 找不到該 ride 或未帶任何欄位）。
+   */
+  updateRideFeedback(id: number, patch: { rpe?: number; notes?: string }): boolean {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    if (patch.rpe !== undefined) {
+      sets.push('rpe = ?');
+      params.push(patch.rpe);
+    }
+    if (patch.notes !== undefined) {
+      sets.push('notes = ?');
+      params.push(patch.notes);
+    }
+    if (sets.length === 0) return false;
+    params.push(id);
+    const result = this.db.prepare(`UPDATE rides SET ${sets.join(', ')} WHERE id = ?`).run(...params);
     return result.changes > 0;
   }
 
@@ -368,14 +514,51 @@ export class RideDatabase {
     return row.cnt;
   }
 
+  /**
+   * Best continuous 20-minute average power for a ride (watts), used to
+   * estimate FTP after an FTP-test workout (FTP ≈ best20min × 0.95).
+   *
+   * Samples are event-driven and unevenly spaced, so power is treated as
+   * piecewise-constant (carry-forward) and resampled onto a 1-second grid
+   * before a rolling 20-minute (1200 s) window is slid across the ride.
+   *
+   * @returns Best 20-min avg watts, or null if the ride is shorter than
+   *          20 minutes or has no usable power samples.
+   */
+  getBest20MinAvgPower(rideId: number): number | null {
+    const WINDOW_SEC = 20 * 60; // 1200
+    const samples = this.getSamplesForExport(rideId); // sorted by elapsed_ms
+    if (samples.length === 0) return null;
+
+    // Resample power onto a 1 Hz grid via carry-forward (shared helper — the
+    // same手法原本內嵌於此，抽到 ride-metrics.resampleTo1Hz 共用，行為不變).
+    const { totalSec, power: grid } = resampleTo1Hz(samples);
+    if (totalSec < WINDOW_SEC) return null; // not enough ride to hold a window
+
+    // Rolling sum over WINDOW_SEC seconds; track the best average.
+    let windowSum = 0;
+    for (let t = 0; t < WINDOW_SEC; t++) windowSum += grid[t];
+    let best = windowSum;
+    for (let t = WINDOW_SEC; t <= totalSec; t++) {
+      windowSum += grid[t] - grid[t - WINDOW_SEC];
+      if (windowSum > best) best = windowSum;
+    }
+
+    const avg = best / WINDOW_SEC;
+    return avg > 0 ? Math.round(avg) : null;
+  }
+
   // ── Calendar queries ──
 
-  getRideCountsByDateRange(fromTs: number, toTs: number): RideDayCount[] {
+  getRideCountsByDateRange(fromTs: number, toTs: number, excludeEmpty = false): RideDayCount[] {
+    const emptyClause = excludeEmpty
+      ? ' AND distance_m > 0 AND COALESCE(avg_power_w, 0) > 0'
+      : '';
     const rows = this.db.prepare(`
       SELECT date(started_at / 1000, 'unixepoch', 'localtime') as date,
              COUNT(*) as count
       FROM rides
-      WHERE started_at >= ? AND started_at < ?
+      WHERE started_at >= ? AND started_at < ?${emptyClause}
       GROUP BY date
       ORDER BY date
     `).all(fromTs, toTs) as any[];
@@ -386,10 +569,13 @@ export class RideDatabase {
     }));
   }
 
-  getRidesByDate(dateStr: string): Ride[] {
+  getRidesByDate(dateStr: string, excludeEmpty = false): Ride[] {
+    const emptyClause = excludeEmpty
+      ? ' AND distance_m > 0 AND COALESCE(avg_power_w, 0) > 0'
+      : '';
     const rows = this.db.prepare(`
       SELECT * FROM rides
-      WHERE date(started_at / 1000, 'unixepoch', 'localtime') = ?
+      WHERE date(started_at / 1000, 'unixepoch', 'localtime') = ?${emptyClause}
       ORDER BY started_at DESC
     `).all(dateStr) as any[];
 
@@ -463,7 +649,12 @@ export class RideDatabase {
       routeId: row.route_id ?? undefined,
       routeName: row.route_name ?? undefined,
       notes: row.notes ?? undefined,
+      rpe: row.rpe ?? undefined,
       sensors,
+      workoutId: row.workout_id ?? undefined,
+      // planId/planDay 僅 listRides 的 LEFT JOIN 會帶回 pc_* 別名；其餘查詢為 undefined。
+      planId: row.pc_plan_id ?? undefined,
+      planDay: row.pc_day ?? undefined,
     };
   }
 
@@ -571,6 +762,226 @@ export class RideDatabase {
       completedAt: row.completed_at,
       manual: row.manual === 1,
     };
+  }
+
+  // ── LLM providers ──
+  // 整組覆蓋（replace-all）是刻意的：PUT /api/llm-providers 一次帶完整清單，
+  // sort_order 直接用陣列 index 重寫，語意最單純、也不會殘留被刪掉的舊列。
+
+  /** 依 sort_order 回傳所有 LLM provider（含明碼 key，僅供後端內部呼叫）。 */
+  listLlmProviders(): LlmProvider[] {
+    const rows = this.db.prepare(
+      'SELECT id, name, key, endpoint, model, enabled FROM llm_providers ORDER BY sort_order',
+    ).all() as {
+      id: string; name: string; key: string; endpoint: string; model: string; enabled: number;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      key: r.key,
+      endpoint: r.endpoint,
+      model: r.model,
+      enabled: r.enabled === 1,
+    }));
+  }
+
+  /** 目前儲存的 provider 數量（搬遷判斷「DB 是否為空」用）。 */
+  countLlmProviders(): number {
+    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM llm_providers').get() as { cnt: number };
+    return row.cnt;
+  }
+
+  /**
+   * 以整組陣列覆蓋所有 LLM provider（原子交易）：先清空再依序插入，
+   * sort_order = 陣列 index，藉此保留原順序。
+   */
+  replaceLlmProviders(providers: LlmProvider[]): void {
+    const del = this.db.prepare('DELETE FROM llm_providers');
+    const ins = this.db.prepare(`
+      INSERT INTO llm_providers (id, name, key, endpoint, model, enabled, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const tx = this.db.transaction((items: LlmProvider[]) => {
+      del.run();
+      items.forEach((p, i) => {
+        ins.run(p.id, p.name, p.key, p.endpoint, p.model, p.enabled ? 1 : 0, i);
+      });
+    });
+    tx(providers);
+  }
+
+  // ── Training plans ──
+  // 課表本體改存 SQLite（原 PlanStore 的 JSON 檔）；weeks 一律整份讀寫。
+
+  /** 列出所有課表（不含 weeks），依建立時間新到舊排序。 */
+  listPlans(): TrainingPlanSummary[] {
+    const rows = this.db.prepare(
+      `SELECT id, name, description, total_days, created_at, source
+       FROM plans ORDER BY created_at DESC`,
+    ).all() as {
+      id: string; name: string; description: string;
+      total_days: number; created_at: number; source: string;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      totalDays: r.total_days,
+      createdAt: r.created_at,
+      source: r.source as TrainingPlan['source'],
+    }));
+  }
+
+  /** 取單一課表（含 weeks）；weeks_json 壞掉回 null。 */
+  getPlan(id: string): TrainingPlan | null {
+    const row = this.db.prepare(
+      `SELECT id, name, description, total_days, created_at, source, weeks_json
+       FROM plans WHERE id = ?`,
+    ).get(id) as {
+      id: string; name: string; description: string; total_days: number;
+      created_at: number; source: string; weeks_json: string;
+    } | undefined;
+    if (!row) return null;
+    try {
+      const weeks = JSON.parse(row.weeks_json) as TrainingPlan['weeks'];
+      return {
+        id: row.id,
+        name: row.name,
+        description: row.description,
+        totalDays: row.total_days,
+        createdAt: row.created_at,
+        source: row.source as TrainingPlan['source'],
+        weeks,
+      };
+    } catch {
+      // weeks_json 損毀 → 視為讀不到，回 null。
+      return null;
+    }
+  }
+
+  /** 建立課表。id 沿用 `slugify(name)-YYYYMMDDHHmmss`，createdAt 為現在。 */
+  createPlan(plan: Omit<TrainingPlan, 'id' | 'createdAt'>): TrainingPlan {
+    const id = `${slugify(plan.name)}-${dayjs().format('YYYYMMDDHHmmss')}`;
+    const full: TrainingPlan = { ...plan, id, createdAt: Date.now() };
+    this.db.prepare(
+      `INSERT INTO plans (id, name, description, total_days, created_at, source, weeks_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      full.id,
+      full.name,
+      full.description,
+      full.totalDays,
+      full.createdAt,
+      full.source,
+      JSON.stringify(full.weeks),
+    );
+    return full;
+  }
+
+  /** 刪除課表。回傳是否刪到列。 */
+  deletePlan(id: string): boolean {
+    const result = this.db.prepare('DELETE FROM plans WHERE id = ?').run(id);
+    return result.changes > 0;
+  }
+
+  /**
+   * 遷移用：保留原 id / createdAt 插入課表；id 已存在則不動（DB 內容優先）。
+   * 回傳是否真的插入（false = 已存在被略過）。
+   */
+  insertPlanIfAbsent(plan: TrainingPlan): boolean {
+    const result = this.db.prepare(
+      `INSERT OR IGNORE INTO plans (id, name, description, total_days, created_at, source, weeks_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      plan.id,
+      plan.name,
+      plan.description ?? '',
+      plan.totalDays,
+      plan.createdAt,
+      plan.source ?? 'manual',
+      JSON.stringify(plan.weeks),
+    );
+    return result.changes > 0;
+  }
+
+  // ── Analysis reports ──
+
+  /** 建立一份分析報告，回傳自增 id。 */
+  createAnalysisReport(report: Omit<AnalysisReport, 'id' | 'createdAt'>): number {
+    const result = this.db.prepare(
+      `INSERT INTO analysis_reports
+        (created_at, focus, question, content, provider_name, provider_model, ride_ids)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      Date.now(),
+      report.focus,
+      report.question ?? null,
+      report.content,
+      report.providerName,
+      report.providerModel,
+      report.rideIds && report.rideIds.length > 0 ? JSON.stringify(report.rideIds) : null,
+    );
+    return result.lastInsertRowid as number;
+  }
+
+  /** ride_ids 文字欄 → number[]；壞掉回 undefined（容忍舊/損毀資料）。 */
+  private parseRideIds(raw: string | null): number[] | undefined {
+    if (!raw) return undefined;
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed as number[];
+    } catch {
+      // 忽略損毀列：視為未指定騎乘。
+    }
+    return undefined;
+  }
+
+  /** 列出所有分析報告摘要（不含 content），新到舊排序。 */
+  listAnalysisReports(): AnalysisReportSummary[] {
+    const rows = this.db.prepare(
+      `SELECT id, created_at, focus, question, provider_name, provider_model, ride_ids
+       FROM analysis_reports ORDER BY created_at DESC`,
+    ).all() as {
+      id: number; created_at: number; focus: string; question: string | null;
+      provider_name: string; provider_model: string; ride_ids: string | null;
+    }[];
+    return rows.map((r) => ({
+      id: r.id,
+      createdAt: r.created_at,
+      focus: r.focus as AnalysisFocus,
+      question: r.question ?? undefined,
+      providerName: r.provider_name,
+      providerModel: r.provider_model,
+      rideIds: this.parseRideIds(r.ride_ids),
+    }));
+  }
+
+  /** 取單一分析報告（含 content）；不存在回 null。 */
+  getAnalysisReport(id: number): AnalysisReport | null {
+    const row = this.db.prepare(
+      `SELECT id, created_at, focus, question, content, provider_name, provider_model, ride_ids
+       FROM analysis_reports WHERE id = ?`,
+    ).get(id) as {
+      id: number; created_at: number; focus: string; question: string | null;
+      content: string; provider_name: string; provider_model: string; ride_ids: string | null;
+    } | undefined;
+    if (!row) return null;
+    return {
+      id: row.id,
+      createdAt: row.created_at,
+      focus: row.focus as AnalysisFocus,
+      question: row.question ?? undefined,
+      content: row.content,
+      providerName: row.provider_name,
+      providerModel: row.provider_model,
+      rideIds: this.parseRideIds(row.ride_ids),
+    };
+  }
+
+  /** 刪除分析報告。回傳是否刪到列。 */
+  deleteAnalysisReport(id: number): boolean {
+    const result = this.db.prepare('DELETE FROM analysis_reports WHERE id = ?').run(id);
+    return result.changes > 0;
   }
 
   close(): void {

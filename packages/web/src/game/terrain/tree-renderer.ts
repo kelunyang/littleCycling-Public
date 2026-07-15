@@ -11,11 +11,7 @@ import type { ElevationSampler } from './elevation-sampler';
 import type { MVTFeature } from './mvt-fetcher';
 import { extractPolygonCoords } from './landuse-renderer';
 import { pointInPolygon } from './zone-detector';
-import {
-  TREE_TRUNK_COLOR,
-  TREE_CANOPY_COLORS,
-  GRADIENT_MAP,
-} from './cartoon-materials';
+import type { TerrainStyleStrategy } from './terrain-style-strategy';
 
 /** Grid spacing for tree placement in meters. */
 const TREE_GRID_SPACING = 20;
@@ -50,6 +46,7 @@ export async function buildTreeMeshes(
   originLat: number,
   originLon: number,
   originEle: number,
+  strategy: TerrainStyleStrategy,
 ): Promise<TreeRenderResult> {
   const cosOrigin = Math.cos((originLat * Math.PI) / 180);
 
@@ -111,15 +108,13 @@ export async function buildTreeMeshes(
     return { mesh: new THREE.InstancedMesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial(), 0), treeCount: 0 };
   }
 
-  // Build combined tree geometry (trunk + canopy) with vertex colors
-  const treeGeometry = buildTreeGeometry();
+  // Build combined tree geometry — style override (block cuboids) or default cone+cylinder.
+  const treeGeometry = strategy.buildTreeGeometry
+    ? strategy.buildTreeGeometry()
+    : buildDefaultTreeGeometry(strategy);
 
-  // Create material
-  const material = new THREE.MeshToonMaterial({
-    vertexColors: true,
-    gradientMap: GRADIENT_MAP,
-    side: THREE.DoubleSide,
-  });
+  // Create material from the active style
+  const material = strategy.createTreeMaterial();
 
   const count = treePositions.length;
   const instancedMesh = new THREE.InstancedMesh(treeGeometry, material, count);
@@ -142,7 +137,8 @@ export async function buildTreeMeshes(
     } catch {
       ele = originEle;
     }
-    const y = ele - originEle;
+    // Snap the trunk base to the terrain's quantised layer (no floating trees).
+    const y = strategy.quantizeElevation(ele) - originEle;
 
     // Deterministic scale and rotation from position
     const hash = deterministicHash(lon, lat);
@@ -155,14 +151,25 @@ export async function buildTreeMeshes(
     dummy.updateMatrix();
     instancedMesh.setMatrixAt(i, dummy.matrix);
 
-    // Per-instance canopy color variation
-    const colorIdx = Math.floor(hashFloat(hash, 4) * TREE_CANOPY_COLORS.length) % TREE_CANOPY_COLORS.length;
-    instanceColor.setHex(TREE_CANOPY_COLORS[colorIdx]);
-    instancedMesh.setColorAt(i, instanceColor);
+    // Per-instance canopy color variation. Skipped for cut-out styles, whose
+    // trees carry their colours in the texture — an instanceColor multiply
+    // would tint the trunk green too.
+    if (strategy.tintTreeInstances) {
+      const canopyColors = strategy.treeCanopyColors;
+      const colorIdx = Math.floor(hashFloat(hash, 4) * canopyColors.length) % canopyColors.length;
+      instanceColor.setHex(canopyColors[colorIdx]);
+      instancedMesh.setColorAt(i, instanceColor);
+    }
   }
 
   instancedMesh.instanceMatrix.needsUpdate = true;
   if (instancedMesh.instanceColor) instancedMesh.instanceColor.needsUpdate = true;
+
+  // Ink outline (paper style) — instanced outline child sharing the instance
+  // matrices. Must be created after the matrices are filled in. Cut-out trees
+  // opt out: an inverted hull of an alpha-cut card is a solid black quad.
+  const outline = strategy.outlineTrees ? strategy.createOutline?.(instancedMesh) : null;
+  if (outline) instancedMesh.add(outline);
 
   return { mesh: instancedMesh, treeCount: count };
 }
@@ -170,7 +177,7 @@ export async function buildTreeMeshes(
 /**
  * Build combined trunk + canopy geometry with vertex colors baked in.
  */
-function buildTreeGeometry(): THREE.BufferGeometry {
+function buildDefaultTreeGeometry(strategy: TerrainStyleStrategy): THREE.BufferGeometry {
   // Trunk — cylinder
   const trunkGeom = new THREE.CylinderGeometry(
     TRUNK_RADIUS_TOP, TRUNK_RADIUS_BOTTOM, TRUNK_HEIGHT, TRUNK_SEGMENTS,
@@ -186,8 +193,8 @@ function buildTreeGeometry(): THREE.BufferGeometry {
   canopyGeom.translate(0, TRUNK_HEIGHT + CANOPY_HEIGHT / 2, 0);
 
   // Bake vertex colors
-  const trunkColor = new THREE.Color(TREE_TRUNK_COLOR);
-  const canopyColor = new THREE.Color(TREE_CANOPY_COLORS[0]); // base green
+  const trunkColor = new THREE.Color(strategy.treeTrunkColor);
+  const canopyColor = new THREE.Color(strategy.treeCanopyColors[0]); // base green
 
   addVertexColors(trunkGeom, trunkColor);
   addVertexColors(canopyGeom, canopyColor);
@@ -303,5 +310,16 @@ export function disposeTreeMesh(result: TreeRenderResult): void {
   result.mesh.geometry.dispose();
   if (result.mesh.material instanceof THREE.Material) {
     result.mesh.material.dispose();
+  }
+  // Frees the instanceMatrix/instanceColor GPU buffers — geometry.dispose()
+  // does not reach them (they live on the mesh, not the geometry).
+  result.mesh.dispose();
+  // Dispose any child outline's material (geometry shared → already freed).
+  for (const child of result.mesh.children) {
+    const m = (child as THREE.Mesh).material;
+    if (m instanceof THREE.Material) m.dispose();
+    if ((child as THREE.InstancedMesh).isInstancedMesh) {
+      (child as THREE.InstancedMesh).dispose();
+    }
   }
 }
