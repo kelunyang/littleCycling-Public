@@ -21,27 +21,10 @@
       <div class="loading-intro__progress">
         <div class="loading-intro__bar" role="progressbar" :aria-valuenow="loading.percent">
           <div class="loading-intro__bar-fill" :style="{ width: `${loading.percent}%` }" />
+          <span class="loading-intro__bar-text">{{ statusText }}</span>
         </div>
         <div class="loading-intro__percent">{{ loading.percent }}%</div>
       </div>
-
-      <ul v-if="loading.visibleStages.length" class="loading-intro__stages">
-        <li
-          v-for="[id, stage] in loading.visibleStages"
-          :key="id"
-          class="loading-intro__stage"
-          :class="`loading-intro__stage--${stage.status}`"
-        >
-          <font-awesome-icon
-            :icon="stageIcon(stage.status)"
-            :spin="stage.status === 'loading'"
-          />
-          <span>{{ stage.label }}</span>
-          <span v-if="stage.total" class="loading-intro__stage-count">
-            {{ stage.current }}/{{ stage.total }}
-          </span>
-        </li>
-      </ul>
 
       <p v-if="loading.degradedReason" class="loading-intro__warn">
         <font-awesome-icon icon="triangle-exclamation" />
@@ -65,8 +48,8 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue';
 import { useLoadingStore } from '@/stores/loadingStore';
-import type { StageStatus } from '@/stores/loadingStore';
 
 const loading = useLoadingStore();
 const emit = defineEmits<{ dismiss: [] }>();
@@ -78,18 +61,18 @@ const CONTROLS = [
   { icon: 'arrows-left-right', label: '自由視角', desc: '拖曳旋轉鏡頭，滾輪縮放' },
 ];
 
-function stageIcon(status: StageStatus): string {
-  switch (status) {
-    case 'done':
-      return 'circle-check';
-    case 'failed':
-      return 'circle-xmark';
-    case 'loading':
-      return 'spinner';
-    default:
-      return 'clock';
+// The one line worth showing inside the bar: whatever is loading right now.
+// Replaces the per-stage checklist that used to sit under the bar (both modes).
+const statusText = computed(() => {
+  const current = loading.activeStages.find(([, s]) => s.status === 'loading');
+  if (current) {
+    const s = current[1];
+    return s.total ? `${s.label} ${s.current}/${s.total}` : s.label;
   }
-}
+  if (loading.allDone) return '載入完成';
+  const pending = loading.activeStages.find(([, s]) => s.status === 'pending');
+  return pending ? pending[1].label : '準備中';
+});
 </script>
 
 <style scoped>
@@ -172,8 +155,9 @@ function stageIcon(status: StageStatus): string {
 }
 
 .loading-intro__bar {
+  position: relative;
   flex: 1;
-  height: 10px;
+  height: 24px;
   background: rgba(var(--accent-rgb), 0.12);
   border: 1.5px solid var(--hud-border);
   border-radius: var(--card-radius-sm);
@@ -186,6 +170,25 @@ function stageIcon(status: StageStatus): string {
   transition: width 0.3s ease;
 }
 
+.loading-intro__bar-text {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
 .loading-intro__percent {
   min-width: 44px;
   text-align: right;
@@ -193,44 +196,6 @@ function stageIcon(status: StageStatus): string {
   font-weight: 700;
   font-size: 13px;
   color: var(--hud-cyan);
-}
-
-.loading-intro__stages {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.loading-intro__stage {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--hud-text);
-  opacity: 0.5;
-}
-
-.loading-intro__stage--loading,
-.loading-intro__stage--done {
-  opacity: 1;
-}
-
-.loading-intro__stage--done {
-  color: var(--zone-3);
-}
-
-.loading-intro__stage--failed {
-  opacity: 1;
-  color: var(--accent-danger);
-}
-
-.loading-intro__stage-count {
-  margin-left: auto;
-  font-family: var(--font-display);
-  opacity: 0.7;
 }
 
 .loading-intro__warn {

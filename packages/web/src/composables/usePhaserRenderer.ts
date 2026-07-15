@@ -12,7 +12,6 @@
  */
 
 import { ref, onUnmounted } from 'vue';
-import { ElMessage } from 'element-plus';
 import type { RoutePoint } from '@littlecycling/shared';
 import { buildCumulativeDistances } from '@/game/route-geometry';
 import type { CoinVisual } from '@/game/coin-interface';
@@ -31,7 +30,6 @@ import { useSettingsStore } from '@/stores/settingsStore';
 
 /** Matches PX_PER_METER in phaser2d-scene.ts — inlined to avoid pulling in the full scene module. */
 const PX_PER_METER = 3;
-import { notifySuccess } from '@/utils/notify';
 
 export interface PhaserRendererInitOptions {
   canvas: HTMLCanvasElement;
@@ -124,14 +122,6 @@ export function usePhaserRenderer() {
       styleStrategy,
     );
 
-    // Fetch MVT features in Web Worker (non-blocking)
-    const loadingMsg = ElMessage({
-      type: 'info',
-      message: '正在載入地形特徵...',
-      duration: 0,
-      grouping: true,
-    });
-
     // Keep the framebuffer matched to the CSS size, or a window resize leaves
     // the boot-time buffer stretched across the new size (pixelArt sampling
     // turns that into mush). The buffer resize is cheap and runs on every
@@ -151,14 +141,13 @@ export function usePhaserRenderer() {
     });
     resizeObserver.observe(canvasEl);
 
+    // MVT features stream in via Web Worker (non-blocking); loading status is
+    // surfaced by the progress bar in LoadingIntroOverlay, not a toast.
     fetchAndProjectFeatures(routePoints, cumulativeDists).then((features) => {
-      loadingMsg.close();
       chunkManager = new ChunkMgr(scene, elevationProfile, features, styleStrategy!);
       // Load initial chunks around start
       chunkManager.update(0);
-      notifySuccess('地形特徵載入完成');
     }).catch((err) => {
-      loadingMsg.close();
       console.warn('[Phaser] MVT feature fetch failed, terrain will render without features:', err);
       mvtFailed.value = true;
     });
