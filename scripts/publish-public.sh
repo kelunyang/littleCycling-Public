@@ -32,6 +32,16 @@ git worktree add "$WORK_DIR" public-main
 # 同步 main 的檔案到 worktree
 git --work-tree="$WORK_DIR" checkout main -- .
 
+# ── 傳播刪除 ──
+# 上面的 checkout 只「寫入」main 有的檔案，不會刪除 main 已移除的檔案，
+# 所以 worktree 仍留著 public-main 舊 tip 的殘檔，add -A 後就永久留在公開 repo。
+# 逐一清掉「public-main 有、main 沒有」的檔案，讓刪除也能同步出去。
+comm -23 <(git ls-tree -r --name-only public-main | sort) \
+         <(git ls-tree -r --name-only main | sort) \
+  | while IFS= read -r ghost; do
+      [ -n "$ghost" ] && rm -f "$WORK_DIR/$ghost"
+    done
+
 # ── 個資過濾 ──
 # 原則：私有 repo 可以攜帶騎乘紀錄（機器間同步用），公開 repo 一律剝除。
 # 這裡刪掉 worktree 裡的個資檔後才 add -A，所以公開 repo 既收不到新檔，
