@@ -1061,10 +1061,33 @@ interface PhaserBridge {
 | 3D 地形高程（DEM） | **AWS Terrain Tiles**（Terrarium 編碼,底層 SRTM/GMTED 等） | `s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png` | AWS Open Data,免費 | 設定面板 Data Sources |
 | 即時天氣 / 風 | **Open-Meteo** | `api.open-meteo.com/v1/forecast` | 免費(**僅限非商用**);資料 **CC-BY 4.0** | 設定面板 Data Sources |
 | 路線 GPX | **EuroVelo** | `en.eurovelo.com/route/get-gpx/{id}` | **ODbL** | 路線目錄抽屜 + 匯出 GPX metadata |
+| 字型 | **Google Fonts**（7 字族） | `fonts.googleapis.com/css2?family=…`、`fonts.gstatic.com` | **OFL-1.1**（皆為開放字型授權） | 不需畫面署名（OFL 無此要求） |
 
 - 署名字串集中定義於 `packages/shared/src/attributions.ts`(`DATA_ATTRIBUTIONS`),由後端經 `/api/config` 注入、前端只 render;EuroVelo 走 catalog API(`eurovelo-catalog.ts`)。
 - **明確禁用**:OpenStreetMap 官方 raster 圖磚伺服器 `tile.openstreetmap.org` —— 其 [Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/) 禁止遊戲這類重度 / 高頻自動化取圖(會被封 IP)。底圖一律走 OpenFreeMap。
 - **商業化注意**:Open-Meteo 免費授權僅限非商用;若日後商業化,天氣來源需改付費訂閱或換供應商。
+- **字型**:`packages/web/index.html` 自 Google Fonts CDN 載入 Orbitron / Rajdhani / Fredoka / Quicksand / Cabin Sketch / Patrick Hand / Noto Sans TC,皆 OFL-1.1 且**非 vendored**(repo 內零字型檔),故無散布疑慮。OFL 不要求畫面署名。
+
+### 已評估之合規判斷(勿重複稽核)
+
+以下項目曾被稽核提出,經評估後**維持現狀**,理由記錄於此以免日後重複討論:
+
+- **OSM / OpenFreeMap 署名位置**:署名位於 Welcome 畫面設定抽屜的 Data Sources 區塊(`SettingsPanel.vue`,讀 `DATA_ATTRIBUTIONS`),遊戲畫面(threejs / phaser 模式)無常駐署名。**判定合規**:ODbL §4.3 的要求是「a notice reasonably calculated to make any Person... aware」——標準是「合理可知」,**未規定畫面浮水印**;OSMF Attribution Guidelines 的角落署名慣例係針對「可瀏覽地圖」,對 app / 遊戲這類 Produced Work,credits / about 類位置一般可接受。Welcome 為每次騎乘必經畫面且署名一鍵可達,故符合。(注意 `SettingsPanel` 僅掛載於 `WelcomeView.vue`,遊戲進行中不可達——已知且接受。)
+
+### FIT encoder:已移除 Garmin SDK 相依
+
+**決策**:`@garmin/fitsdk`(專有)已由 `@markw65/fit-file-writer`(MIT、零執行期相依)取代。相依樹自此 100% 開源,使用者不再於 `npm install` 被迫接受 Garmin 條款,亦解除 Garmin §2(c)「不得散布 SDK 給第三方」對日後打包(Docker / Electron / pkg)的封鎖。
+
+**替換前的驗證**(2026-07,ride 43 / 11,402 samples / 33.6 min / 8300 m):
+- 兩個 encoder 輸出皆為決定性(各跑兩次 MD5 穩定)。
+- 逐欄位比對:2005 筆 records 在 timestamp / power / heart_rate / cadence / speed / distance **六個序列零差異**;session / lap / activity 純量欄位全數相同(含 Strava 關鍵的 `total_elapsed_time` = 2017.601、`total_distance` = 8297.84,均非 0)。
+- Strava 實測接受 candidate;隨後上傳 baseline 被以 **duplicate** 拒絕 —— 等於 Strava 自身 parser 確認兩檔為同一場活動。
+- MD5 不同屬正常(definition message 的 local type 分配、CRC 連動等合法編碼差異),不可作為判準。
+
+**兩個必須留意的 markw65 特性**(已在 `fit-exporter.ts` 以註解標示):
+1. **scaled field 截斷而非四捨五入** —— `writeFieldValue` 以位元遮罩寫入(ToInt32),使每個 scaled float 低 1 LSB。故 caller 端以 `q()` 預先四捨五入補正。若 markw65 日後改為四捨五入,`q()` 會反過來使值高 1 LSB(誤差 0.001 m/s / 0.01 m,無害,但屆時應移除 `q()`)。
+2. **無 `antplus_device_type` 欄位** —— 該欄在 FIT profile 是 `device_type`(num 1) 的 subfield,markw65 僅解析 base field map。改寫 base field `device_type` 同一數字碼,解碼語意正確。
+   **附帶修正**:舊版 `mesg.antplusDeviceType = antType` 其實是 **no-op**——Garmin SDK 靜默丟棄該欄位(已用 fit-file-parser 確認舊輸出完全無 `device_type`)。新版會正確寫入,屬修正而非回歸。
 
 ## 注意事項
 

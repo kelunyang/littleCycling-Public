@@ -35,6 +35,7 @@ littleCycling/
 | 3D 球球 | Three.js (MapLibre custom layer) |
 | 圖示 | Font Awesome |
 | 時間處理 | dayjs |
+| AI 教練 | LLM agentic 工具鏈（自帶 API key）；支援 Anthropic (Claude) 與 OpenAI 相容端點（OpenAI / DeepSeek / 本地 Ollama 等） |
 | 資料庫 | SQLite |
 | 反向代理（選用） | Caddy |
 
@@ -206,11 +207,12 @@ npx tsx src/server.ts --replay ride-7-2026-07-10T07-28-59.jsonl   # 裸檔名會
 | 5 | 訓練紀錄（SQLite 儲存歷史） | ✅ 完成 |
 | 6 | Live 整合模式 + FIT 匯出 | ✅ 完成 |
 | 7 | Phaser.js 2D 橫軸捲軸遊戲模式（塑膠風/手繪風雙風格） | ✅ 完成 |
+| 8 | AI 教練（LLM agentic 工具鏈、課表/報告入 SQLite、Markdown 渲染） | ✅ 完成 |
 
 ## 遊戲特色
 
-- **真實 3D 地圖**：OpenFreeMap 向量地圖 + AWS 地形高程 + 3D 建築物
-- **塑膠玩具美術風格**：MeshToonMaterial 離散色階 + 螢光噴漆配色，完全程序化渲染
+- **真實 3D 地圖**：OpenFreeMap 向量地圖 + AWS 地形高程 + 3D 建築物（河流、機場跑道、隧道路燈等程序化細節）
+- **雙手繪主題**：**糖果玩具風**（MeshToonMaterial 離散色階 + 螢光噴漆配色）與 **復古手繪風**（1930s 橡膠管動畫、瓦楞紙質感），完全程序化渲染，跨 Three.js / Phaser 兩種模式
 - **GPX 路線**：支援上傳 GPX/TCX/FIT，或從 EuroVelo 目錄下載歐洲長途路線
 - **感測器驅動**：ANT+ 速度/踏頻 + BLE 心率，支援虛擬功率估算
 - **金幣系統**：依心率區間獎勵金幣，combo 倍率機制，鼓勵穩定配速
@@ -223,6 +225,7 @@ npx tsx src/server.ts --replay ride-7-2026-07-10T07-28-59.jsonl   # 裸檔名會
 - **Picture-in-Picture**：Document PiP 浮動視窗，邊騎車邊看影片
 - **訓練行事曆**：雙月檢視 + d3.js 統計圖表 + FIT 匯出至 Strava
 - **雷達圖對比**：本次騎乘 vs 同路線歷史 PB 五軸雷達圖
+- **AI 教練**：LLM agentic 工具鏈，透過一組唯讀分析工具（騎乘歷史、FTP 趨勢、zone 分布、課表 compliance、HR drift…）讀你的訓練資料庫，產出個人化課表與報告（Markdown 渲染，課表/報告存進 SQLite、可視覺化）；自帶 API key，provider 在設定面板自訂
 
 詳細規格請參閱 [DEVPLAN.md](DEVPLAN.md)。
 
@@ -230,9 +233,17 @@ npx tsx src/server.ts --replay ride-7-2026-07-10T07-28-59.jsonl   # 裸檔名會
 
 本專案原始碼以 **CC-BY-SA 4.0** 授權。
 
-第三方依賴各有其授權（MIT / ISC / BSD / Apache-2.0 等），均為 permissive license。
+**相依樹 100% 開源**：全部套件皆為 permissive license（MIT / ISC / BSD-2 / BSD-3 / Apache-2.0），無任何 GPL / AGPL / LGPL / SSPL / 商用限制授權，亦無專有套件。
 
-**注意**：`@garmin/fitsdk` 為 Garmin 專有授權，不可作為 CC-BY-SA 內容重新散佈。該套件由使用者在 `npm install` 時自行從 npm registry 取得，本 repo 不包含其原始碼。
+### 刻意避開 Garmin FIT SDK
+
+FIT 檔的讀寫**完全不經過 Garmin 的專有 SDK**：匯入用 `fit-file-parser`（MIT）、匯出用 `@markw65/fit-file-writer`（MIT），兩者皆為開源的 clean-room 實作。
+
+本專案**不使用、不相依、也不散布** `@garmin/fitsdk`。使用者 `npm install` 時不會取得該套件，因此**無須接受 Garmin 的專有授權條款**（其條款明訂「BY USING THE LICENSED TECHNOLOGY, YOU SIGNIFY YOUR AGREEMENT」，並禁止將 SDK 轉散布給第三方）。這也讓本專案日後若要打包散布（Docker / Electron 等）不受該條款封鎖。
+
+> **若遇到 FIT 匯出的問題（檔案無法產生、Strava 或其他平台拒收、數據異常），請聯絡開發者**，不要改用 Garmin SDK 繞過——那會讓上述的授權乾淨度失效。回報時請附上該筆騎乘的 ride id 與平台的錯誤訊息。
+
+外部資料源（圖資 / 地形 / 天氣 / 路線 / 字型）的授權與署名見 [DEVPLAN.md「外部資料源與版權」](DEVPLAN.md)。
 
 ---
 
@@ -290,7 +301,6 @@ npm run replay -- ride-7-2026-07-10T07-28-59.jsonl   # 或指定某一支
 | 前端連不上 WebSocket | Server 沒啟動 / port 不對 | 確認 server 正在運行，且前端的 WebSocket URL 指向正確 port |
 | PiP 按鈕沒出現 | 瀏覽器不支援 Document PiP | 使用 Chrome 或 Edge 116 以上版本 |
 | `npm install` 失敗（native module） | Windows / WSL 編譯環境不同 | 務必在 **Windows** 上執行 `npm install`，不要在 WSL |
-| FIT 匯出功能需要 `@garmin/fitsdk` | Garmin 專有授權套件 | `npm install` 會自動從 npm 安裝，不需額外操作 |
 
 ### 專案架構快速理解
 

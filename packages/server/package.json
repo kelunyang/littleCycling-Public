@@ -2,6 +2,7 @@
   "name": "@littlecycling/server",
   "version": "0.1.0",
   "private": true,
+  "license": "CC-BY-SA-4.0",
   "type": "module",
   "scripts": {
     "start": "tsx src/cli.tsx",
@@ -18,8 +19,8 @@
     "@fastify/cors": "^10.0.0",
     "@fastify/multipart": "^9.0.0",
     "@fastify/websocket": "^11.0.0",
-    "@garmin/fitsdk": "^21.195.0",
     "@littlecycling/shared": "0.1.0",
+    "@markw65/fit-file-writer": "^0.1.10",
     "@stoprocent/noble": "^1.15.0",
     "better-sqlite3": "^12.6.2",
     "dayjs": "^1.11.0",

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "ANT+ sensor recorder for cycling - a personal Zwift-like game project",
   "private": true,
+  "license": "CC-BY-SA-4.0",
   "workspaces": [
     "packages/*"
   ],

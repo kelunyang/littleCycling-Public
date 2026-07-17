@@ -1,20 +1,45 @@
 /**
  * FIT file exporter — generates Garmin FIT binary from ride data.
- * Uses @garmin/fitsdk Encoder for protocol-correct output.
+ * Uses @markw65/fit-file-writer (MIT) for protocol-correct output; it keeps
+ * the dependency tree fully open-source and free of Garmin's proprietary
+ * SDK terms.
  *
  * Output: Indoor Cycling activity (no GPS) compatible with
  * Strava, Garmin Connect, TrainingPeaks, intervals.icu.
  */
 
-import { Encoder, Profile } from '@garmin/fitsdk';
+import { FitWriter } from '@markw65/fit-file-writer';
 import type { Ride, RideSample, DetectedSensor } from '@littlecycling/shared';
-
-const { MesgNum } = Profile;
 
 // FIT epoch: 1989-12-31 00:00:00 UTC (631065600000 ms since Unix epoch)
 const FIT_EPOCH_MS = 631065600000;
 
-/** Convert Unix epoch ms to FIT timestamp (seconds since FIT epoch). */
+/**
+ * Pre-quantise a scaled float so the writer's truncation behaves like rounding.
+ *
+ * FitWriter#writeFieldValue computes `(v + offset) * scale` and emits it via
+ * `this.long(x & 0xFFFFFFFF)` / `this.word(x & 0xFFFF)`. The bitwise AND
+ * coerces through ToInt32, i.e. it TRUNCATES, whereas @garmin/fitsdk (the
+ * previous encoder) rounded. Left alone, every scaled float field would land
+ * up to 1 LSB low — speed 0.001 m/s, distance 0.01 m — against the old
+ * exporter's output. FitWriter exposes no rounding option, so we compensate
+ * on the caller's side: pick the value whose scaled form sits at
+ * `target + 0.5`, making the writer's truncation yield exactly
+ * `Math.round(v * scale)`.
+ *
+ * If markw65 ever switches to rounding, this becomes a +0.5 LSB round-up, i.e.
+ * every scaled field reads 1 LSB HIGH instead of matching. Harmless at these
+ * scales (1 mm/s, 1 cm) but the workaround should then be deleted, not kept.
+ */
+const q = (v: number, scale: number): number => (Math.round(v * scale) + 0.5) / scale;
+
+/**
+ * Convert Unix epoch ms to FIT timestamp (seconds since FIT epoch).
+ *
+ * Deliberately not FitWriter#time(): that rounds (`Math.round(+t/1000 - …)`)
+ * while this exporter has always floored. We compute FIT seconds here and hand
+ * writeMessage the raw number so timestamps stay bit-identical to prior files.
+ */
 function toFitTimestamp(unixMs: number): number {
   return Math.floor((unixMs - FIT_EPOCH_MS) / 1000);
 }
@@ -37,38 +62,64 @@ const SENSOR_LABELS: Record<string, string> = {
 };
 
 /**
+ * Shape of the DEVICE_INFO messages we emit. Spelled out locally because the
+ * writer's `FitMessageInputs` map isn't re-exported from the package entry;
+ * every member here is checked against it at the writeMessage() call anyway
+ * (its `Exact<>` constraint rejects unknown or mistyped fields).
+ */
+type DeviceInfoMesg = {
+  timestamp: number;
+  device_index: number;
+  manufacturer: 'development';
+  product_name: string;
+  source_type: 'antplus' | 'bluetooth_low_energy';
+  ant_network?: 'antplus';
+  device_type?: number;
+  ant_device_number?: number;
+  serial_number?: number;
+};
+
+/**
  * Build DEVICE_INFO messages — one per sensor — so Strava/Garmin Connect
  * surface the hardware list under the activity. Generic manufacturer
- * (255 = development) is used because we don't probe the actual brand
- * during ANT+ scan; the human-readable `productName` carries the label.
+ * (development) is used because we don't probe the actual brand
+ * during ANT+ scan; the human-readable `product_name` carries the label.
  */
 function buildDeviceInfoMesgs(
   sensors: DetectedSensor[] | undefined,
   startTimestamp: number,
-): Record<string, unknown>[] {
+): DeviceInfoMesg[] {
   if (!sensors || sensors.length === 0) return [];
   return sensors.map((s, i) => {
     const isAntplus = (s.source ?? 'ant') === 'ant';
     const antType = ANTPLUS_DEVICE_TYPE[s.profile];
     const label = s.name?.trim()
       || `${SENSOR_LABELS[s.profile] ?? s.profile} (${(s.source ?? 'ant').toUpperCase()})`;
-    const mesg: Record<string, unknown> = {
-      mesgNum: MesgNum.DEVICE_INFO,
+    const mesg: DeviceInfoMesg = {
       timestamp: startTimestamp,
-      // deviceIndex 0 is reserved for the activity's creator; sensors
+      // device_index 0 is reserved for the activity's creator; sensors
       // start at 1.
-      deviceIndex: i + 1,
-      manufacturer: 255, // development — actual brand isn't auto-detected
-      productName: label,
-      // sourceType: 1 = antplus, 3 = ble
-      sourceType: isAntplus ? 1 : 3,
+      device_index: i + 1,
+      manufacturer: 'development', // actual brand isn't auto-detected
+      product_name: label,
+      source_type: isAntplus ? 'antplus' : 'bluetooth_low_energy',
     };
     if (isAntplus) {
-      mesg.antNetwork = 1; // antplus
-      if (antType != null) mesg.antplusDeviceType = antType;
+      mesg.ant_network = 'antplus';
+      // `antplus_device_type` doesn't exist as a writable field name here: in
+      // the FIT profile it is a *subfield* of device_type (num 1), selected by
+      // source_type=antplus, and writeMessage() resolves names against the base
+      // field map only (unknown names throw "Invalid field"). We write the base
+      // field `device_type` with the same numeric code — decoders read it back
+      // with the intended meaning (bike_power / heart_rate / …).
+      //
+      // Note this is a fix, not a regression: the old @garmin/fitsdk encoder
+      // silently DROPPED `antplusDeviceType`, so files it produced carried no
+      // device_type at all.
+      if (antType != null) mesg.device_type = antType;
       if (s.deviceId > 0) {
-        mesg.antDeviceNumber = s.deviceId;
-        mesg.serialNumber = s.deviceId;
+        mesg.ant_device_number = s.deviceId;
+        mesg.serial_number = s.deviceId;
       }
     }
     return mesg;
@@ -118,7 +169,7 @@ function downsampleToOneHz(samples: RideSample[]): RideSample[] {
  * @returns Uint8Array containing the FIT file data.
  */
 export function exportRideToFit(ride: Ride, rawSamples: RideSample[]): Uint8Array {
-  const encoder = new Encoder();
+  const fw = new FitWriter();
   const samples = downsampleToOneHz(rawSamples);
 
   const startTimestamp = toFitTimestamp(ride.startedAt);
@@ -132,35 +183,46 @@ export function exportRideToFit(ride: Ride, rawSamples: RideSample[]): Uint8Arra
   const declaredDurationMs = ride.durationMs ?? 0;
   const durationSec = Math.max(declaredDurationMs, lastSampleMs) / 1000;
 
+  // Enum fields take their profile names rather than raw codes — the writer's
+  // types demand names, and both encode to the same byte.
+  //
+  // `lastUse` (4th arg) lets the writer retire a local message definition slot
+  // once we're done with that message type.
+
   // ── file_id ──
-  encoder.onMesg(MesgNum.FILE_ID, {
-    mesgNum: MesgNum.FILE_ID,
-    type: 4, // activity
-    manufacturer: 255, // development
-    product: 0,
-    serialNumber: 12345,
-    timeCreated: startTimestamp,
-  });
+  fw.writeMessage(
+    'file_id',
+    {
+      type: 'activity',
+      manufacturer: 'development',
+      product: 0,
+      serial_number: 12345,
+      time_created: startTimestamp,
+    },
+    null,
+    true,
+  );
 
   // ── device_info (one per sensor) ──
-  for (const dev of buildDeviceInfoMesgs(ride.sensors, startTimestamp)) {
-    encoder.onMesg(MesgNum.DEVICE_INFO, dev);
-  }
+  const devMesgs = buildDeviceInfoMesgs(ride.sensors, startTimestamp);
+  devMesgs.forEach((dev, i) => {
+    fw.writeMessage('device_info', dev, null, i === devMesgs.length - 1);
+  });
 
   // ── event (timer start) ──
-  encoder.onMesg(MesgNum.EVENT, {
-    mesgNum: MesgNum.EVENT,
-    timestamp: startTimestamp,
-    event: 0, // timer
-    eventType: 0, // start
-  });
+  fw.writeMessage(
+    'event',
+    { timestamp: startTimestamp, event: 'timer', event_type: 'start' },
+    null,
+    false,
+  );
 
   // ── record messages (one per sample) ──
   let totalDistance = 0; // meters
   let lastSpeedMps = 0;
   let lastElapsedMs = 0;
 
-  for (const sample of samples) {
+  samples.forEach((sample, i) => {
     const recordTimestamp = startTimestamp + Math.floor(sample.elapsedMs / 1000);
 
     // Accumulate distance from speed
@@ -173,13 +235,17 @@ export function exportRideToFit(ride: Ride, rawSamples: RideSample[]): Uint8Arra
     }
     lastElapsedMs = sample.elapsedMs;
 
-    const record: Record<string, unknown> = {
-      mesgNum: MesgNum.RECORD,
-      timestamp: recordTimestamp,
-    };
+    const record: {
+      timestamp: number;
+      heart_rate?: number;
+      power?: number;
+      cadence?: number;
+      speed?: number;
+      distance?: number;
+    } = { timestamp: recordTimestamp };
 
     if (sample.hr != null) {
-      record.heartRate = sample.hr;
+      record.heart_rate = sample.hr;
     }
     if (sample.powerW != null) {
       record.power = Math.round(sample.powerW);
@@ -189,70 +255,85 @@ export function exportRideToFit(ride: Ride, rawSamples: RideSample[]): Uint8Arra
     }
     if (sample.speedKmh != null) {
       // FIT speed is in m/s * 1000 (mm/s), stored as uint16
-      record.speed = sample.speedKmh / 3.6;
+      record.speed = q(sample.speedKmh / 3.6, 1000);
     }
-    record.distance = totalDistance;
+    record.distance = q(totalDistance, 100);
 
-    encoder.onMesg(MesgNum.RECORD, record);
-  }
+    fw.writeMessage('record', record, null, i === samples.length - 1);
+  });
 
   // ── event (timer stop) ──
   const endTimestamp = startTimestamp + Math.floor(durationSec);
-  encoder.onMesg(MesgNum.EVENT, {
-    mesgNum: MesgNum.EVENT,
-    timestamp: endTimestamp,
-    event: 0, // timer
-    eventType: 4, // stop_all
-  });
+  fw.writeMessage(
+    'event',
+    { timestamp: endTimestamp, event: 'timer', event_type: 'stop_all' },
+    null,
+    true,
+  );
 
   // ── lap ──
-  encoder.onMesg(MesgNum.LAP, {
-    mesgNum: MesgNum.LAP,
-    timestamp: endTimestamp,
-    startTime: startTimestamp,
-    totalElapsedTime: durationSec,
-    totalTimerTime: durationSec,
-    totalDistance: totalDistance,
-    ...(ride.avgHr != null && { avgHeartRate: Math.round(ride.avgHr) }),
-    ...(ride.maxHr != null && { maxHeartRate: ride.maxHr }),
-    ...(ride.avgPowerW != null && { avgPower: Math.round(ride.avgPowerW) }),
-    ...(ride.maxPowerW != null && { maxPower: Math.round(ride.maxPowerW) }),
-    ...(ride.avgCadence != null && { avgCadence: Math.round(ride.avgCadence) }),
-    ...(ride.avgSpeed != null && { avgSpeed: ride.avgSpeed / 3.6 }),
-    ...(ride.maxSpeed != null && { maxSpeed: ride.maxSpeed / 3.6 }),
-  });
+  fw.writeMessage(
+    'lap',
+    {
+      timestamp: endTimestamp,
+      start_time: startTimestamp,
+      total_elapsed_time: q(durationSec, 1000),
+      total_timer_time: q(durationSec, 1000),
+      total_distance: q(totalDistance, 100),
+      ...(ride.avgHr != null && { avg_heart_rate: Math.round(ride.avgHr) }),
+      ...(ride.maxHr != null && { max_heart_rate: ride.maxHr }),
+      ...(ride.avgPowerW != null && { avg_power: Math.round(ride.avgPowerW) }),
+      ...(ride.maxPowerW != null && { max_power: Math.round(ride.maxPowerW) }),
+      ...(ride.avgCadence != null && { avg_cadence: Math.round(ride.avgCadence) }),
+      ...(ride.avgSpeed != null && { avg_speed: q(ride.avgSpeed / 3.6, 1000) }),
+      ...(ride.maxSpeed != null && { max_speed: q(ride.maxSpeed / 3.6, 1000) }),
+    },
+    null,
+    true,
+  );
 
   // ── session ──
-  encoder.onMesg(MesgNum.SESSION, {
-    mesgNum: MesgNum.SESSION,
-    timestamp: endTimestamp,
-    startTime: startTimestamp,
-    totalElapsedTime: durationSec,
-    totalTimerTime: durationSec,
-    totalDistance: totalDistance,
-    sport: 2, // cycling
-    subSport: 6, // indoor_cycling
-    firstLapIndex: 0,
-    numLaps: 1,
-    ...(ride.avgHr != null && { avgHeartRate: Math.round(ride.avgHr) }),
-    ...(ride.maxHr != null && { maxHeartRate: ride.maxHr }),
-    ...(ride.avgPowerW != null && { avgPower: Math.round(ride.avgPowerW) }),
-    ...(ride.maxPowerW != null && { maxPower: Math.round(ride.maxPowerW) }),
-    ...(ride.avgCadence != null && { avgCadence: Math.round(ride.avgCadence) }),
-    ...(ride.avgSpeed != null && { avgSpeed: ride.avgSpeed / 3.6 }),
-    ...(ride.maxSpeed != null && { maxSpeed: ride.maxSpeed / 3.6 }),
-  });
+  fw.writeMessage(
+    'session',
+    {
+      timestamp: endTimestamp,
+      start_time: startTimestamp,
+      total_elapsed_time: q(durationSec, 1000),
+      total_timer_time: q(durationSec, 1000),
+      total_distance: q(totalDistance, 100),
+      sport: 'cycling',
+      sub_sport: 'indoor_cycling',
+      first_lap_index: 0,
+      num_laps: 1,
+      ...(ride.avgHr != null && { avg_heart_rate: Math.round(ride.avgHr) }),
+      ...(ride.maxHr != null && { max_heart_rate: ride.maxHr }),
+      ...(ride.avgPowerW != null && { avg_power: Math.round(ride.avgPowerW) }),
+      ...(ride.maxPowerW != null && { max_power: Math.round(ride.maxPowerW) }),
+      ...(ride.avgCadence != null && { avg_cadence: Math.round(ride.avgCadence) }),
+      ...(ride.avgSpeed != null && { avg_speed: q(ride.avgSpeed / 3.6, 1000) }),
+      ...(ride.maxSpeed != null && { max_speed: q(ride.maxSpeed / 3.6, 1000) }),
+    },
+    null,
+    true,
+  );
 
   // ── activity ──
-  encoder.onMesg(MesgNum.ACTIVITY, {
-    mesgNum: MesgNum.ACTIVITY,
-    timestamp: endTimestamp,
-    totalTimerTime: durationSec,
-    numSessions: 1,
-    type: 0, // manual
-    event: 26, // activity
-    eventType: 1, // stop
-  });
+  fw.writeMessage(
+    'activity',
+    {
+      timestamp: endTimestamp,
+      total_timer_time: q(durationSec, 1000),
+      num_sessions: 1,
+      type: 'manual',
+      event: 'activity',
+      event_type: 'stop',
+    },
+    null,
+    true,
+  );
 
-  return encoder.close();
+  // finish() hands back a DataView over its internal buffer; the callers
+  // (ride-api's download route) want bytes.
+  const dv = fw.finish();
+  return new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
 }
