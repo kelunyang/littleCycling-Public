@@ -4,6 +4,7 @@
  */
 
 import type { DataSourceAttribution } from './attributions.js';
+import type { RenderMode, WorldStyle, WorldOptionsConfig } from './world-options.js';
 
 /**
  * LLM provider configuration (OpenAI-compatible endpoints).
@@ -51,6 +52,18 @@ export interface AppConfig {
   };
   training: {
     defaultDuration: number;     // ms
+    /**
+     * Repeat a structured workout to fill the ride instead of stretching it.
+     *
+     * Workout profiles are percentage-based, so by default one ride = one
+     * profile no matter how long the ride is — which turns a 20-minute FTP test
+     * into a 60-minute one and Tabata's 20-second sprints into 2-minute ones.
+     * With this on, each round runs at the profile's `nativeDurationMs` and the
+     * pattern repeats until the ride is full. No effect when the ride is not
+     * longer than one round. Ignored on free rides and on plan days (a plan
+     * prescribes its own segments).
+     */
+    repeatWorkout?: boolean;
     hrMax: number;               // bpm
     ftp: number;                 // watts
     /**
@@ -70,22 +83,52 @@ export interface AppConfig {
   };
   map: {
     basemapStyle: string;
-    renderMode: 'maplibre' | 'threejs' | 'phaser';
+    renderMode: RenderMode;
     /**
      * World visual style — spans all render modes (Phaser 2D + Three.js 3D).
      * `plastic` → neon/blocks; `cuphead` → hand-drawn/corrugated paper.
      * (Renamed from the former `phaserStyle`; old config.json values are
      * migrated on load — see ConfigStore.load in the server.)
      */
-    worldStyle: 'plastic' | 'cuphead';
+    worldStyle: WorldStyle;
+    /**
+     * Per-world option values — the knobs each world declares for itself in
+     * WORLD_OPTIONS (world-options.ts). SPARSE on purpose: only values that
+     * differ from the declared default are stored, so re-tuning a default later
+     * still reaches riders who have already played, and config.json stays
+     * readable. Absent keys (and an absent world) mean "all defaults".
+     *
+     * Written whole, not merged: see ConfigStore.save in the server.
+     */
+    worldOptions?: WorldOptionsConfig;
     cameraHeight: number;    // 1-30m, camera height above ground
     cameraPitch: number;     // 1-60°, downward pitch angle
     cameraLookAhead: number; // 10-200m, look-ahead distance
     viewRange: number;       // 100-1000, corridor half-width in meters
     dayNightEnabled: boolean; // real-time day/night cycle based on route location
+    /**
+     * Graphics-quality tier for the Three.js renderer. `auto` hands the tier to
+     * an in-game fps governor that adjusts it at runtime; `low`/`medium`/`high`
+     * pin it. Governs the whole effect budget (bloom, particles, dynamic
+     * lights, terrain LOD…) — see game/quality/graphics-quality.ts.
+     */
+    graphicsQuality: 'auto' | 'low' | 'medium' | 'high';
+    /**
+     * Last tier the `auto` governor settled on, persisted so the next launch
+     * starts there instead of re-probing from scratch. Only meaningful while
+     * graphicsQuality === 'auto'; absent until the governor first settles
+     * (written by the frontend, like the other map render prefs).
+     */
+    resolvedQualityTier?: 'low' | 'medium' | 'high';
   };
   sound: {
     enabled: boolean;  // master sound on/off toggle
+    /**
+     * Procedurally generated background music (game/audio/generative-bgm.ts).
+     * Nested under `enabled` — turning the master switch off silences BGM too.
+     * The theme follows `map.worldStyle`, seeded by the route id.
+     */
+    bgmEnabled: boolean;
   };
   recording: {
     /**
@@ -131,6 +174,10 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   training: {
     defaultDuration: 30 * 60 * 1000, // 30 minutes
+    // Off by default: it changes what a chosen workout actually is, so it has
+    // to be a deliberate pick rather than something that silently rewrites the
+    // ride someone already knows.
+    repeatWorkout: false,
     hrMax: 190,
     ftp: 200,
   },
@@ -146,9 +193,11 @@ export const DEFAULT_CONFIG: AppConfig = {
     cameraLookAhead: 80,
     viewRange: 500,
     dayNightEnabled: true,
+    graphicsQuality: 'auto',
   },
   sound: {
     enabled: true,
+    bgmEnabled: true,
   },
   recording: {
     persistRawFrames: true,

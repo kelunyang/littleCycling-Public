@@ -5,11 +5,28 @@
  * Used by both Phaser 2D and Three.js renderers via mvt-worker-client.ts.
  */
 
-import { MVTFetcher } from './mvt-fetcher';
+import { MVTFetcher, decodeMVTTile } from './mvt-fetcher';
 import { projectMVTFeatures } from './mvt-projection';
 
 self.onmessage = async (e: MessageEvent) => {
-  const { points, cumulativeDists, bounds } = e.data;
+  const data = e.data;
+
+  // 3D terrain path: decode a single raw tile buffer (transferred) and return the
+  // GeoJSON features. Multiplexed by `id` so one persistent worker serves many
+  // tiles. Distinct from the Phaser fetch+project message below (no `type`).
+  if (data && data.type === 'decode') {
+    const { id, buffer, x, y, zoom } = data;
+    try {
+      const features = decodeMVTTile(buffer, x, y, zoom);
+      self.postMessage({ type: 'decode', id, ok: true, features });
+    } catch (err: any) {
+      self.postMessage({ type: 'decode', id, ok: false, error: err.message });
+    }
+    return;
+  }
+
+  // Phaser 2D path (unchanged): fetch the whole route's tiles, project, sort.
+  const { points, cumulativeDists, bounds } = data;
   try {
     const fetcher = new MVTFetcher();
     await fetcher.initialize();

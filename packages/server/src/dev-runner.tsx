@@ -14,12 +14,19 @@
  *   npx tsx src/dev-runner.tsx --caddy                     # also start Caddy
  *   npx tsx src/dev-runner.tsx --replay [file.jsonl]       # drive the sim from a recording
  *       [--replay-speed N] [--replay-loop]                 # (bare --replay = newest session)
+ *   npx tsx src/dev-runner.tsx --mock                      # synthetic HR + power, no hardware
  *
  * From the repo root these map to npm scripts (single-layer forwarding, so the
  * file arg survives — unlike `-w` workspace forwarding):
  *   npm run dev                          # live dev
+ *   npm run dev -- --mock                # synthetic sensors — ride nothing, render everything
  *   npm run replay                       # replay the newest recording
  *   npm run replay -- ride-7-....jsonl   # replay a specific recording
+ *
+ * `--mock` exists so a rendering or perf question never costs a real ride. The
+ * idle auto-pause gates the render loop to ~15 fps, so "start a ride and just
+ * don't pedal" measures the gate, not the renderer — you need something feeding
+ * the sim, and this is the cheapest something.
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
@@ -60,6 +67,7 @@ const replayRequested = args.includes('--replay');
 const replayFile = flagValue('--replay') ?? (replayRequested ? latestSession() : undefined);
 const replaySpeed = flagValue('--replay-speed');
 const replayLoop = args.includes('--replay-loop');
+const mockSensors = args.includes('--mock');
 
 // Server args, with replay flags appended when requested.
 const serverArgs = ['tsx', 'src/server.ts', '--data-dir', path.join(ROOT, 'data')];
@@ -72,6 +80,9 @@ if (replayFile) {
   if (replaySpeed) serverArgs.push('--replay-speed', replaySpeed);
   if (replayLoop) serverArgs.push('--replay-loop');
 }
+// server.ts has had `--mock` all along; it just was not reachable from here,
+// so the only way to get a moving rider was to actually pedal one.
+if (mockSensors) serverArgs.push('--mock');
 
 /**
  * Kill a spawned service and its whole process tree.

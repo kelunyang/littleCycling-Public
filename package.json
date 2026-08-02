@@ -17,6 +17,10 @@
     "start": "npm run start -w packages/server",
     "server": "npm run server -w packages/server",
     "check:3d": "node --no-warnings --import ./scripts/headless-check/register.mjs scripts/headless-check/diorama.ts",
+    "probe:demo": "node scripts/headless-check/demo-probe.mjs",
+    "probe:phaser": "node scripts/headless-check/phaser-probe.mjs",
+    "probe:texture": "node scripts/headless-check/texture-probe.mjs",
+    "probe:music": "node scripts/headless-check/music-probe.mjs",
     "publish-public": "bash scripts/publish-public.sh"
   },
   "engines": {

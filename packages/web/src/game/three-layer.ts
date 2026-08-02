@@ -21,6 +21,11 @@ interface ThreeCoinVisual extends CoinVisual {
   mesh: THREE.Mesh;
 }
 
+/** Coins farther than this from the ball are hidden and skip per-frame animation
+ *  — they are specks at that range, so the spin/bob work is wasted. */
+const COIN_CULL_DIST_M = 400;
+const COIN_CULL_DIST_SQ = COIN_CULL_DIST_M * COIN_CULL_DIST_M;
+
 export class ThreeBallLayer implements GameCustomLayerInterface {
   id = 'three-ball';
   type = 'custom' as const;
@@ -98,6 +103,14 @@ export class ThreeBallLayer implements GameCustomLayerInterface {
       const dLat = coin.lngLat[1] - this.ballLngLat[1];
       const offsetX = dLon * 111320 * cosLat;
       const offsetY = dLat * 111320;
+
+      // Far coins: hide and skip the spin/bob (they're specks at that range).
+      if (offsetX * offsetX + offsetY * offsetY > COIN_CULL_DIST_SQ) {
+        if (coin.mesh.visible) coin.mesh.visible = false;
+        continue;
+      }
+      if (!coin.mesh.visible) coin.mesh.visible = true;
+
       const offsetZ = coin.altitude - this.ballAltitude;
 
       // Coin height: 2m above ground + gentle bobbing

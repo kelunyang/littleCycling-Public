@@ -16,14 +16,21 @@ import { RideDatabase, type EndRideSummary } from './database.js';
 import { WsRelay } from './ws-relay.js';
 import { DataWriter } from './data-writer.js';
 import { GameSimulation, type GameSimConfig } from './game-simulation.js';
+import { buildGhostTrace, GhostTraceLookup } from './ghost-trace.js';
 import { ServerWeatherSource } from './server-weather.js';
 import { MockSensorSource, MOCK_SENSORS } from './mock-sensor.js';
 import { ReplaySensorSource } from './replay-sensor.js';
 import type { ConfigStore } from './config-store.js';
-import type { DetectedSensor, RoutePoint, WsSensorMessage, WsSessionStartMessage, WsSessionEndMessage, WsStatusMessage, LiveSessionState, HostCapabilities } from '@littlecycling/shared';
+import type { DetectedSensor, RoutePoint, WsSensorMessage, WsSessionStartMessage, WsSessionEndMessage, WsStatusMessage, LiveSessionState, HostCapabilities,
+  WorkoutSegment,
+} from '@littlecycling/shared';
 import {
   estimateVirtualSpeedFromPower,
   estimateVirtualCadenceFromPower,
+  WORKOUT_PROFILES_MAP,
+  buildWorkoutSegments,
+  getSessionByDay,
+  planSegmentsToWorkoutSegments,
 } from '@littlecycling/shared';
 
 export interface LiveSessionOptions {
@@ -119,7 +126,12 @@ export class LiveSession extends EventEmitter {
 
   // Recording state
   private _rideId: number | null = null;
+  /** Prescribed training segments for the ride in progress (empty = free ride). */
+  private _prescribedSegments: WorkoutSegment[] = [];
   private recordingStartTime: number = 0;
+  /** Manually-paused ms of the finished game session — captured from the sim
+   *  at stopRecording so post-stop broadcasts still report a frozen clock. */
+  private finalPausedMs = 0;
   private sampleCount: number = 0;
 
   // Live snapshot for console display + game simulation input
@@ -388,6 +400,45 @@ export class LiveSession extends EventEmitter {
 
   // ── Recording ──
 
+  /**
+   * The training segments prescribed for the ride in progress — the server's
+   * copy, and the one recorded with the ride. Empty for a free ride.
+   */
+  get prescribedSegments(): WorkoutSegment[] {
+    return this._prescribedSegments;
+  }
+
+  /**
+   * Expand `workoutId` into concrete segments for a ride of `targetDurationMs`.
+   *
+   * `plan:<planId>:<day>` takes its segments from the stored plan (already
+   * absolute, so duration and repeat do not apply). A workout profile id is
+   * expanded from its percentage templates — repeated at its designed length
+   * when asked, otherwise stretched over the ride.
+   */
+  private resolvePrescribedSegments(
+    workoutId: string | undefined,
+    targetDurationMs: number,
+    repeat: boolean,
+  ): WorkoutSegment[] {
+    if (!workoutId || targetDurationMs <= 0) return [];
+
+    if (workoutId.startsWith('plan:')) {
+      const rest = workoutId.slice('plan:'.length);
+      const lastColon = rest.lastIndexOf(':');
+      const planId = lastColon >= 0 ? rest.slice(0, lastColon) : rest;
+      const day = lastColon >= 0 ? Number(rest.slice(lastColon + 1)) : NaN;
+      const plan = this.db.getPlan(planId);
+      if (!plan) return [];
+      const session = getSessionByDay(plan, day);
+      return session ? planSegmentsToWorkoutSegments(session.segments) : [];
+    }
+
+    const profile = WORKOUT_PROFILES_MAP[workoutId];
+    if (!profile) return [];
+    return buildWorkoutSegments(profile, targetDurationMs, { repeat });
+  }
+
   async startRecording(opts: {
     routeId?: string;
     routeName?: string;
@@ -397,11 +448,21 @@ export class LiveSession extends EventEmitter {
      */
     workoutId?: string;
     /**
+     * Repeat the workout at its designed length to fill the ride instead of
+     * stretching one round over it. Feeds segment resolution below.
+     */
+    repeatWorkout?: boolean;
+    /**
      * Game simulation inputs. When present, a GameSimulation runs for the
      * lifetime of this recording and broadcasts `game_state` at 20Hz.
      * Absent for recording-only sessions (recorder CLI, no active route).
      */
     game?: { routePoints: RoutePoint[]; config: GameSimConfig };
+    /**
+     * P8 幽靈車:所選歷史騎乘 id。sim 建好後載入其 distance-vs-time trace
+     * 掛到 sim(對騎)。無此欄或該騎乘無樣本 → 不掛幽靈。僅在有 game 時有意義。
+     */
+    ghostRideId?: number;
   } = {}): Promise<number> {
     // Self-heal: a previous ride was never stopped (tab closed and the
     // sendBeacon stop was lost, client crashed, stop endpoint failed…).
@@ -431,17 +492,34 @@ export class LiveSession extends EventEmitter {
       throw new Error(`Cannot start recording in state: ${this._state}`);
     }
 
+    // Decide the prescribed training segments ONCE, here, and record them with
+    // the ride.
+    //
+    // They used to be derived on the client for the HUD and then independently
+    // re-derived at analysis time from workout_id plus the ride's ACTUAL
+    // duration. Two derivations of the same thing will drift, and they did the
+    // moment repeat-to-fill existed: the coach graded rides against a workout
+    // that never happened. Business logic belongs on the server (CLAUDE.md);
+    // the client renders what it is handed.
+    this._prescribedSegments = this.resolvePrescribedSegments(
+      opts.workoutId,
+      opts.game?.config.targetDurationMs ?? 0,
+      opts.repeatWorkout ?? false,
+    );
+
     const now = Date.now();
     this._rideId = this.db.createRide({
       startedAt: now,
       routeId: opts.routeId,
       routeName: opts.routeName,
       workoutId: opts.workoutId,
+      workoutSegments: this._prescribedSegments,
       // Snapshot of which sensors were active at start; used by the FIT
       // exporter to emit DEVICE_INFO messages.
       sensors: [...this._detectedSensors],
     });
     this.recordingStartTime = now;
+    this.finalPausedMs = 0;
     this.lastSpeedTimeMs = now;
     this.sampleCount = 0;
     this.resetStats();
@@ -471,6 +549,18 @@ export class LiveSession extends EventEmitter {
         getWind: () => this.weatherSource!.get(),
       });
       this.gameSim.start();
+
+      // P8 幽靈車:載入所選歷史騎乘的 distance-vs-time trace 掛到 sim。
+      // 空 trace(該騎乘無樣本)→ 不能當幽靈,記 warning 略過(不擋開賽)。
+      if (opts.ghostRideId != null) {
+        const { points, source } = buildGhostTrace(this.db.getSamplesForGhost(opts.ghostRideId));
+        if (points.length > 0) {
+          this.gameSim.setGhostTrace(new GhostTraceLookup(points));
+          console.log(`[live] ghost ride ${opts.ghostRideId} loaded (${source}, ${points.length} pts)`);
+        } else {
+          console.warn(`[live] ghost ride ${opts.ghostRideId} has no samples — skipping ghost`);
+        }
+      }
     }
 
     this.setState('recording');
@@ -545,7 +635,9 @@ export class LiveSession extends EventEmitter {
    * Clock/authority consistency (plan risk #3) — three integrators, one
    * anchor:
    *  - `durationMs` / sim `elapsed` / WsSensorMessage `elapsed` all measure
-   *    `Date.now() - recordingStartTime` (方案甲: pause never stops it).
+   *    `Date.now() - recordingStartTime` MINUS manually-paused time (the sim's
+   *    pausedWallMs — pause button stops the clock and the sample writers).
+   *    Idle AUTO-pause still keeps clock and recording running (方案甲).
    *  - FIT `distanceM` stays the sensor-speed integral on that same wall
    *    clock (accumSpeed) — the export truth, never mixed with game distance.
    *  - `gameDistanceM` is the sim's monotonic cumulativeDistance — the game
@@ -563,6 +655,9 @@ export class LiveSession extends EventEmitter {
     // the summary's endedAt timestamp; read its summary before dropping it.
     const gameSummary = this.gameSim?.summary;
     if (this.gameSim) {
+      // Capture manually-paused time before the sim goes away — durationMs and
+      // every post-stop broadcast subtract it.
+      this.finalPausedMs = this.gameSim.pausedMsTotal();
       this.gameSim.stop();
       this.gameSim = null;
     }
@@ -572,7 +667,7 @@ export class LiveSession extends EventEmitter {
     }
 
     const now = Date.now();
-    const durationMs = now - this.recordingStartTime;
+    const durationMs = this.rideElapsedMs(now);
 
     const summary: EndRideSummary = gameSummary
       ? {
@@ -693,7 +788,7 @@ export class LiveSession extends EventEmitter {
     const sessionEndMsg: WsSessionEndMessage = {
       type: 'session_end',
       tsEpoch: Date.now(),
-      elapsed: this.recordingStartTime > 0 ? Date.now() - this.recordingStartTime : 0,
+      elapsed: this.rideElapsedMs(Date.now()),
       totalRecords: this.sampleCount,
     };
     this.relay.broadcast(sessionEndMsg);
@@ -774,12 +869,16 @@ export class LiveSession extends EventEmitter {
   private handleAntData(profile: string, deviceId: number, data: any): void {
     const now = Date.now();
     this.lastDataAt = now;
-    const elapsedMs = this.recordingStartTime > 0 ? now - this.recordingStartTime : 0;
+    const elapsedMs = this.rideElapsedMs(now);
+    // Manual pause freezes the recording: no raw frames, no SQLite samples,
+    // no stat/distance accumulation (the accumX guards). Broadcasts continue
+    // so the HUD still shows live HR while paused.
+    const recordingHeld = this.manualPauseActive();
 
     // Persist the raw frame *before* any field-specific cooking so the
     // JSONL contains exactly what the sensor sent (every field, not just
     // the four we extract into snapshots). This is the audit/replay log.
-    if (this.rawWriter && this._state === 'recording') {
+    if (this.rawWriter && this._state === 'recording' && !recordingHeld) {
       try {
         this.rawWriter.writeData(profile, deviceId, data as Record<string, unknown>);
       } catch (err: any) {
@@ -871,13 +970,16 @@ export class LiveSession extends EventEmitter {
     this.emit('data', this._snapshot);
 
     // Write to SQLite if recording
-    if (this._state === 'recording' && this._rideId !== null) {
+    if (this._state === 'recording' && this._rideId !== null && !recordingHeld) {
       this.db.insertSample(this._rideId, {
         elapsedMs,
         hr: this._snapshot.hr,
         powerW: this._snapshot.power,
         cadence: this._snapshot.cadence,
         speedKmh: this._snapshot.speed,
+        // P8 幽靈車:記 sim 權威 cumulativeDistance(暫停凍結/staleness 歸零
+        // 語意自動記對);無 sim(recorder CLI)寫 null → 日後走 reintegrated。
+        distanceM: this.gameSim ? this.gameSim.state.cumulativeDistance : null,
       });
       this.sampleCount++;
     }
@@ -886,7 +988,8 @@ export class LiveSession extends EventEmitter {
   private handleBleHrData(data: BleHrData): void {
     const now = Date.now();
     this.lastDataAt = now;
-    const elapsedMs = this.recordingStartTime > 0 ? now - this.recordingStartTime : 0;
+    const elapsedMs = this.rideElapsedMs(now);
+    const recordingHeld = this.manualPauseActive();
 
     // Normalize BLE HR data for WS broadcast
     const normalized: Record<string, unknown> = {
@@ -912,7 +1015,7 @@ export class LiveSession extends EventEmitter {
 
     // Persist normalized BLE HR frame to the raw-frame log alongside ANT+
     // frames so replay tooling sees one unified stream per ride.
-    if (this.rawWriter && this._state === 'recording') {
+    if (this.rawWriter && this._state === 'recording' && !recordingHeld) {
       try {
         this.rawWriter.writeData('HR', 0, normalized);
       } catch (err: any) {
@@ -926,13 +1029,15 @@ export class LiveSession extends EventEmitter {
     this.emit('data', this._snapshot);
 
     // Write to SQLite if recording
-    if (this._state === 'recording' && this._rideId !== null) {
+    if (this._state === 'recording' && this._rideId !== null && !recordingHeld) {
       this.db.insertSample(this._rideId, {
         elapsedMs,
         hr: data.heartRate,
         powerW: this._snapshot.power,
         cadence: this._snapshot.cadence,
         speedKmh: this._snapshot.speed,
+        // P8 幽靈車:記 sim 權威 cumulativeDistance;無 sim 寫 null。
+        distanceM: this.gameSim ? this.gameSim.state.cumulativeDistance : null,
       });
       this.sampleCount++;
     }
@@ -956,8 +1061,23 @@ export class LiveSession extends EventEmitter {
     this.lastSpeedTimeMs = 0;
   }
 
+  /** True while the game is MANUALLY paused (start prompt / pause button):
+   *  samples, stats and the FIT distance integral all hold. Idle auto-pause
+   *  keeps recording (方案甲); recording-only sessions have no sim → false. */
+  private manualPauseActive(): boolean {
+    return this.gameSim?.isManuallyPaused ?? false;
+  }
+
+  /** Ride clock: wall time since recording start minus manually-paused time. */
+  private rideElapsedMs(now: number): number {
+    if (this.recordingStartTime <= 0) return 0;
+    const paused = this.gameSim ? this.gameSim.pausedMsTotal() : this.finalPausedMs;
+    return now - this.recordingStartTime - paused;
+  }
+
   private accumHr(hr: number): void {
     if (this._state !== 'recording') return;
+    if (this.manualPauseActive()) return;
     this.hrSum += hr;
     this.hrCount++;
     if (hr > this.hrMax) this.hrMax = hr;
@@ -965,6 +1085,12 @@ export class LiveSession extends EventEmitter {
 
   private accumSpeed(speed: number): void {
     if (this._state !== 'recording') return;
+    if (this.manualPauseActive()) {
+      // Drop the integration anchor: the first sample after resume must not
+      // integrate distance across the whole paused span.
+      this.lastSpeedTimeMs = 0;
+      return;
+    }
     this.speedSum += speed;
     this.speedCount++;
     if (speed > this.speedMax) this.speedMax = speed;
@@ -980,12 +1106,14 @@ export class LiveSession extends EventEmitter {
 
   private accumCadence(cadence: number): void {
     if (this._state !== 'recording') return;
+    if (this.manualPauseActive()) return;
     this.cadenceSum += cadence;
     this.cadenceCount++;
   }
 
   private accumPower(power: number): void {
     if (this._state !== 'recording') return;
+    if (this.manualPauseActive()) return;
     this.powerSum += power;
     this.powerCount++;
     if (power > this.powerMax) this.powerMax = power;

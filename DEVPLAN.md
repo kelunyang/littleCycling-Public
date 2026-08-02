@@ -741,6 +741,24 @@ ride_samples (
   - **環境音**（`game/audio/ambient-noise.ts`，僅 Three.js 模式）：風聲（white noise + bandpass filter，頻率/音量隨速度 0-60km/h 即時連動）、雨聲（noise + highpass + 隨機正弦波雨滴，天氣切換時 1.5 秒淡入/淡出）
   - **統一管理**（`game/audio/audio-manager.ts`）：AudioContext 延遲建立（符合瀏覽器 autoplay 政策）、`config.sound.enabled` el-switch 控制全域開關
   - **觸發整合**：`useCoinSpawner` 碰撞 → 叮聲、`useCoinSystem` combo 變化 → 升頻音、`coinSystem.redLine` → 持續警報、`gameStore.laps` → 圈數音效、`weatherApi` → 雨聲、`ballEngine.speedKmh` → 風聲、`workoutTracker.segmentChanged` → 分段切換音
+- **生成式主題曲 BGM**（`game/audio/generative-bgm.ts`）— 一樣純 Web Audio 合成，零音檔零依賴（也因此完全避開 SoundFont／取樣音源的授權問題）；原型與試聽頁在 `plan/theme-music-demo-opus.html`，**那份 demo 的程式碼就是這支檔案的內容**（照抄，見 `CUSTOM_WORLD_INSTRUCTIONS.md` §0.0）
+  - **seed 決定曲子**：mulberry32 PRNG，seed 由路線 ID 雜湊（`seedFromString`，FNV-1a）而來 → **每條路線都有固定不變的專屬主題曲**；自由騎乘無路線則用固定 seed
+  - **三套曲風跟著 `map.worldStyle` 走。設計原則跟視覺同一條：樂器從那個世界的「材料」推出來，不是先挑曲風再套上去**：
+    - `plastic` → **積木・發條玩具進行曲**（2/4、C 大調、132 BPM、16 小節）：I-V-vi-IV 的玩具版和聲、旋律是一個 4 音十六分細胞在整首變形（B 段 bar 8–11 整組上移三度）、樂句每 4 小節收在主音。聲部＝音樂盒（基音 + 一根**不準**的泛音 ×5.9）／玩具鋼琴（方波過帶通 + 敲擊瞬態）／橡皮筋低音（三角波 + 濾波器下掃）／木魚。**沒有一個長音——塑膠不延音**
+    - `cuphead`（紙板）→ **快樂的辦公室**（3/4 快三拍、D 大調、138 BPM、16 小節）：節奏骨架交給**打字機**（辦公室的脈搏不是鼓），行末鈴四小節響一次。聲部＝尺（壓在桌邊彈，衰減時音高微微下掉的 boing——它是旋律）／氈槌鋼琴（伴奏）／迴紋針／鉛筆／紙的摩擦／卡紙 thump／pad。**這個世界是有金屬的**（迴紋針、圖釘、訂書針），金屬補上這個世界缺的高頻
+    - `circuit`（電子）→ **開機自檢**（4/4、A 小調五聲、140 BPM、16 小節）：第 1 小節是真的自檢掃描（方波由低到高每次 +3 半音、繼電器一路喀噠），然後主題進來；bar 10–11 是收束段（抽掉織體只留旋律與骨架）。聲部＝方波（旋律踩正拍 + 十六分琶音退到旋律以下的內聲部）／三角波低音／繼電器（兩段差 6 ms 的爆音）／高帽。**底噪從頭響到尾**：50/100/150/250 Hz 市電哼聲 + 7.4 kHz 線圈嘯叫（0.07 Hz LFO 慢飄）——板子通電就在響
+  - **關鍵作曲約束**（隨機但不會變噪音）：音符只從音階級數取（`deg`）、每個聲部用 `fold` 折回自己的音域避免撞到旋律、動機細胞由 seed 抽一次然後整首變形（所以聽得出是同一首曲子，不是隨機遊走）
+  - **排程**：lookahead scheduler（`setInterval` 每 25 ms 只負責提前 180 ms 把音排進 AudioContext 時間軸，不直接發聲，JS timer 抖動不影響節奏準度）；音符表依拍排序後逐一往前掃，掃完整首就 `loopN++` 接下一輪
+  - **迴轉速連動曲速**：`audioManager.updateCadence` → `bgm.setCadence`，50-120 rpm 對應該曲基準 BPM 的 ±34%。**換速度時會把 `startAt` 重新錨定**，讓拍數位置連續——不然 spb 一變整首會瞬移
+  - **開關**：`config.sound.bgmEnabled`（`SettingsPanel` el-switch，巢狀在 `sound.enabled` 之下——主音效關掉 BGM 一併靜音）；`worldStyle` 中途切換會即時換曲風（含電子底噪的起停）
+  - **驗收**：`scripts/headless-check/music-vs-demo.ts`（跟著 `npm run check:3d` 跑）把 demo 的原始碼從 HTML 切出來執行，逐音符、逐 Web Audio 事件（節點型別／連線拓樸／每一個排上時間軸的參數）、以及**驅動排程器**跟正式版比對。耳朵驗不到的東西它全驗；音色好不好聽它驗不到
+  - **Welcome 也有 BGM，且無縫接進遊戲**：`AudioManager` 是 **app 單例**（`getAudioManager()`），Welcome 與 Game 共用——若各自 `new` 一個，離開 Welcome 時得 `close()` 掉 AudioContext，音樂會在轉場斷掉重來。
+    - `useThemeBgm()`（`composables/useThemeBgm.ts`）統一兩個 view 的接線：主音效／BGM 開關、`worldStyle`、seed 來源
+    - **seed 取自當前選中的路線**（未選則用固定 lobby seed），所以在 Welcome 選路線就會即時換成那條路的主題曲，等於試聽
+    - `startBgm(style, seed)` **只在曲子真的變了才重播**——GameView 進場時用同樣的 style+seed 再呼叫一次是 no-op，這正是無縫的關鍵
+    - **autoplay 政策**：Welcome 載入時不能自己出聲，改在首次 `pointerdown`／`keydown` 起播（一次性監聽）
+    - 騎乘結束不停 BGM，一路播過 summary 回到 Welcome；GameView `onUnmounted` 改呼叫 **`stopGameSounds()`**（停 redline 警報與環境音）而非 `dispose()`，後者會關掉共用的 AudioContext
+    - 環境音改由 `setAmbientEnabled()` 控制（原本綁在 constructor 的 `isThreeJs`）：context 可能早在 Welcome 就因 BGM 建好了，所以 `AmbientNoise` 改成需要時才補建
 - **FTP 結構化訓練系統** — 可選 5 種內建訓練模式，HUD 分段進度條 + 3D checkpoint flag + 訓練摘要
   - **訓練模式**（`shared/src/workouts.ts`）：Sweet Spot / VO2max / Endurance / FTP Test / Tabata，每個 profile 用百分比時間定義分段，依使用者設定的總時長等比縮放
   - **分段顏色方案（Cyberpunk）**：熱身冷藍 `#4a90d9` / Recovery 螢光綠 `#00e676` / Endurance 穩定綠 `#66bb6a` / Sweet Spot 琥珀黃 `#ffab00` / Threshold 螢光橘 `#ff6d00` / VO2max 警報紅 `#ff1744` / Sprint 螢光紫 `#d500f9`
@@ -797,6 +815,8 @@ ride_samples (
   - **觸發邏輯**（`GameView.vue` `activeCountdown` computed）：復用既有 `useWorkoutTracker.segmentRemainingMs` 與 `gameLoop.elapsedMs`，零新增資料管線；分段剩餘或 `targetDurationMs - elapsed` ≤ 60s 時觸發，兩者同時落窗時（profile 課表最後一段結束正好等於時間到）以「結束」為優先避免標籤打架；自由騎乘（無課表）只觸發 finish 倒數
   - **非阻擋式**：`pointer-events: none` + 僅中央暈影,騎士仍看得見路面繼續踩踏;巨大數字每秒以 `:key` 重播 pop 動畫;僅在 `state==='playing' && !isPaused && hasStarted` 顯示（不蓋起始提示/暫停畫面）,時間到後 `state='ended'` 自然消失
   - **PiP 相容**：放在 `.game-content` 內,子母畫面同步顯示;尊重 `prefers-reduced-motion`
+- **手動暫停 = 全停（2026-07-23）** — 過去手動暫停只凍結 sim 物理，時鐘與錄製照跑（方案甲全面適用），玩家按暫停後 ride 時長、SQLite 樣本、jsonl、FIT 距離都繼續累積。現在拆成兩種暫停：**手動暫停**（暫停鍵/Space/起始提示的 born-paused）→ ride 時鐘停（sim `pausedWallMs` 唯一權威，`elapsed = wall − pausedMsTotal()`）、raw jsonl / SQLite 樣本 / 統計與 FIT 距離積分全部凍結（`LiveSession.manualPauseActive()` 閘門，accumSpeed 會重置積分錨點防止恢復時跨暫停積分）、`durationMs` 扣除暫停時間；WS 廣播照常（HUD 暫停中仍看得到即時心率），client 時鐘在暫停時鎖定 server 錨點不外插。**Idle 自動暫停**（30 秒沒踩）維持方案甲：時鐘與錄製照跑。附帶效果：deferred start 的「起始提示等待期」現在完全不進紀錄。
+- **起點視窗（2026-07-23）** — 歡迎頁展開的高度圖上方新增 `RouteStartWindow.vue`：整條路線的距離軸高度剖面 + 一個可拖曳的視窗（寬度 = 目標騎乘時間 × 路線配速，GPX 時戳優先、無則 20km/h），視窗左緣 = 起騎里程。狀態存 `gameStore.startOffsetM`（換路線歸零），經 `pendingStart.game.startOffsetM` 送後端。**核心原則：`cumulativeDistance` 一律維持「已騎」空間（0 起算，統計/金幣/finishTarget 預測不變），只在「映射到路線位置」時加 offset**——server sim（laps/wrapped/金幣落點/實體終點）與 client `gameStateStore.sample()` 用同一條公式；chunk preload 以起點 chunk 為中心（`preloadIndices`，loop 會繞回、非 loop 截斷）；checkpoint 旗改存已騎距離軸（順便修掉繞圈比較的舊 bug）；終點飛船呼叫端把兩個 cum 各加 offset。已知限制：幽靈車 trace 若來自「有 offset 的騎乘」會錯位（trace 只存已騎距離、rides 表未記 offset）；`WorkoutElevationPreview` 的分段預覽仍從路線 0 起繪。
 - **錄製時機修正（延後至通過起始提示）** — 過去 `StartBar.launchGame()` 在導航進遊戲「之前」就 `POST /api/live/start`,導致後端在「踩踏/Space 繼續」提示還沒通過時就進入 `recording`（建 ride、開 jsonl、啟動計時）。改為把 start body 暫存於 `gameStore.pendingStart`,由 GameView 的 `beginRide()` 在第一次 unpause（通過提示）時才真正呼叫;`beginInFlight` 旗標防重複 start,成功後對 Space/點擊路徑主動補送 `/api/live/resume`（sim 出生 `paused=true`,踩踏路徑靠 tick auto-start,無功率訊號的 Space 路徑需主動 resume 否則球卡死）;失敗以 `revertToPrompt` 還原提示供重試。附帶徹底解決 replay/mock 在提示期間把球推走的問題（提示前根本無 server sim）
 
 ---
@@ -1029,9 +1049,20 @@ interface PhaserBridge {
   - **河流溪流**(`waterway-renderer.ts`):既有的 water layer 是**面**(湖泊),流動的水是**線** —— 這是盤點裡最大的視覺洞(~1,290 筆)。ribbon 寬度按 class(river 6m…ditch 1.5m),離地 0.15m(**低於道路 0.3m**,水從橋下過)。**`brunnel=tunnel`/`culvert` 一律跳過**——那是路面底下的涵管,畫出來會是橫躺在柏油路上的藍帶子。
   - **地面色塊**(`landuse-renderer.ts`):新增濕地 / 農田 / 運動場;機構用地(school/hospital/…)併入 urban(它們就是建成地,房子本來就走 building layer)。**LanduseRenderResult 是 `layers[]` 陣列**——以前是 5 個具名 mesh 欄位、chunk-manager 有 5 處逐一列舉,加一種地物就得改 5 個地方、漏一個就洩漏。加地物現在只要在 specs 表加一列。
   - **機場**(`aeroway-renderer.ts`):跑道 30m / 滑行道 15m 灰帶 + 停機坪;每個 aerodrome 質心停一台玩具飛機(紙=繫留飛機氣球、積木=積木小飛機)。
+  - **遠 chunk 線狀 overlay 隱藏(「天上一堆線」的真相)**(2026-07-24,`chunk-manager.update()` 尾段):走廊世界的本質限制——路線爬山的 chunk(南港/內湖段地形合法地到 136-340m)只有 ±500m 的窄走廊,從市區看過去**山體不存在、只剩爬山的路 ribbon+圍欄浮在空中**,幾十條微斜帶白虛線的黑線就是髮夾彎的側面(從 4 月起就存在,只是以前沒人從市區平地看向山區段)。修法(最終版):ring 距離 >1 的 in-scene chunk **只留地形本體**,其餘 overlay(路/圍欄/水/跑道/landuse/建築+屋頂裝飾/樹/窗燈)全部 `visible=false`——連續三輪 inventory 各抓到一類殘留(路→landuse 板→山坡屋頂板),一條規則終結打地鼠;用 `chunkMeshList` 迭代,未來新增 overlay 自動涵蓋。每幀在 update() 設定、零重建,騎近(±1)自動全部顯示。所有 chunk mesh + 導引線已命名(`chunk5/building`、`route/glow`),scene-inventory 傾印直接顯示身分。**最終兇手 = 導引線本體**:route/glow 是 4.2m 寬、透明度 0.28 的深紫 halo ribbon,26,688 頂點橫跨全程 45km、沿山脊爬到 y 193m,unlit(MeshBasic)在天空前讀作黑線——而且它是全域 mesh,豁免於所有 chunk 層級隱藏,所以連續七輪修復它紋絲不動。修法:`setRouteLineWindow`(geometry.setDrawRange,頂點沿路線排序、每段 6 index)只畫騎士 current chunk ±1 的區段,跨 chunk 時更新一次,近處引導功能不變。debug 另備「點擊驗屍」:點畫面任一像素 → raycast → 命中物件名字進 log+console(監聽掛 window 捕獲層,眼鏡框 overlay 吃不掉)。**點擊實測定論(2026-07-24)**:使用者點「黑線」命中的是 **1-32m 外、y 25-37 的自己 chunk 的地形**——爬坡髮夾彎的走廊疊層就在騎士身邊,而且相機曾距地形 1m=卡在幾何體內。→ **switchback 疊層消歧義修復**:`sampleChunkHeight`/`raycastGroundHeight` 加 `preferY`(騎士當前高度;首幀用 GPS 高程種子),同一 (x,z) 有多層走廊時選最近的那層,不再瞬移到錯誤的層/把相機塞進山壁。剩餘設計題:疊層走廊本身的視覺(山無實體)→ 側裙已到 chunkMin−6m,選項是把 baseY 壓到全 route 最低點讓山段成實心量體。**終局(headless CPU 渲染器定罪+驗證)**:`scripts/headless-check/render-probe.ts` 用正式管線蓋出 chunk 2-4+導引線,以騎士視角 CPU 光柵化成 PNG——**本地完整重現了「巨大黑色尖拱直插天空」**。根因:overlay 的 ground fn 在「爬坡走廊回頭跨過山谷」處撿到上層甲板的 150m 高度,馬路 ribbon 隨之射向天空。修法(渲染前後對照驗證):ground fn 以**該點原始 DEM 高程**選層(路躺在真實地面上,DEM 是單值真相),再加 **12m 理智檢查**——最近的層離真實地面仍超過 12m 就代表這裡只有高架甲板經過、沒有真的地面,直接裁掉。曾試「前一取樣點連續性」判層→**倒退**(錯誤會被鎖層拖著爬上尖刺),勿再嘗試。**「天上纜線」= 橋樑圍欄**(rail-only 渲染 pass 定罪):台北的數公里級高架(brunnel=bridge)每條都長了兩道 1.1m 細圍欄,幾十條貼地蜿蜒的細條側看=滿天電纜。`BRIDGE_RAILS_ENABLED=false` 停用生成(機制保留,未來可只給「短距離跨水橋」開圍欄)。
+    **第二發點擊定罪**:近距離(24m)直接命中 `route/glow`——導引線投影頂點時沒做疊層消歧義,在髮夾彎區頂點一下投下層一下投上層,整條線在空中亂竄=騎士身邊的「黑線」;修法:`_routeGpsY`(每頂點 GPX 高程)作為投影的 preferY,線永遠貼在離 GPX 高度最近的那層。**第二回合發現**:landuse 平板才是「頭頂線」大宗——merged 後的水面/公園/urban 色塊是「一疊漂浮在各自質心高度的水平板」(爬山 chunk 內 y 7..340m),側面看每片=一條細線;由 debug 模式的 **scene/inventory 探針**(騎乘 20 秒後自動傾印全場景 bbox)定罪。相機俯角讓「地平線上方 3~18°」的內容出現在畫面上緣,體感=「在頭頂」。
+  - **建築主體鏡射 bug(四月起潛伏)**(2026-07-24,`building-renderer.ts` `footprintToShape`):shape 存了場景座標的 z(已含負號),但 `rotateX(-90°)` 本身就把 shape-Y 映到**負的**世界 Z——雙重負號讓所有 MVT 擠出建築主體**沿原點東西軸鏡射到世界另一側**,而 OBB 裝飾(屋頂/窗戶/窗燈,直接用世界座標)留在正確位置。以前 Polygon-only 建築稀少沒人發現;MultiPolygon 修復後整座城市進來,症狀變成「屋頂懸浮沒身體 + 天空黑色大片(鏡射城市的背光牆)」。修法:shape 存 +lat 公尺並**反向走訪 ring**(鏡射會翻手性,反向走訪翻回來,cap 朝向/法線不變)。**這是家族性 bug**——同一個「shape 存場景 z + rotateX(-90°)」模式共三處:建築 `footprintToShape`、**landuse `buildFlatPolygon`(水面/公園/運動場/urban 色塊全部鏡射——「河濱公園沉入水底」其實是別處鏡過來的水面蓋在公園上)**、**aeroway `buildSlabGeometry`(鏡射的松山機場停機坪=地平線上的深灰大板)**,三處同款修復;`mountain-ring` 的 disc 是圓對稱不受影響。驗證工具:`scripts/headless-check/dazhi-repro.ts`(真實路段+真實 DEM+真實 MVT 走正式管線,掃描每個 mesh + instanced matrix 的 bbox/NaN/z 正負——就是它抓到 body 與 slab 的 z 全在鏡射側)。
+  - **Bare-earth 壓平:市區幽靈高塔的根治**(2026-07-24,`chunk-manager` flatten 區段 + `elevation-sampler.correction`):terrarium DEM 在密集市區是**表面模型**——大樓高度被烤進地形柵格(台北實測 30-50m 假塔,河濱磚 maxEle 48m)。後果鏈:地形長出黑綠色高塔 → 馬路貼地爬上塔頂看起來像「飛天橋」 → 建築質心取樣到自己造成的 DEM 尖峰而浮空(只看得到屋頂)。修法:chunk build **先抓 MVT 再蓋地形**,把 padded bounds 內全部建築 footprint(不做 ownership 過濾——地形要跨 chunk 縫一致)註冊進全域 registry(質心 ~1m 去重),每個 footprint 的「街道地板」= ring 周邊 ~8 點取樣最低值;`sampler.correction` 掛勾把落在 footprint 內的所有 DEM 取樣 clamp 到地板——地形/建築/樹/水全部消費同一份 bare-earth。配套:**建築基座改踩地形網格**(`ground(質心)`,fallback 才用量化 DEM)+ 3m 地基裙;**build 期 ground fn 改 grid-only**(舊版走廊外取樣掉進真實 mesh raycast fallback,單 chunk overlayBuild 曾到 40-60 秒);ownership 索引預投影成 Float32Array。**Overlay 貼地規則(2026-07-24 最終版,開發者拍板)**:ribbon/建築的 ground fn 只查**自己 chunk 的 height grid**,不再 fallback 到鄰居 grid——貼鄰居會讓路伸出自己的綠色走廊、懸空跨到下一段走廊(「路從山體長出來」)。走廊外的段落直接裁掉,擁有那段的 chunk 會在它自己的地形上畫;代價是 chunk 縫隙處路可能有小斷口,可接受。**事後實測更正**:大直磚的 DEM 其實沒有想像中的高塔(>15m 只佔 9.9%,多為真實山坡),壓平的實測效果有限(footprint 內外差 p50 0.7m/p99 6.4m,僅 ~8% 建築差 >3m)——「黑色大片」的真兇是上面那條建築鏡射 bug。壓平保留(對 8% 的建築地基仍有 3-6m 的修平效果,成本低)。
+  - **全部 landuse 平板 = 多點最低值 + 向下取整**(2026-07-24 推廣,原本只有水面):公園/urban/運動場等仍用「質心+round」時,市區 tread 0m 的地方平板會被入位到 6m——**整座城市蓋著一層懸浮 6m 的色塊天花板**:騎士騎進板子下面(穿模全綠)、每片板的背光邊緣=一條黑線(滿天細線的大宗、且無視地形穿山)。統一改 floor-min 後平板釘在「它碰到的最低 tread」:高 tread 處藏進地形下(正確的失敗模式,地形本身的顏色頂上)。
+  - **水面高度 = 多點最低值 + 向下取整**(2026-07-23,`landuse-renderer.ts` `buildFlatPolygon` 的 `waterLevel` 模式):大水域 slab 原本只取質心一點高度再**四捨五入**量化——河心 3.2m 入成 6m、岸邊公園 2.9m 捨成 0m,實差 0.3m 被放大成 6m 反轉,河濱公園整片「沉入水底」。水面(僅 `water` layer)改為:沿 ring 取樣(~24 點)取**最低值**、下限 clamp「質心減一階」(擋 terrarium DEM 河道雜訊,該區 tile 實測有 −28m)、**floor 量化**(水面永不被入位到高於真實水位)。其他地物維持質心+round;waterway 線是貼地 ribbon 不受影響。
+  - **MultiPolygon 建築修復**(2026-07-23,`building-renderer.ts` `extractBuildingsFromMVT`):z14 OpenMapTiles 會把相鄰建築合併成 MultiPolygon,而萃取器從四月寫成以來只認 `Polygon`——密集市區 95%+ 的建築(大直磚 1,342 棟、南松山磚 3,319 棟,含 161m 高樓)整批被跳過,「市區怎麼沒房子」就是它。現在逐子多邊形拆成獨立 footprint(共用該 feature 的高度),每棟走同一套 ownership + ground 檢查。配套:**建築預算改為畫質檔位參數** `maxBuildingsPerChunk`(low 800 / medium 2000 / high 3000,面積排序保留地標,取代原本的 3000 常數)——N100 低檔玩得動,高檔看完整城市;跟其他 geometry knob 一樣只影響之後新蓋的 chunk。
+  - **橋樑 = 貼地道路 + 圍欄**(2026-07-23,`ribbon-geometry.ts` `buildGroundRibbonWithRails` + `road-renderer.ts`):`brunnel=bridge` 跟一般道路一樣**逐點貼地**,只多兩條 1.1m 圍欄(獨立 `railMesh`,素色材質,跟著路面高度走、跟 ribbon 同步斷開),離地 0.38m(略高於一般路 0.3m,立體交叉時橋壓在路上不 z-fight)。**曾實作過「兩端錨定+線性內插」的立體橋面**(含騎士 GPS 高程仲裁吸附),但多條平行/分層的橋各自錨定會疊出「雙層橋」假象——開發者拍板:玩具 diorama 不做 city skyline,橋=平面道路+圍欄,整套 deck 機制已拆除。
+  - **Overlay 所有權去重**(2026-07-23,`chunk-manager` ownership 區段):每個 chunk 的 MVT 範圍外擴 ~500m,相鄰走廊重疊帶的地物以前會被**兩個 chunk 各蓋一份**(高度基準不同 → 一份埋地下 + z-fight)。現在「離哪個 chunk 的路段最近,誰蓋」(route point 空間網格查最近點,確定性、與載入順序無關):線類(路/水/跑道)**逐取樣點裁切**(兩邊各蓋自己那段、貼自己的網格,無縫),面/點類(建築/樹/landuse/停機坪/飛機)**整件歸屬**(質心判定)。
+  - **廢除 ribbon fallback 高度公式**:probe 打不到(走廊外沒地形)就把 ribbon **斷開**,不再用「單點量化」公式亂補——它跟地形的「格平均量化」不是同一個函數,會差整整一階(塑膠 6m/紙板 12m),路一跨出走廊邊界就瞬間跳一層。建築質心 probe 打不到也直接跳過(不再浮空)。slab/飛機的質心 fallback 保留。
   - **隧道不畫幾何**,改用「一整排密集亮著的燈」表現(見上方街燈)。
   - 盤點對帳:rendered **28.5% → 38.3%**、fetched_ignored **1,126 → 323**。改 renderer 後請同步更新 `survey.mjs` 的 `classify()` 並重跑。
 - **環境 zone 只染色、不調暗**(`cycling-glasses-effect.ts` `ZONE_MODIFIERS`):原本 tunnel 會把**整個畫面 ×0.45**、forest ×0.80。那是第一人稱的沉浸設計(你人在隧道裡);diorama 俯瞰玩具世界、世界裡根本沒有隧道幾何,畫面無故變黑就是 bug——**「有些地區突然變很黑」就是它**。而且後處理的亮度乘算是繞過 `day-night-lighting` 那條「不得比 demo 夜更暗」硬地板的後門。現在 `brightnessMul` 一律 1.0,只保留極淡 tint(forest 綠)。zone 偵測本身保留(鏡片痕跡等仍在用)。
+- **EffectComposer 鏈尾必須有 `OutputPass`(「夜間全黑」的根因,2026-07-24)**:three r152+ 渲染進 render target 時**強制關閉 tone mapping、輸出維持 linear**(`getParameters` 裡 `currentRenderTarget !== null` → `NoToneMapping` + `LinearSRGBColorSpace`),而遊戲每一格都走 composer(RenderPass→Bloom→眼鏡→Tunnel→style)——鏈尾沒 OutputPass 就是「沒 ACES、linear 當 sRGB 直出」:白天陰影面壓成純黑、夜間整個 palette(linear ~0.05)直出=全黑,demo 直繪(`renderer.render()`)才正常,palette/floor 機制本身無辜。修法:眼鏡 composer 與無眼鏡 standalone postComposer 鏈尾都加 `OutputPass`(每格自動讀 `renderer.toneMapping`/`toneMappingExposure`,1.05 這時才真正生效);`setStylePass` 改 `insertPass` 插在 OutputPass 之前,**OutputPass 永遠是最後一個 pass**——未來新增任何 composer/pass 都要遵守。注意鏡片 tint/contrast 與紙後處理現在吃 linear 輸入,參數觀感若偏請直接調 preset。
 - **天氣粒子 / 後處理**:`sky-and-fog.ts` 的雨雪雲星、`lightning-bolt.ts`、紙後處理沿用。
 - **自檢**:`npm run check:3d` —— headless(Node + stub canvas,不開 WebGL)實際建出兩套皮的單車 / 遠山 / 街燈 / 金幣 / 建築裝飾,驗證幾何朝向、相機在騎手後方、遠山視差錨定、收尾盤畫序。WSL 可跑(繞開只裝了 Windows 版的 esbuild / rollup native binary)。
 - **視覺規格來源**:`paper-town-demo.html` / `plastic-town-demo.html`(repo 根目錄)與 `plan/ref-demo-*-src.js`。
@@ -1047,6 +1078,218 @@ interface PhaserBridge {
 - 面板斜切角（`clip-path: var(--clip-panel-*)`）取代圓角
 - 霓虹光暈（`filter: drop-shadow`）、掃描線飄移動畫、故障閃爍標題
 - Welcome 頁面 + Game HUD + 訓練摘要 均使用此風格
+
+### 分區驅動建築（demo 已落地／`packages/` 未接）
+
+**現況的缺口。** `landuse-renderer` 的 `isUrbanLanduse()` 認得 **11 種** class:
+
+```
+residential  commercial  industrial  retail
+school  hospital  university  college  kindergarten  library  education
+```
+
+但 `URBAN_COLORS`(cartoon-materials.ts)只有 4 個 key,而且 `retail` 與 `commercial` 同色 ——
+實際只畫得出 **3 種顏色**。其餘 **7 種**(school / hospital / university / college /
+kindergarten / library / education)一律 `?? URBAN_COLORS.residential` fallback 成住宅
+灰。**辨識了、抓進來了、投影成幾何了,然後畫成一模一樣。**
+
+而且那個色是**整個 chunk 取眾數**(`getDominantUrbanColor`),不是逐多邊形上色。
+
+建築更徹底:**建築與土地分區是兩條互不相通的管道**。兩者吃同一包 `mvtFeatures`,
+但取不同 layer(建築 = `building`,分區 = `landuse` / `landcover` / `park`),而
+`buildBuildingMeshes(footprints, sampler, origin×3, strategy, ground, routeDistanceAt)`
+的參數裡**沒有一個欄位跟分區有關**。所以每個 style 只有一種建築本體(積木 = 疊片塔、
+瓦楞紙 = 橡皮擦塊),連已經有專屬顏色的 `industrial` 都長得跟住宅一樣。
+
+**改造路徑。** 關鍵是 `terrain-chunk-manager` 已經有 `registerUrbanZones(mvtFeatures)`
+把 urban 多邊形抓出來了 —— 只是目前只留「是不是市區」拿去**壓平地形**(市區把 DEM 夾到
+路線高度附近),沒留 class。所以這不是新增管道,是把既有的東西接出來:
+
+1. `registerUrbanZones()` 順手保留 **class 與 ring**,建立 bbox 索引(多邊形已解過,不必
+   重解 MVT)
+2. `buildBuildingMeshes()` 多收一個 `zoneAt(lon, lat)` callback;bbox 先篩、再做點在多邊
+   形內測試,逐棟一次,成本可接受
+3. `TerrainStyleStrategy.buildBuildingBody(box, seed)` 加第三個參數 `zone`
+4. 各 style 用 zone **偏移建築型別的抽樣機率**,不是硬對應 —— 分區「傾向」某種房子,混雜
+   一點才像真的城市
+
+第 1 步不改任何視覺,三個世界行為不變,可獨立驗證。
+
+**分區建築對照(demo 已定案)。** 五種分區、五種形體語言,同一世界內不得撞號 —— 撞號的
+定義不只是輪廓,**手感(材質)也算**:
+
+| 分區 | 積木(玩具箱) | 瓦楞紙(評圖模型) | 電子(單晶片) |
+|---|---|---|---|
+| 住宅 | 黏土像素屋(方塊堆疊・霧面) | 橡皮擦屋(直角塊＋底部紙套) | 電解電容(套管圓柱) |
+| 商業／零售 | 抽抽樂塔(橫條疊高・霧面彩色) | 彩色索引標籤片台(蓋沿一排標籤片＋分格視窗帶＋斜出片口) | 輝光管招牌(暖橘數字) |
+| 工業 | 杯塔(梯形收分・半透明) | 膠帶台(厚底座＋捲軸＋鋸齒刀口) | 變壓器(矽鋼片疊層＋銅線圈) |
+| 學校 | **字母積木**(矮寬一長排・浮凸字母) | 算盤(框＋彩珠橫向排列) | DIP IC(黑塑封・一排腳) |
+| 醫院 | 骨牌牆(豎片並排・白底黑點＋紅三角) | 藥盒／OK繃盒(白底紅三角) | 白陶瓷封裝 DIP＋紅色 LED |
+
+踩過的坑,別再走一次:
+
+- **薄片會消失。** chase cam 的眼睛只在騎士上方 6.3 m(`fps-camera.ts` 的 `CHASE_UP`),
+  側對騎手的薄片幾乎沒有面積。字母積木要排成有厚度的一長排、骨牌要排兩排以上、卡片類
+  厚度不得低於 0.3。紙牌屋就是因此被換掉的。
+- **鏤空會在天際線開洞。** 逆光或夜間整棟消失。量體一律實心。
+- **手感撞號比輪廓撞號更難察覺。** 第一版三種建築有兩種都是硬亮面塑膠,遠看只像三個尺
+  寸;換成黏土(霧面軟)之後才分得開。
+- **一個元件只能有一個身分。** 電子世界的排針既然當了等高線疊層的裙邊,欄杆就得換成
+  銅柱 —— 否則遠看兩處長一樣,詞彙量虛胖。
+- **字母不要用系統字型。** 騎乘距離會糊,且跨機器不一致;用幾何線條自己畫。
+
+**已實作 vs 已定案。** 這兩件事必須分開記,否則會出現「清單上寫著、實際沒做」
+(純銅散熱鰭片就這樣漏了一輪)。落地前請以程式碼為準,不要以本表為準。
+
+目前狀態(2026-07-26):
+
+| 範圍 | 狀態 |
+|---|---|
+| `plan/*-demo.html` 六個 demo(3D×3、Phaser 2D×3) | **已實作** —— 上表五種分區、五種建築全部畫得出來,含分區取樣與空分區保底 |
+| `packages/web` 真實遊戲 | **未接** —— 上面「改造路徑」四步一步都還沒動 |
+
+demo 的分區取樣一律用 **Fisher–Yates 洗牌袋**,不是逐段獨立亂數 —— 獨立亂數在 8 km
+尺度會嚴重偏斜(整段全是住宅)。落地時請沿用同一個作法。
+
+**空分區要保底。** 「讀到分區但沒生出房子」跟「本來就是空地」在畫面上無法區分,但前者
+是 bug。demo 用 `zoneSpans()` 取出每段的分區區間,若整段一棟都沒抽中,強制補一棟該分區
+的主建築。circuit 世界實測:沒有保底時 72 格有 14 格空,加上之後 75 格 0 空。
+
+**醫院符號用紅色三角形,不用紅十字。** 白底紅十字是日內瓦公約與各國國內法保護
+的標誌,遊戲裡當醫院圖示雖然常見,但它是受保護標誌而非通用符號。三角形辨識度
+足夠且無此問題。
+
+**版權。** 一律取通用玩法／通用封裝外型,不印廠牌字樣、料號、商標或包裝圖騰;配色走
+`themes.scss` 色票。疊紙牌屋、交叉堆疊抽取式積木塔、骨牌、字母積木、算盤、JEDEC 封裝
+外型皆為公共領域或通用形制。**meeple 的人形剪影有具體權利人,不使用**(checkpoint 用
+傳統車床輪廓的棋子)。
+
+---
+
+### 建築的燈歸建築所有(要改 `packages/`)
+
+**現況是錯的。** `building-renderer.ts` 的 `collectFacadeWindowPlacements()` 拿建築的 OBB,
+用 `box.width / colSpacing` 切欄、`box.height / rowSpacing` 切列,在 ±z 兩個面上蓋一格窗戶
+的網格,再用 `skipProb` 挖幾格讓它不要太整齊。**它完全不知道自己蓋在什麼東西上。**
+
+分區驅動建築一落地,這件事會立刻變得很難看:抽抽樂塔、黏土像素屋、杯塔、骨牌牆、字母
+積木、輝光管招牌、DIP IC、電解電容、橡皮擦、標籤片台、膠帶台、算盤、藥盒 —— 十三種
+形體,會被蓋上**同一種**小方格。電容不該有窗戶;IC 不該有窗戶;骨牌的窗戶就是它自己的
+點;抽抽樂塔的窗戶就是**那些方形的短面**(每層交錯 90°,短面本來就露在外面、本來就在對
+的位置)。
+
+**規則:決定形體的那個東西,必須同時決定燈。** 把兩者拆開,就會做出「有窗戶的電容」。
+
+demo 裡已經有兩個做對的例子可以照抄:
+- 黏土像素屋:「窗是**換色不是挖洞**」—— 第二層前後各兩格換成亮黃的體素。
+- 骨牌牆:「骨牌上的**點就是窗**」。
+
+**介面改法**(跟分區驅動建築的四步一起做,它們是同一條管道):
+
+```ts
+/**
+ * 這棟建築的燈在哪。回傳的座標系跟 buildBuildingBody() 完全相同(box 的區域
+ * 座標),由建築 renderer 批次成一個 InstancedMesh。
+ *   - 回傳空陣列 = 這種建築沒有燈(電容、IC、橡皮擦)。
+ *   - 省略這個 hook = 退回 facadeWindows 的通用網格。
+ */
+buildBuildingLights?(box: BuildingBox, seed: number, zone: ZoneKind): WindowPlacement[];
+```
+
+`facadeWindows` **降級成「沒有 matchbox 主體時的退路」** —— 也就是只服務直接擠出 MVT
+footprint 的那條舊路徑,不再蓋在每一個主題造型上。`building-renderer.ts:391` 那個
+`if (strategy.facadeWindows)` 要改成「先問 `buildBuildingLights`,沒有才退回網格」。
+
+**先在 demo 做,再移植。** demo 是這件事的規格:每種分區建築在 demo 裡自己宣告夜間的燈,
+移植的人照著接就好,不必重新設計十三種建築的燈長在哪。
+
+---
+
+### 招牌、壓克力罩、bloom、電流脈衝(demo 規格)
+
+四項跨六個 demo 的共用規格。**六個 demo 必須用同一套機制**,只有「載體」不同 ——
+不然三個世界會長出三套互相衝突的招牌邏輯,移植時要重寫三次。
+
+#### 招牌
+
+**共用機制(六個 demo 完全一致):**
+
+| 項目 | 規則 |
+|---|---|
+| 掛在哪 | 商業／零售分區的建築,面向路線那一側;學校與醫院各掛一塊(識別符號) |
+| 不掛 | 住宅、工業 |
+| 比例 | 固定 **3:1**(寬:高)—— 三個世界載體不同但比例相同,遠看才是「同一種東西」 |
+| 寬度 | `min(建築寬 × 0.8, 上限)`,不得比建築寬 |
+| 掛高 | 建築高度的 **0.55–0.7** 之間 |
+| 傾角 | 向下傾 **8°** —— 騎士眼睛在 6.3 m,平掛的招牌看不到 |
+| 內容 | 最多 **4 個字符**,字高 ≥ 招牌高的 0.55,筆畫寬 ≥ 字高的 1/8 |
+| 字形 | **幾何筆畫網格,不可用系統字型**(騎乘距離會糊,跨機器不一致) |
+| 分區內容 | 商業 = 2–4 字母的假店名(決定性 RNG 從固定詞庫抽);學校 = `ABC`;醫院 = 紅色三角形 |
+| 配色 | 底 = 該世界該分區色票,字 = 該世界的 ink 色 |
+
+**各世界的載體**(不可互換 —— 每個都必須是那個世界貨架上**還沒被用掉**的東西):
+
+- **瓦楞紙 → 標籤機浮凸標籤帶**(圓角長條、壓紋的白色浮凸字、底色是塑膠帶)。
+  *不用便利貼*:商業分區的建築本體已經在用同一批螢光色紙,撞號。
+- **積木 → 玩具組附的貼紙**(印刷貼紙貼在一塊平板上,**貼歪 3–6°**、一角有氣泡、四周留白邊)。
+  *不用字母積木*:字母積木已經是學校建築,撞號。貼紙是平的印刷品,凸字是立體的,分得開。
+- **電子 → 電子紙模組**(霧面灰白底、純黑字、極細黑框、側邊一條 FPC 排線接到建築)。
+  **不發光** —— 這是它跟輝光管(商業建築本體)的分工:輝光管發橘光,電子紙是反射式的,
+  夜裡靠路燈照。反射式正是電子紙的物理特性,順便讓兩者不撞號。
+
+#### 壓克力罩天空
+
+整個世界是**擺在桌上的模型**,所以它罩在一個壓克力罩底下。三個世界都成立:評圖模型本來
+就收在壓克力罩裡、玩具是展示盒、電路板是防塵/防靜電罩。
+
+- 半徑放在**遠山圈之外**(瓦楞紙的遠山在 640,罩子取 900–1000),高度到天頂。
+- `side: BackSide`、很低的不透明度、輕微染色。既有的天空球(r=1100 的 `skyMat`)**保留**,
+  罩子疊在它內側。
+- 要看得到它**是一個罩子**,不能只是一層染色:底部與桌面交界要有一圈**較厚的壓克力邊**
+  (不透明度higher 的帶),頂部曲面要有一兩道**長條高光**(壓克力罩一定有的那種反光)。
+- **天氣 = 染色 + 扭曲**:雨天罩子外側起水珠(較冷的染色 + 一層流動的水痕),既有的世界內
+  降雨保留不動。
+
+#### bloom
+
+**不是三個世界都要。**
+
+| 世界 | bloom | 理由 |
+|---|---|---|
+| 電子 | **強**(夜間) | 走線、輝光管、LED —— 這個世界的識別性就是發光 |
+| 積木 | **很弱**,只在夜間 | threshold 拉高,只讓路燈與金幣的高光溢出 |
+| 瓦楞紙 | **不做** | 廣告顏料不會發光。加了就不是這個世界了 |
+
+**demo 的 three.js bundle 裡沒有任何後製 addon**(實測三個世界皆為
+`EffectComposer=0 UnrealBloomPass=0 OutputPass=0 RenderPass=0 ShaderPass=0 CopyShader=0`),
+所以走不了 `EffectComposer` 那條路。也**不可以**自己貼一份 addon bundle、不可以從 CDN 載
+(離線 + 外部相依)、不可以 `npm install`(專案規範禁止)。
+
+**改成用 three core 手刻最小 bloom**:`WebGLRenderTarget` + 全螢幕 quad + `ShaderMaterial`
+→ 場景進 RT → bright-pass(半解析度)→ 可分離高斯模糊水平/垂直各一次 → 加法合成。
+兩級就夠;`UnrealBloomPass` 的五級 mip 對這幾個世界是浪費,而且目標機是 N100。
+
+**兩個一定會踩的坑:**
+
+1. **最後那個合成 pass 必須自己做 sRGB encode**(或把 RT 的 `texture.colorSpace` 設對)。
+   three r152+ 對 render target 不做 tone mapping / sRGB 轉換 —— 這正是 `OutputPass` 原本
+   在補的事。漏掉的直接後果是**夜間全黑**。驗收要實際比對「有 bloom vs 沒 bloom」的夜間
+   亮度,不能只看有沒有光暈。
+2. **不可以把 `renderer.render(scene, camera)` 換掉。** headless probe 是靠攔截
+   `renderer.render()` 拿到 scene 的,改成只呼叫 composer 會讓四個 demo 全部驗不了。
+   作法:composer 建立包在 try/catch 裡,失敗就 `usePost = false`,animate 迴圈走
+   `usePost ? composer.render() : renderer.render(scene, camera)`。headless 一定走後者。
+   這同時也是 N100 的低階退路,不是只為了測試。
+
+#### 踏頻 → 電流脈衝(只有電子世界)
+
+- **踏頻決定脈衝的行進速度**,**功率決定亮度**。
+- demo 沒有真實感測器,用 UI 滑桿模擬:踏頻 **60–110 rpm**、功率 **80–320 W**。
+- 必須跟既有的 `applyDayNight(k)` 與 `powerOn` **相乘**,不是取代 —— 斷電時不管踩多用力
+  都不會亮。
+- 2D 版用同一組映射。
+
+---
 
 ---
 

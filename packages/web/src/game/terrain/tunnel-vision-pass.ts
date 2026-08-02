@@ -65,10 +65,16 @@ const TunnelVisionShader = {
 export class TunnelVisionPass extends ShaderPass {
   constructor() {
     super(TunnelVisionShader);
+    // Starts as a no-op — disabled so EffectComposer skips the pass entirely
+    // (a full-screen blit + render-target swap) instead of running the
+    // passthrough shader. setIntensity() re-enables it when needed.
+    this.enabled = false;
   }
 
   setIntensity(value: number): void {
-    this.uniforms['uTunnelIntensity'].value = Math.max(0, Math.min(1, value));
+    const clamped = Math.max(0, Math.min(1, value));
+    this.uniforms['uTunnelIntensity'].value = clamped;
+    this.enabled = clamped > 0.001;
   }
 }
 

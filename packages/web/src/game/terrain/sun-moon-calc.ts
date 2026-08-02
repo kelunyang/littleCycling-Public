@@ -177,10 +177,39 @@ function smoothstep(t: number): number {
 /**
  * Compute the full celestial state for a given location and time.
  */
+/**
+ * Debug clock override. Everything downstream — sky gradient, fog, the three
+ * lights, moon sprite, stars, cloud-shadow fade — is derived from the celestial
+ * state, so pinning the date here forces the whole world to a time of day
+ * without a single other file knowing about it.
+ *
+ * Exists because "is that a black line or is it just night?" is impossible to
+ * answer at 2am, and the artefact being hunted only shows up on a hillside you
+ * cannot see in the dark.
+ */
+let debugDate: Date | null = null;
+
+export function setDebugTimeOverride(date: Date | null): void {
+  debugDate = date;
+}
+
+export function getDebugTimeOverride(): Date | null {
+  return debugDate;
+}
+
+/** A well-lit, RAKING sun — mid-morning, not noon. Overhead light flattens
+ *  every vertical face, which is the opposite of what you want when trying to
+ *  see the shape of something. */
+export function debugDaylightDate(): Date {
+  const d = new Date();
+  d.setHours(10, 0, 0, 0);
+  return d;
+}
+
 export function getCelestialState(
   latitude: number,
   longitude: number,
-  date: Date = new Date(),
+  date: Date = debugDate ?? new Date(),
 ): CelestialState {
   const sun = sunPosition(latitude, longitude, date);
   const phase = moonPhase(date);

@@ -19,6 +19,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import type { GameRenderer } from './game-renderer';
 import type { WeatherType } from './sky-and-fog';
 import { TunnelVisionPass, computeTunnelIntensity } from './tunnel-vision-pass';
@@ -245,12 +246,23 @@ const COIN_GLOW_FADE_SPEED = 3.0;
 /** Bloom composite strength when bloom is active (neon route line). */
 const BLOOM_COMPOSITE_STRENGTH = 0.5;
 
+/** Bloom chain renders at this fraction of canvas size (it's a blur — half res is invisible). */
+const BLOOM_RESOLUTION_SCALE = 0.5;
+
 export class CyclingGlassesEffect {
-  // Main composer: RenderPass → BloomComposite → Glasses → Tunnel
+  // Main composer: RenderPass → BloomComposite → Glasses → Tunnel → (style) → Output
   private composer: EffectComposer;
   private glassesPass: ShaderPass;
   private tunnelPass: TunnelVisionPass;
   private bloomCompositePass: ShaderPass;
+  /**
+   * Final pass: tone mapping (ACES, renderer's exposure) + linear→sRGB. Since
+   * r152 the WebGLRenderer applies NEITHER when drawing into a render target,
+   * so without this the composer chain reaches the screen linear and
+   * un-tone-mapped — shadows crush to black and the night palette reads as
+   * pitch black instead of the demos' violet.
+   */
+  private outputPass: OutputPass;
   /**
    * World-style post pass (paper-craft etc.), owned by the TerrainStyleStrategy
    * and injected via setStylePass(). Decoupled from the glasses effect so the
@@ -271,6 +283,7 @@ export class CyclingGlassesEffect {
   private coinGlowIntensity = 0;
   private currentLens: GlassesLens = 'auto';
   private currentWeather: WeatherType = 'sunny';
+  private simplified = false;
 
   // Lens transition state (D — smooth lens switching)
   private targetPreset: LensPreset | null = null;
@@ -300,13 +313,17 @@ export class CyclingGlassesEffect {
     bloomRenderPass.clearAlpha = 0;
     this.bloomComposer.addPass(bloomRenderPass);
 
-    // UnrealBloomPass: resolution, strength, radius, threshold
+    // UnrealBloomPass: resolution, strength, radius, threshold.
+    // The whole bloom chain runs at half resolution — bloom is a blur, so the
+    // composite (linear-filtered upsample) is visually identical while the
+    // second scene render + mip pyramid shade 1/4 of the pixels.
     const bloomResolution = new THREE.Vector2(
-      renderer.domElement.clientWidth,
-      renderer.domElement.clientHeight,
+      Math.max(1, Math.floor(renderer.domElement.clientWidth * BLOOM_RESOLUTION_SCALE)),
+      Math.max(1, Math.floor(renderer.domElement.clientHeight * BLOOM_RESOLUTION_SCALE)),
     );
     this.bloomPass = new UnrealBloomPass(bloomResolution, 0.6, 0.3, 0.2);
     this.bloomComposer.addPass(this.bloomPass);
+    this.bloomComposer.setSize(bloomResolution.x, bloomResolution.y);
 
     // ── Main composer ──
     this.composer = new EffectComposer(renderer);
@@ -325,8 +342,13 @@ export class CyclingGlassesEffect {
     this.tunnelPass = new TunnelVisionPass();
     this.composer.addPass(this.tunnelPass);
 
-    // NOTE: the world-style post pass (paper-craft) is appended later via
-    // setStylePass() — it belongs to the strategy, not the glasses effect.
+    // NOTE: the world-style post pass (paper-craft) is inserted before the
+    // output pass via setStylePass() — it belongs to the strategy, not the
+    // glasses effect.
+
+    // Tone mapping + sRGB — must stay the LAST pass.
+    this.outputPass = new OutputPass();
+    this.composer.addPass(this.outputPass);
 
     // Lens marks
     this.marksManager = new LensMarksManager();
@@ -347,6 +369,27 @@ export class CyclingGlassesEffect {
   setBloomEnabled(enabled: boolean): void {
     this.bloomCompositePass.uniforms['uBloomStrength'].value =
       enabled ? BLOOM_COMPOSITE_STRENGTH : 0;
+    // Fully skip the composite pass when off — otherwise it still costs a
+    // full-screen blit + render-target swap just to add zero.
+    this.bloomCompositePass.enabled = enabled;
+  }
+
+  /**
+   * Low-quality simplification: keeps lens tint/contrast/vignette (the visual
+   * identity) but drops barrel distortion and the lens-marks overlay, cutting
+   * the glasses shader to a single texture fetch per pixel.
+   */
+  setSimplified(simplified: boolean): void {
+    if (this.simplified === simplified) return;
+    this.simplified = simplified;
+    const u = this.glassesPass.uniforms;
+    if (simplified) {
+      u['uDistortion'].value = 0;
+      u['uMarksIntensity'].value = 0;
+    } else {
+      u['uMarksIntensity'].value = 1.0;
+      this.resolveAndApply(); // transition distortion back to the lens preset
+    }
   }
 
   /** Set the lens mode. */
@@ -440,14 +483,19 @@ export class CyclingGlassesEffect {
       }
     }
 
+    // Simplified mode: lens transitions above may have re-written distortion —
+    // pin the cheap-path uniforms back to zero.
+    if (this.simplified) {
+      this.glassesPass.uniforms['uDistortion'].value = 0;
+      this.glassesPass.uniforms['uMarksIntensity'].value = 0;
+    }
+
     this.marksManager.update(dt);
   }
 
   /** Render the scene with selective bloom + post-processing. */
   render(): void {
-    const bloomStrength = this.bloomCompositePass.uniforms['uBloomStrength'].value as number;
-
-    if (bloomStrength > 0.01) {
+    if (this.bloomCompositePass.enabled) {
       // ── Pass 1: Bloom (only bloom-layer objects) ──
       this.savedBackground = this.scene.background as THREE.Color | THREE.Texture | null;
       this.scene.background = this.blackBackground;
@@ -471,15 +519,17 @@ export class CyclingGlassesEffect {
   /** Handle canvas resize. */
   resize(width: number, height: number): void {
     this.composer.setSize(width, height);
-    this.bloomComposer.setSize(width, height);
-    this.bloomPass.resolution.set(width, height);
+    const bw = Math.max(1, Math.floor(width * BLOOM_RESOLUTION_SCALE));
+    const bh = Math.max(1, Math.floor(height * BLOOM_RESOLUTION_SCALE));
+    this.bloomComposer.setSize(bw, bh);
+    this.bloomPass.resolution.set(bw, bh);
     const res = this.stylePass?.uniforms['uResolution'];
     if (res) res.value.set(width, height);
   }
 
   /**
-   * Install (or replace/clear) the strategy's world-style post pass as the
-   * final composer pass. Pass null to remove it (e.g. switching to plastic).
+   * Install (or replace/clear) the strategy's world-style post pass, just
+   * before the output pass. Pass null to remove it (e.g. switching to plastic).
    */
   setStylePass(pass: ShaderPass | null): void {
     if (this.stylePass) {
@@ -487,7 +537,7 @@ export class CyclingGlassesEffect {
       this.stylePass = null;
     }
     if (pass) {
-      this.composer.addPass(pass);
+      this.composer.insertPass(pass, this.composer.passes.indexOf(this.outputPass));
       this.stylePass = pass;
     }
   }
@@ -496,6 +546,7 @@ export class CyclingGlassesEffect {
     this.marksManager.dispose();
     this.bloomComposer.dispose();
     this.composer.dispose();
+    this.outputPass.dispose();
   }
 
   private resolveAndApply(): void {

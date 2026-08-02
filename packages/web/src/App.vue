@@ -283,6 +283,60 @@ body {
   --chart-actual: var(--hud-text-bright);
 }
 
+/* ─── Circuit theme tokens ───
+   The cyberpunk :root base already IS this world's register (dark ground, cyan
+   + magenta neon — the demo's own #23f0ff / #ff2d9b are near-twins of the base
+   #00e5ff / #ff2d6b), so unlike the two paper-toned worlds this block does NOT
+   rebuild the chrome. It re-grounds the colours in the $circuit tokens from
+   themes.scss — the board is solder-mask green, not void-blue — and leaves the
+   base's angled panels, fonts and glows in place. Deliberate, documented here
+   so it never reads as "circuit forgot its CSS". */
+[data-world-style="circuit"] {
+  --hud-bg: rgba(var(--ct-page-lo-rgb), 0.88);
+  --hud-bg-light: rgba(var(--ct-mask-lo-rgb), 0.72);
+  --hud-text: var(--ct-silk);
+  --hud-text-bright: #ffffff;
+  --hud-text-dim: rgba(var(--ct-silk-rgb), 0.5);
+  --hud-cyan: var(--ct-trace);
+  --hud-yellow: var(--ct-gold-hi);
+  --hud-magenta: var(--ct-hot);
+  --hud-border: rgba(var(--ct-trace-rgb), 0.4);
+  --hud-border-bright: rgba(var(--ct-trace-rgb), 0.85);
+  --hud-glow-cyan: 0 0 6px rgba(var(--ct-trace-rgb), 0.5), 0 0 20px rgba(var(--ct-trace-rgb), 0.15);
+  --hud-glow-yellow: 0 0 6px rgba(var(--ct-gold-hi-rgb), 0.5), 0 0 20px rgba(var(--ct-gold-hi-rgb), 0.15);
+  --hud-glow-magenta: 0 0 6px rgba(var(--ct-hot-rgb), 0.5), 0 0 20px rgba(var(--ct-hot-rgb), 0.15);
+
+  --accent-rgb: var(--ct-trace-rgb);
+  --accent-soft: rgba(var(--ct-trace-rgb), 0.08);
+  --accent-tint: rgba(var(--ct-trace-rgb), 0.14);
+  --accent-hover: rgba(var(--ct-trace-rgb), 0.25);
+  --accent-strong: rgba(var(--ct-trace-rgb), 0.6);
+
+  /* Solid surfaces for teleported drawers/dialogs: dark mask, never the demo's
+     bright board green — a full-bright green panel behind white text is mud. */
+  --surface: var(--ct-page-hi);
+  --surface-light: var(--ct-mask-lo);
+  --surface-gradient: linear-gradient(180deg, var(--ct-mask-lo) 0%, var(--ct-page-lo) 100%);
+  --border: rgba(var(--ct-trace-rgb), 0.3);
+
+  --el-bg-color: var(--ct-page-hi);
+  --el-bg-color-overlay: var(--ct-mask-lo);
+  --el-bg-color-page: var(--ct-page-lo);
+  --el-text-color-primary: var(--ct-silk);
+  --el-text-color-regular: rgba(var(--ct-silk-rgb), 0.8);
+  --el-border-color: rgba(var(--ct-trace-rgb), 0.4);
+  --el-fill-color-blank: var(--ct-mask-lo);
+  --el-fill-color-light: var(--ct-page-hi);
+
+  --el-color-primary: var(--ct-trace);
+  --el-color-primary-light-3: rgba(var(--ct-trace-rgb), 0.7);
+  --el-color-primary-light-5: rgba(var(--ct-trace-rgb), 0.5);
+  --el-color-primary-light-7: rgba(var(--ct-trace-rgb), 0.3);
+  --el-color-primary-light-8: rgba(var(--ct-trace-rgb), 0.2);
+  --el-color-primary-light-9: rgba(var(--ct-trace-rgb), 0.1);
+  --el-color-primary-dark-2: color-mix(in srgb, var(--ct-trace) 80%, black);
+}
+
 /* ── Theme tweaks for Element Plus segmented / radio across body
    (welcome controls + drawers/dialogs that teleport to body) ── */
 

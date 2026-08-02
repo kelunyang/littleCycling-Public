@@ -25,7 +25,16 @@ const BIKE_SCALE = 0.45;
 /** Wheel radius in the strategy's local units (both styles use 2.1). */
 const WHEEL_RADIUS = 2.1;
 
-/** Crank turns this much slower than the wheels (roughly a real gear ratio). */
+/**
+ * Crank turns this much slower than the wheels — the FALLBACK gear ratio, used
+ * only when nothing is measuring cadence (see `update`).
+ *
+ * It is a fallback and not the rule because a fixed ratio off the wheel makes
+ * the pedals a second speedometer: shift to the big ring, let the cadence halve
+ * at the same road speed, and the legs on screen do not change at all. Cadence
+ * is a signal the rig usually reports; when it does, the crank turns at that
+ * rate and this constant is not consulted.
+ */
 const CRANK_RATIO = 0.4;
 
 /** Lean smoothing + limit — same feel as the demos. */
@@ -68,14 +77,23 @@ export class BikeOrnament {
    *
    * @param position  Rider ground position in scene metres (y = ground level).
    * @param bearingDeg  Heading (0 = north, 90 = east, clockwise).
-   * @param speedMps  Ground speed, drives wheel/crank spin.
+   * @param speedMps  Ground speed, drives wheel spin (and the crank's fallback).
    * @param dt  Frame time in seconds.
+   * @param cadenceRpm  Measured crank cadence in rpm, or `null` when nothing
+   *   reports it (`RiderSignals.cadenceRpm`, relayed unchanged). **`0` and
+   *   `null` are different answers and must look different:** 0 rpm is a rider
+   *   freewheeling and the cranks stand still while the wheels keep turning;
+   *   `null` is "no cadence sensor", where standing the cranks still would be a
+   *   lie about a rider who is pedalling, so it falls back to
+   *   `wheel × CRANK_RATIO` — the behaviour every ride had before this argument
+   *   existed. Defaulted so a caller with no cadence to give keeps it.
    */
   update(
     position: THREE.Vector3,
     bearingDeg: number,
     speedMps: number,
     dt: number,
+    cadenceRpm: number | null = null,
   ): void {
     const parts = this.parts;
     if (!parts) return;
@@ -109,16 +127,30 @@ export class BikeOrnament {
       this.lean += (target - this.lean) * Math.min(dt * LEAN_SMOOTH, 1);
       parts.lean.rotation.x = THREE.MathUtils.clamp(this.lean, -LEAN_LIMIT, LEAN_LIMIT);
 
-      // Wheels roll with distance travelled; the crank turns slower.
+      // Wheels roll with distance travelled — that one IS geometry (the tyre is
+      // on the road), so it stays derived from ground speed.
       const spin = (speedMps * dt) / WHEEL_RADIUS;
       for (const wheel of parts.wheels) wheel.rotation.z -= spin;
-      if (parts.crank) parts.crank.rotation.z -= spin * CRANK_RATIO;
+      // The crank is NOT: it turns at whatever the rider's legs turn it at.
+      // rpm → rad/s is `rpm / 60 × 2π`; no gear ratio, because cadence already
+      // IS the crank's own rate.
+      if (parts.crank) {
+        parts.crank.rotation.z -= cadenceRpm === null
+          ? spin * CRANK_RATIO
+          : (cadenceRpm / 60) * Math.PI * 2 * dt;
+      }
     }
   }
 
   /** Show/hide (e.g. if a first-person camera mode is selected). */
   setVisible(visible: boolean): void {
     if (this.parts) this.parts.root.visible = visible;
+  }
+
+  /** Root object — the ghost rider (P8) reads it to apply translucency after
+   *  each build; null before the first build / after dispose. */
+  get root(): THREE.Object3D | null {
+    return this.parts?.root ?? null;
   }
 
   private disposeParts(): void {
@@ -136,13 +168,23 @@ export class BikeOrnament {
 /**
  * Collect every geometry + material under a group so a style's
  * `BikeOrnamentParts.dispose()` can free them without bookkeeping. Shared
- * singletons must be tagged `material.userData.shared` to be skipped.
+ * singletons must be tagged `userData.shared` to be skipped.
+ *
+ * ⚠ **`userData.shared` now means the same thing on a GEOMETRY as it always did
+ * on a material**, and it had to: the street lamps hand every lamp in the pool
+ * the same barrel/bubble/lens geometry (one shape per world, ~10-20 lamps), so
+ * the first lamp recycled used to free the buffer the other nineteen were still
+ * drawing from. The flag was already spelled this way on geometry elsewhere
+ * (`circuit-terrain-style.ts`'s `luUnit` / `luHarvest`) — this is the same
+ * contract reaching the one sweep that did not honour it.
+ * CUSTOM_WORLD_INSTRUCTIONS §6「共用的 geometry / material 絕對不可以在 chunk
+ * 回收時 dispose」.
  */
 export function disposeGroup(root: THREE.Object3D): void {
   const materials = new Set<THREE.Material>();
   root.traverse((obj) => {
     const mesh = obj as THREE.Mesh;
-    mesh.geometry?.dispose?.();
+    if (!mesh.geometry?.userData?.shared) mesh.geometry?.dispose?.();
     const mat = mesh.material;
     if (Array.isArray(mat)) {
       for (const m of mat) if (m && !m.userData?.shared) materials.add(m);

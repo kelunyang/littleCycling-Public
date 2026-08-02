@@ -77,6 +77,13 @@ function classify(layer, props) {
       return ['rendered', 'road-renderer: ribbon along the way'];
 
     case 'water':
+      if (cls === 'swimming_pool') {
+        return [
+          'fetched_ignored',
+          'DELIBERATELY skipped: a back-garden pool is not landscape water, and no ' +
+            'demo draws one — see water-classes.ts (2901 of them in one LA window)',
+        ];
+      }
       return ['rendered', 'landuse-renderer: water surface'];
 
     case 'waterway':
@@ -122,8 +129,14 @@ function classify(layer, props) {
       if (cls === 'aerodrome') {
         return ['rendered', 'apron slab + one toy aircraft (balloon plane / brick plane)'];
       }
-      if (cls === 'apron') return ['rendered', 'aeroway-renderer: paved slab'];
-      return ['fetched_ignored', 'aeroway class not handled (helipad, gate…)'];
+      if (cls === 'apron' || cls === 'helipad') {
+        return ['rendered', 'aeroway-renderer: paved slab (every POLYGON becomes one)'];
+      }
+      return [
+        'fetched_ignored',
+        'gate is a POINT — a parking-stand label with no extent, and no demo draws ' +
+          'one; aeroway-renderer drops it before it can inflate featureCount',
+      ];
 
     default:
       return ['fetched_ignored', ''];

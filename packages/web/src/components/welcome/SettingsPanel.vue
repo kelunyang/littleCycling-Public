@@ -122,6 +122,19 @@
             </el-select>
           </label>
 
+          <label v-if="renderModeModel === 'threejs'">
+            畫質
+            <el-select v-model="graphicsQualityModel" size="small">
+              <el-option label="自動" value="auto" />
+              <el-option label="低" value="low" />
+              <el-option label="中" value="medium" />
+              <el-option label="高" value="high" />
+            </el-select>
+            <span class="field-hint">
+              自動：依即時 FPS 動態調整效果強度；其餘為固定畫質。僅影響 3D (Three.js) 模式。
+            </span>
+          </label>
+
           <label>
             Basemap Style
             <el-select v-model="basemapModel" size="small">
@@ -179,6 +192,14 @@
             Enable Sound Effects
             <el-switch v-model="soundEnabledModel" />
           </label>
+
+          <label class="checkbox-label">
+            Background Music
+            <el-switch v-model="bgmEnabledModel" :disabled="!soundEnabledModel" />
+          </label>
+          <p class="field-hint bgm-hint">
+            每條路線會依世界風格生成專屬主題曲,踩踏速度帶動曲速。
+          </p>
         </fieldset>
 
         <!-- Game Messages -->
@@ -428,6 +449,11 @@ const renderModeModel = computed({
   set: (val: AppConfig['map']['renderMode']) => settingsStore.updateMap({ renderMode: val }),
 });
 
+const graphicsQualityModel = computed({
+  get: () => config.value.map.graphicsQuality,
+  set: (val: AppConfig['map']['graphicsQuality']) => settingsStore.updateMap({ graphicsQuality: val }),
+});
+
 const basemapModel = computed({
   get: () => config.value.map.basemapStyle,
   set: (val: string) => settingsStore.updateMap({ basemapStyle: val }),
@@ -461,6 +487,11 @@ const wsPortModel = computed({
 const soundEnabledModel = computed({
   get: () => config.value.sound.enabled,
   set: (val: boolean) => settingsStore.updateSound({ enabled: val }),
+});
+
+const bgmEnabledModel = computed({
+  get: () => config.value.sound.bgmEnabled,
+  set: (val: boolean) => settingsStore.updateSound({ bgmEnabled: val }),
 });
 
 const debugModel = computed({
@@ -672,6 +703,12 @@ label {
   letter-spacing: 0;
   line-height: 1.3;
   margin-top: 2px;
+}
+
+/* .field-hint is used as an inline <span> elsewhere; as a block <p> it needs
+   the browser's default paragraph margins cleared. */
+.bgm-hint {
+  margin: 2px 0 0;
 }
 
 .tpl-btn {

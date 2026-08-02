@@ -3,6 +3,7 @@ import { ref, computed } from 'vue';
 import type { GameState, WorkoutSegment, PlanSegment, RideSummaryDto } from '@littlecycling/shared';
 import { WORKOUT_PROFILES_MAP, buildWorkoutSegments, planSegmentsToWorkoutSegments } from '@littlecycling/shared';
 import { useGameStateStore } from './gameStateStore';
+import { useSettingsStore } from './settingsStore';
 
 /**
  * Body for POST /api/live/start, stashed by StartBar and consumed by GameView's
@@ -20,8 +21,14 @@ export interface PendingStart {
     targetDurationMs: number;
     randomEventsEnabled: boolean;
     selectedWorkoutId: string;
+    /** 課表重複填滿騎乘時間;後端據此展開 prescribed segments 並存進 ride。 */
+    repeatWorkout?: boolean;
     /** 今日課表訓練時帶上,讓後端把 ride 標記為 plan:<planId>:<day>。 */
     planRef?: { planId: string; day: number };
+    /** 幽靈車模式:選了同路線的歷史騎乘當幽靈時帶上,後端載入其 trace。 */
+    ghostRideId?: number;
+    /** 起點視窗:從路線的這個里程(公尺)開始騎。 */
+    startOffsetM?: number;
   };
 }
 
@@ -114,6 +121,8 @@ export const useGameStore = defineStore('game', () => {
   // GameView fires it only once the user passes the start prompt, so recording
   // (ride row, jsonl, clock) never begins while the prompt is showing.
   const pendingStart = ref<PendingStart | null>(null);
+  /** 起點視窗(歡迎頁圖表拖出來的):路線起騎里程,公尺。換路線時歸零。 */
+  const startOffsetM = ref(0);
   const weatherOverride = ref<string | null>(null);
   const cloudsEnabled = ref(false);
   /**
@@ -136,8 +145,8 @@ export const useGameStore = defineStore('game', () => {
   const workoutSegments = ref<WorkoutSegment[]>([]);
   const isRandomEvent = ref(false);
   const randomEventsEnabled = ref(true);
-  /** Welcome-screen switch: only when on does Start open the comparison-ride picker. */
-  const comparePickerEnabled = ref(false);
+  /** Welcome-screen switch: only when on does Start open the ghost-ride picker. */
+  const ghostPickerEnabled = ref(false);
   const isPaused = ref(false);
 
   const isPlaying = computed(() => state.value === 'playing');
@@ -159,13 +168,24 @@ export const useGameStore = defineStore('game', () => {
     targetDurationMs.value = durationMs;
     isPaused.value = true;
 
+    // Provisional segments only — enough for the start prompt to show something
+    // before /api/live/start returns. The SERVER decides the real ones and
+    // records them with the ride; GameView overwrites this the moment the start
+    // response lands. Keeping a second independent derivation around is what
+    // made the coach grade rides against a workout that never happened, so this
+    // copy must never outlive the round-trip.
+    //
     // Priority: plan segments > workout profile > free ride
     if (planDaySegments.value.length > 0) {
       workoutSegments.value = planSegmentsToWorkoutSegments(planDaySegments.value);
     } else {
       const profile = WORKOUT_PROFILES_MAP[selectedWorkoutId.value];
       if (profile) {
-        workoutSegments.value = buildWorkoutSegments(profile, durationMs);
+        // A plan day (above) prescribes its own segments, so repeat only ever
+        // applies to a profile the rider picked here.
+        workoutSegments.value = buildWorkoutSegments(profile, durationMs, {
+          repeat: useSettingsStore().config.training.repeatWorkout ?? false,
+        });
       } else {
         workoutSegments.value = [];
       }
@@ -199,15 +219,15 @@ export const useGameStore = defineStore('game', () => {
     planDaySegments.value = [];
     isRandomEvent.value = false;
     randomEventsEnabled.value = true;
-    comparePickerEnabled.value = false;
+    ghostPickerEnabled.value = false;
     isPaused.value = false;
   }
 
   return {
-    state, coins, laps, rideSummary, startedAt, targetDurationMs, freeRoam, currentRideId, pendingStart, weatherOverride, cloudsEnabled,
+    state, coins, laps, rideSummary, startedAt, targetDurationMs, freeRoam, currentRideId, pendingStart, startOffsetM, weatherOverride, cloudsEnabled,
     cameraMode,
     glassesLens, glassesFrameColor, glassesFrameColorMode, glassesFrameMaterial,
-    selectedWorkoutId, workoutSegments, planDaySegments, isRandomEvent, randomEventsEnabled, comparePickerEnabled,
+    selectedWorkoutId, workoutSegments, planDaySegments, isRandomEvent, randomEventsEnabled, ghostPickerEnabled,
     isPaused,
     isPlaying, isWorkoutMode, startGame, endGame, togglePause, reset,
     setFrameColorMode,

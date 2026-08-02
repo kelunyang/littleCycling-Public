@@ -16,10 +16,22 @@
  */
 
 import Phaser from 'phaser';
+import {
+  ZONE_MODIFIERS_2D as ZONE_MODIFIERS,
+  nightVeilAmount,
+  nightVeilRgb,
+  type PhaserWorldStyle,
+  type ZoneModifier,
+} from './night-grade';
 
 export type GlassesLens = 'clear' | 'dark' | 'red' | 'yellow' | 'auto';
 export type WeatherType = 'sunny' | 'cloudy' | 'rainy' | 'snowy';
-export type ZoneType = 'open' | 'urban' | 'forest' | 'tunnel';
+// Re-exported so `phaser2d-scene` keeps importing its zone type from the thing
+// it talks to. There used to be a second, identical union declared here; the
+// one definition lives in `phaser-zone-detector`, which is what produces the
+// values in the first place.
+export type { ZoneType } from './phaser-zone-detector';
+import type { ZoneType } from './phaser-zone-detector';
 
 interface LensPreset {
   tint: [number, number, number];
@@ -43,18 +55,9 @@ const WEATHER_TO_LENS: Record<WeatherType, Exclude<GlassesLens, 'auto'>> = {
   snowy: 'yellow',
 };
 
-interface ZoneModifier {
-  tintMul: [number, number, number];
-  brightnessMul: number;
-  contrastAdd: number;
-}
-
-const ZONE_MODIFIERS: Record<ZoneType, ZoneModifier> = {
-  open:   { tintMul: [1, 1, 1],         brightnessMul: 1.00, contrastAdd: 0    },
-  urban:  { tintMul: [1, 0.98, 0.95],   brightnessMul: 1.05, contrastAdd: 0.02 },
-  forest: { tintMul: [0.85, 1, 0.85],   brightnessMul: 0.80, contrastAdd: -0.03 },
-  tunnel: { tintMul: [0.7, 0.7, 0.75],  brightnessMul: 0.45, contrastAdd: 0.05 },
-};
+// The zone table lives in night-grade.ts, not here: a headless check has to be
+// able to prove `zone × night` can never black the frame out, and it cannot
+// import this file (Phaser's WebGL pipeline base class comes with it).
 
 const COIN_GLOW_FADE_SPEED = 3.0;
 const LENS_TRANSITION_SPEED = 3.3;
@@ -78,6 +81,11 @@ uniform vec3  uCoinGlowColor;
 uniform float uMarksIntensity;
 uniform float uZoneBrightness;
 uniform vec3  uZoneTint;
+// Nightfall. A VEIL, not a multiply: the 2D demos blend the frame toward a dark
+// blue rather than scaling it down, which keeps a floor instead of driving
+// everything to black. See night-grade.ts.
+uniform vec3  uNightVeil;
+uniform float uNightVeilAmount;
 
 varying vec2 outTexCoord;
 
@@ -111,6 +119,11 @@ void main() {
   color.rgb *= uZoneBrightness;
   color.rgb *= uZoneTint;
 
+  // Last, so it sits over the whole world the way the demos' nightGfx does
+  // (depth 880 / 30, above everything). The coin glow below stays outside it —
+  // it is feedback, not scenery.
+  color.rgb = mix(color.rgb, uNightVeil, uNightVeilAmount);
+
   if (uCoinGlow > 0.0) {
     float glowMask = smoothstep(0.3, 1.2, dist);
     color.rgb += uCoinGlowColor * glowMask * uCoinGlow;
@@ -142,6 +155,10 @@ export class CyclingGlassesPipeline extends Phaser.Renderer.WebGL.Pipelines.Post
   private zoneTransitionT = 1;
 
   private coinGlowIntensity = 0;
+  /** 0 = noon, 1 = deep night. Drives the night veil — see night-grade.ts. */
+  private nightFactor = 0;
+  /** Which world's veil to use; each demo tuned its own. */
+  private worldStyle: PhaserWorldStyle = 'plastic';
 
   /** Lazy lookup so we don't cache a glTexture that hasn't been allocated yet. */
   private marksTextureGetter: (() => WebGLTexture | Phaser.Renderer.WebGL.Wrappers.WebGLTextureWrapper | null) | null = null;
@@ -174,8 +191,12 @@ export class CyclingGlassesPipeline extends Phaser.Renderer.WebGL.Pipelines.Post
     this.set1f('uCoinGlow', 0);
     this.set3f('uCoinGlowColor', 1.0, 0.84, 0.0);
     this.set1f('uMarksIntensity', 1.0);
+    // Must be seeded, not left to onPreRender: an unset uniform reads as 0, and
+    // `color.rgb *= 0` is a black first frame.
     this.set1f('uZoneBrightness', 1.0);
     this.set3f('uZoneTint', 1.0, 1.0, 1.0);
+    this.set3f('uNightVeil', 0.0, 0.0, 0.0);
+    this.set1f('uNightVeilAmount', 0.0);
   }
 
   /**
@@ -205,6 +226,21 @@ export class CyclingGlassesPipeline extends Phaser.Renderer.WebGL.Pipelines.Post
   /** Trigger gold glow on coin pickup. */
   triggerCoinGlow(): void {
     this.coinGlowIntensity = 1.0;
+  }
+
+  /**
+   * How far into night we are: 0 = noon, 1 = deep night.
+   *
+   * Fed straight from `1 - weatherSystem.getDayFactor()`, the same value the
+   * chunk manager uses to fade the additive lights layer in, so the world
+   * darkening and the windows lighting up cannot disagree about the time.
+   *
+   * No smoothing here — the day factor already ramps smoothly through
+   * twilight, and a second ramp on top would fight it.
+   */
+  setNightFactor(f: number, style: PhaserWorldStyle): void {
+    this.nightFactor = f;
+    this.worldStyle = style;
   }
 
   /** Set environment zone (smooth transition). */
@@ -301,6 +337,9 @@ export class CyclingGlassesPipeline extends Phaser.Renderer.WebGL.Pipelines.Post
     this.set1f('uCoinGlow', this.coinGlowIntensity);
     this.set1f('uZoneBrightness', z.brightnessMul);
     this.set3f('uZoneTint', z.tintMul[0], z.tintMul[1], z.tintMul[2]);
+    const veil = nightVeilRgb(this.worldStyle);
+    this.set3f('uNightVeil', veil[0], veil[1], veil[2]);
+    this.set1f('uNightVeilAmount', nightVeilAmount(this.nightFactor, this.worldStyle));
     const marksTex = this.marksTextureGetter?.() ?? null;
     this.set1f('uMarksIntensity', marksTex ? 1.0 : 0.0);
   }

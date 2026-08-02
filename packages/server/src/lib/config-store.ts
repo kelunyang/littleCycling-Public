@@ -70,6 +70,46 @@ export function removeProvidedFromMissing(
   });
 }
 
+/**
+ * Config sub-trees a PATCH REPLACES wholesale instead of deep-merging.
+ *
+ * `map.worldOptions` is stored SPARSELY — a key's absence means "use the
+ * declared default" (see shared/world-options.ts). A deep merge cannot express
+ * absence: putting a slider back where it started would leave the old value
+ * sitting in config.json forever, pinning that option and making any later
+ * change to the default unreachable for anyone who has ever opened the panel.
+ * The client always sends the COMPLETE sparse map, so replacing is both safe
+ * and the only way the sparseness stays true.
+ */
+const REPLACE_WHOLE_PATHS = ['map.worldOptions'] as const;
+
+/**
+ * Overwrite the replace-whole paths in a merged config with the patch's own
+ * value. Runs AFTER deepMerge; a path the patch does not mention is untouched.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyReplaceWholePaths(merged: any, patch: any): void {
+  for (const path of REPLACE_WHOLE_PATHS) {
+    const keys = path.split('.');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let src: any = patch;
+    for (const key of keys) {
+      if (src === null || typeof src !== 'object' || !(key in src)) { src = undefined; break; }
+      src = src[key];
+    }
+    if (src === undefined) continue;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let dst: any = merged;
+    for (const key of keys.slice(0, -1)) {
+      if (dst === null || typeof dst !== 'object') { dst = undefined; break; }
+      dst = dst[key];
+    }
+    if (dst !== null && dst !== undefined && typeof dst === 'object') {
+      dst[keys[keys.length - 1]] = src;
+    }
+  }
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function deepMerge<T>(base: T, patch: any): T {
   const result = { ...base } as Record<string, unknown>;
@@ -174,6 +214,10 @@ export class ConfigStore {
     // persist them into config.json.
     const { attributions: _attributions, missingSettings: _missingSettings, ...rest } = partial;
     this.config = deepMerge(this.config, rest);
+    // Sparse leaves (map.worldOptions) must be replaced, not merged — a deep
+    // merge can never remove a key, and removal is how a value goes back to
+    // following the default.
+    applyReplaceWholePaths(this.config, rest);
     mkdirSync(dirname(this.configPath), { recursive: true });
     writeFileSync(this.configPath, JSON.stringify(this.config, null, 2) + '\n', 'utf-8');
     return this.config;

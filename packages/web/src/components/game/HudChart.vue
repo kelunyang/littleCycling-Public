@@ -20,8 +20,9 @@ import type { TimeSeriesSample } from '@/composables/useGameLoop';
 import type { PinConfig, PinnableMetric } from '@/composables/useChartPin';
 
 /** Chart skin. 'neon' = cyberpunk glow (3D-ish renderers); 'plastic' /
- *  'cuphead' = flat, hand-drawn ink for the Phaser 2D world. */
-type ChartTheme = 'neon' | 'plastic' | 'cuphead';
+ *  'cuphead' = flat, hand-drawn ink for the Phaser 2D world; 'circuit' =
+ *  silkscreen-on-solder-mask for the PCB world. */
+type ChartTheme = 'neon' | 'plastic' | 'cuphead' | 'circuit';
 
 const props = withDefaults(
   defineProps<{
@@ -40,6 +41,15 @@ const MAX_VISIBLE_SECONDS = 120;
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let rafId: number | null = null;
+
+// Redraw only when something visible actually changed. The series grows at ~1Hz
+// and the scan cursor sits at a fixed X, so a 60fps redraw draws the same pixels
+// over and over. These trackers let loop() early-return allocation-free.
+let lastDpr = -1;
+let lastSampleCount = -1;
+let lastSampleT = Number.NaN;
+let lastTheme: ChartTheme | '' = '';
+let lastConfigs: PinConfig[] | null = null;
 
 /* ── Per-theme palette ──
  * Canvas colours can't read CSS var(), so the hand-drawn themes below mirror the
@@ -90,6 +100,22 @@ function getPalette(theme: ChartTheme): ChartPalette {
         grid: 'rgba(42, 36, 32, 0.14)',
         inkUnder: '#2a2420',
         cursor: 'rgba(42, 36, 32, 0.3)',
+      };
+    case 'circuit':
+      // JS mirror of the circuit palette in themes.scss ($circuit: mask
+      // #0d4f33, trace #23f0ff, silk #e4ece2, ink #071a14) — canvas can't
+      // read CSS vars; change themes.scss and this together.
+      return {
+        neon: false,
+        fill: 'rgba(13, 79, 51, 0.92)',
+        texture: 'rgba(35, 240, 255, 0.04)',
+        border: '#23f0ff',
+        glow: 'rgba(35, 240, 255, 0.35)',
+        font: '"Courier New", ui-monospace, monospace',
+        xText: 'rgba(228, 236, 226, 0.75)',
+        grid: 'rgba(228, 236, 226, 0.12)',
+        inkUnder: '#071a14',
+        cursor: 'rgba(228, 236, 226, 0.35)',
       };
     default:
       return {
@@ -366,12 +392,19 @@ function draw() {
 
   const pal = getPalette(props.theme);
 
+  // Backing store depends only on dpr (WIDTH/HEIGHT are constant), so only
+  // reallocate when dpr changes — resizing the canvas clears it and is costly.
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = WIDTH * dpr;
-  canvas.height = HEIGHT * dpr;
-  canvas.style.width = `${WIDTH}px`;
-  canvas.style.height = `${HEIGHT}px`;
-  ctx.scale(dpr, dpr);
+  if (dpr !== lastDpr) {
+    canvas.width = WIDTH * dpr;
+    canvas.height = HEIGHT * dpr;
+    canvas.style.width = `${WIDTH}px`;
+    canvas.style.height = `${HEIGHT}px`;
+    lastDpr = dpr;
+  }
+  // setTransform is idempotent (unlike scale, which would compound when the
+  // canvas isn't resized between draws).
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   ctx.clearRect(0, 0, WIDTH, HEIGHT);
 
@@ -422,12 +455,26 @@ function draw() {
   drawScanCursor(ctx, plotW, pal);
 }
 
-// Per-frame redraw loop. Reading props.samples fresh every frame sidesteps any
-// watch/reactivity subtlety: if the series is genuinely growing, the chart sees
-// it. draw() self-gates (returns early when nothing is pinned or the canvas
-// isn't mounted), so this is cheap while idle.
+// rAF-driven, but redraw only when the inputs that affect pixels change: the
+// sample series (grows ~1Hz), the pinned configs, the theme, or dpr. Reading
+// props fresh each frame sidesteps any watch/reactivity subtlety; the gate below
+// is allocation-free so idle frames cost almost nothing.
 function loop() {
-  draw();
+  const samples = props.samples;
+  const n = samples.length;
+  const lastT = n > 0 ? samples[n - 1].t : Number.NaN;
+  const changed =
+    n !== lastSampleCount ||
+    !Object.is(lastT, lastSampleT) ||
+    props.theme !== lastTheme ||
+    props.configs !== lastConfigs;
+  if (changed) {
+    lastSampleCount = n;
+    lastSampleT = lastT;
+    lastTheme = props.theme;
+    lastConfigs = props.configs;
+    draw();
+  }
   rafId = requestAnimationFrame(loop);
 }
 

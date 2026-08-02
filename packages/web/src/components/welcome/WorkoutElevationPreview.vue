@@ -43,7 +43,28 @@ interface ElevPalette {
 // Canvas colours can't read CSS var() directly, so this mirrors the palette in
 // src/styles/themes.scss by value — keep the two in sync (plastic ink #1a1140,
 // pink #ff3b8d; cuphead ink #2a2420, gold #c4a035, rust #a0523c, paper #e8dcc0).
-const PALETTES: Record<'plastic' | 'cuphead' | 'default', ElevPalette> = {
+const PALETTES: Record<'plastic' | 'cuphead' | 'circuit' | 'default', ElevPalette> = {
+  circuit: {
+    // JS mirror of $circuit in themes.scss (mask #0d4f33, gold #c9a227, trace
+    // #23f0ff, silk #e4ece2, ink #071a14) — the profile drawn as a gold trace
+    // over solder mask, cursor in powered-trace cyan.
+    bg: 'rgba(13, 79, 51, 0.94)',
+    scanline: 'rgba(228, 236, 226, 0.04)',
+    line: 'rgba(201, 162, 39, 0.95)',
+    fillTop: 'rgba(201, 162, 39, 0.28)',
+    fillBottom: 'rgba(201, 162, 39, 0.05)',
+    glow: 'rgba(35, 240, 255, 0.4)',
+    border: '#071a14',
+    cursor: 'rgba(35, 240, 255, 1)',
+    cursorGlow: 'rgba(35, 240, 255, 0.7)',
+    slopeText: '#e4ece2',
+    slopeShadow: 'rgba(7, 26, 20, 0.7)',
+    segmentSeparator: 'rgba(228, 236, 226, 0.2)',
+    segmentBoundary: 'rgba(228, 236, 226, 0.5)',
+    segmentLabel: 'rgba(228, 236, 226, 0.7)',
+    activeStripe: 'rgba(228, 236, 226, 0.16)',
+    font: '11px "Courier New", ui-monospace, monospace',
+  },
   plastic: {
     bg: 'rgba(255, 247, 251, 0.94)',
     scanline: 'rgba(26, 17, 64, 0.05)',
@@ -139,6 +160,11 @@ const bikeY = ref(0);
 
 const CANVAS_H = 120;
 const PAD = { top: 10, right: 10, bottom: 22, left: 10 };
+
+// Track the last backing-store size so draw() only reallocates the canvas when
+// the CSS width or dpr actually changed (resizing clears + reallocs the canvas).
+let lastCanvasW = -1;
+let lastCanvasDpr = -1;
 
 /** Estimate route duration: prefer GPX timestamps, fallback = distance / 20 km/h */
 const FALLBACK_SPEED_MS = 20 / 3.6; // 20 km/h → m/s
@@ -240,14 +266,22 @@ function draw() {
   const w = container.clientWidth;
   if (w <= 0) return;
 
-  canvas.width = w * dpr;
-  canvas.height = CANVAS_H * dpr;
-  canvas.style.width = `${w}px`;
-  canvas.style.height = `${CANVAS_H}px`;
-
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
-  ctx.scale(dpr, dpr);
+
+  // Only resize the backing store when it genuinely changed — otherwise reuse it
+  // and just clear. (Live progress redraws hit this every frame with same w/dpr.)
+  if (w !== lastCanvasW || dpr !== lastCanvasDpr) {
+    canvas.width = w * dpr;
+    canvas.height = CANVAS_H * dpr;
+    canvas.style.width = `${w}px`;
+    canvas.style.height = `${CANVAS_H}px`;
+    lastCanvasW = w;
+    lastCanvasDpr = dpr;
+  }
+  // setTransform is idempotent (unlike scale, which compounds when the canvas
+  // isn't resized between draws).
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, CANVAS_H);
 
   const pal = palette.value;
@@ -597,18 +631,32 @@ onUnmounted(() => {
   resizeObserver?.disconnect();
 });
 
-// Redraw when props or theme change
+// Redraw immediately when the chart data or theme changes (rare, user-driven).
+// elapsedMs is deliberately excluded here — it's watched separately below.
 watch(
   () => [
     props.routePoints,
     props.workoutSegments,
     props.totalDurationMs,
     props.displayDurationMs,
-    props.elapsedMs,
     worldStyle.value,
   ],
   () => draw(),
   { deep: true },
+);
+
+// elapsedMs updates ~60Hz, but the live progress cursor sweeps the whole ride
+// duration across the chart — it moves well under 1px/second, so a full redraw
+// every frame is wasted work. Throttle to ~4Hz; visually indistinguishable.
+let lastLiveDrawMs = 0;
+watch(
+  () => props.elapsedMs,
+  () => {
+    const now = performance.now();
+    if (now - lastLiveDrawMs < 250) return;
+    lastLiveDrawMs = now;
+    draw();
+  },
 );
 </script>
 

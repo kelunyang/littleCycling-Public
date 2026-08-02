@@ -41,6 +41,16 @@ $plastic: (
   'shadow':     #140a28, // drop-shadow navy (darker than ink; used only via rgba)
   'page-hi':    #261a55, // page backdrop centre
   'page-lo':    #0a081a, // page backdrop edge
+  // The toy world's SKY. Added when the 2D world stopped inventing its own
+  // gradient: `plan/phaser-plastic-demo.html` deliberately deleted the dark
+  // arcade sky ("丟掉的:CRT 掃描線跟霓虹格線 —— 那是霓虹風的殼,配糖果色會變濁")
+  // and painted a bright one, so the demo's four literals live here rather
+  // than as loose hex in a renderer. They are the SKY, not the page backdrop —
+  // `page-hi` / `page-lo` above are the HTML chrome and are unchanged.
+  'sky-day-hi':   #8fd8ee, // day zenith — pale toy-box cyan
+  'sky-day-lo':   #ffe0ef, // day horizon — bubblegum
+  'sky-night-hi': #14103a, // night zenith
+  'sky-night-lo': #3a2a66, // night horizon
 );
 
 // ── Cuphead: 1930s rubber-hose — brown ink, mustard gold, rust, olive on paper ──
@@ -59,8 +69,31 @@ $cuphead: (
   'page-lo':    #100c08, // page backdrop edge
 );
 
-// Emit both palettes as global custom properties. They are plain named
-// constants (--pl-* vs --ck-* never collide), so :root is the simplest scope —
+// ── Circuit: powered PCB — solder-mask green, gold traces, cyan current ──
+// Values are the 3D demo's own palette (plan/circuit-town-demo.html, `E`),
+// which is what the demo's comment asked for: 「若這個風格被採用,整組要搬進
+// themes.scss 當第三個 $ 色票」. The UI deliberately keeps the cyberpunk base
+// HUD as its structural default (dark + neon IS this world's register) and only
+// re-grounds the accents in these tokens — see App.vue's circuit block.
+$circuit: (
+  'ink':        #071a14, // this world's ink (matches the demo page's --ink)
+  'mask':       #0d4f33, // solder-mask green (board surface)
+  'mask-hi':    #17734c, // copper-pour mask, one step brighter
+  'mask-lo':    #073b26, // mask shadow / clearance
+  'gold':       #c9a227, // ENIG gold (traces, bus)
+  'gold-hi':    #efd77a, // plating highlight
+  'silk':       #e4ece2, // silkscreen white (primary light text)
+  'trace':      #23f0ff, // powered-trace cyan (primary accent)
+  'hot':        #ff2d9b, // hot signal pink (secondary accent)
+  'copper':     #b87333, // bare copper
+  'fr4':        #c9a86a, // board-edge fibreglass
+  'page-hi':    #0d2b1f, // page backdrop centre (dark mask)
+  'page-lo':    #04100c, // page backdrop edge (the demo page's background)
+);
+
+// Emit the palettes as global custom properties. They are plain named
+// constants (--pl-* vs --ck-* vs --ct-* never collide), so :root is the
+// simplest scope —
 // every themed subtree inherits them and resolves the ones it references.
 //
 // Each colour emits two tokens from the SAME hex source:
@@ -77,4 +110,5 @@ $cuphead: (
 :root {
   @include emit-palette('pl', $plastic);
   @include emit-palette('ck', $cuphead);
+  @include emit-palette('ct', $circuit);
 }

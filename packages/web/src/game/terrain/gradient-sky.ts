@@ -8,28 +8,23 @@
  * paper/plastic diorama, and the low exposure is what made the whole scene dark.
  *
  * This is the demo's dome instead: a BackSide sphere with a two-colour vertical
- * gradient quantised into 5 steps — flat, posterised, always visible, and it
- * costs nothing. Colours come from the world style (`strategy.skyPalette`) and
- * are lerped day↔night by the caller.
+ * gradient quantised into a few hard steps — flat, posterised, always visible,
+ * and it costs nothing. Everything about it comes from the world style
+ * (`strategy.skyPalette`): the two colours, lerped day↔night by the caller, and
+ * the gradient's SHAPE (`skyPalette.gradient`), which is per-world because the
+ * three demos disagree — see `SkyGradientStyle`.
  */
 
 import * as THREE from 'three';
+
+import { skyGradientHeight } from './terrain-style-strategy';
+import type { SkyGradientStyle } from './terrain-style-strategy';
 
 /**
  * Dome radius in metres. Must clear the far mountain ring (2600 m) and the
  * horizon disc (4000 m) but stay inside the camera's far plane (8000 m).
  */
 const SKY_RADIUS = 5000;
-
-/**
- * Height (m) at which the gradient reaches `topColor`. The demo used 260 on an
- * 1100 m dome; the same ratio keeps the horizon band at the same visual height
- * now that the dome is bigger.
- */
-const GRADIENT_HEIGHT = SKY_RADIUS * (260 / 1100);
-
-/** Posterisation steps — the hard colour banding is the point (hand-made look). */
-const GRADIENT_STEPS = 5;
 
 const VERTEX_SHADER = /* glsl */ `
   varying vec3 vWorldY;
@@ -56,7 +51,7 @@ export class GradientSky {
   readonly mesh: THREE.Mesh;
   private readonly material: THREE.ShaderMaterial;
 
-  constructor(scene: THREE.Scene) {
+  constructor(scene: THREE.Scene, gradient: SkyGradientStyle) {
     this.material = new THREE.ShaderMaterial({
       side: THREE.BackSide,
       // The dome must never occlude anything: it is drawn first and writes no
@@ -66,8 +61,8 @@ export class GradientSky {
       uniforms: {
         topColor: { value: new THREE.Color(0x8fd8ee) },
         bottomColor: { value: new THREE.Color(0xffe0ef) },
-        gradientHeight: { value: GRADIENT_HEIGHT },
-        steps: { value: GRADIENT_STEPS },
+        gradientHeight: { value: skyGradientHeight(gradient.demoHeight, SKY_RADIUS) },
+        steps: { value: gradient.steps },
       },
       vertexShader: VERTEX_SHADER,
       fragmentShader: FRAGMENT_SHADER,
@@ -81,6 +76,17 @@ export class GradientSky {
     this.mesh.renderOrder = -100;
     this.mesh.frustumCulled = false;
     scene.add(this.mesh);
+  }
+
+  /**
+   * Re-shape the gradient for a world style — two uniform writes, no rebuild.
+   * Called on every `setPalette`, so switching worlds mid-ride moves the horizon
+   * band to the new world's demo height (and its step count) immediately.
+   */
+  setGradient(gradient: SkyGradientStyle): void {
+    this.material.uniforms.gradientHeight.value =
+      skyGradientHeight(gradient.demoHeight, SKY_RADIUS);
+    this.material.uniforms.steps.value = gradient.steps;
   }
 
   /** Set the gradient's two colours (already blended for time of day/weather). */

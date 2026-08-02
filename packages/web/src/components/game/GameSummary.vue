@@ -72,10 +72,10 @@
               <font-awesome-icon icon="heart" /> AVG HR
             </span>
             <span class="summary__value">{{ stats.avgHr }} bpm</span>
-            <span v-if="compareRide?.avgHr" class="summary__compare">
-              vs {{ Math.round(compareRide.avgHr) }}
-              <span :class="diffClass(stats.avgHr, compareRide.avgHr)">
-                ({{ diffStr(stats.avgHr, compareRide.avgHr) }})
+            <span v-if="ghostRide?.avgHr" class="summary__compare">
+              vs {{ Math.round(ghostRide.avgHr) }}
+              <span :class="diffClass(stats.avgHr, ghostRide.avgHr)">
+                ({{ diffStr(stats.avgHr, ghostRide.avgHr) }})
               </span>
             </span>
           </div>
@@ -84,10 +84,10 @@
               <font-awesome-icon icon="gauge" /> AVG SPEED
             </span>
             <span class="summary__value">{{ stats.avgSpeed }} km/h</span>
-            <span v-if="compareRide?.avgSpeed" class="summary__compare">
-              vs {{ compareRide.avgSpeed.toFixed(1) }}
-              <span :class="diffClass(stats.avgSpeed, compareRide.avgSpeed)">
-                ({{ diffStr(stats.avgSpeed, compareRide.avgSpeed) }})
+            <span v-if="ghostRide?.avgSpeed" class="summary__compare">
+              vs {{ ghostRide.avgSpeed.toFixed(1) }}
+              <span :class="diffClass(stats.avgSpeed, ghostRide.avgSpeed)">
+                ({{ diffStr(stats.avgSpeed, ghostRide.avgSpeed) }})
               </span>
             </span>
           </div>
@@ -96,10 +96,10 @@
               <font-awesome-icon icon="bolt" /> AVG POWER
             </span>
             <span class="summary__value">{{ stats.avgPower }} W</span>
-            <span v-if="compareRide?.avgPowerW" class="summary__compare">
-              vs {{ Math.round(compareRide.avgPowerW) }}
-              <span :class="diffClass(stats.avgPower, compareRide.avgPowerW)">
-                ({{ diffStr(stats.avgPower, compareRide.avgPowerW) }})
+            <span v-if="ghostRide?.avgPowerW" class="summary__compare">
+              vs {{ Math.round(ghostRide.avgPowerW) }}
+              <span :class="diffClass(stats.avgPower, ghostRide.avgPowerW)">
+                ({{ diffStr(stats.avgPower, ghostRide.avgPowerW) }})
               </span>
             </span>
           </div>
@@ -275,7 +275,7 @@ import { workoutGrade, WORKOUT_PROFILES_MAP } from '@littlecycling/shared';
 import { useGameStore } from '@/stores/gameStore';
 import { useGameStateStore } from '@/stores/gameStateStore';
 import { useSettingsStore } from '@/stores/settingsStore';
-import { useComparisonStore } from '@/stores/comparisonStore';
+import { useGhostStore } from '@/stores/ghostStore';
 import { useRouteStore } from '@/stores/routeStore';
 import { useAnalysisStore } from '@/stores/analysisStore';
 import { renderRadarChart, type RadarData } from '@/composables/useRideCharts';
@@ -293,7 +293,7 @@ const router = useRouter();
 const gameStore = useGameStore();
 const gameStateStore = useGameStateStore();
 const settingsStore = useSettingsStore();
-const comparisonStore = useComparisonStore();
+const ghostStore = useGhostStore();
 const analysisStore = useAnalysisStore();
 
 // ── Server-authoritative summary (P7) ──
@@ -321,7 +321,7 @@ const stats = computed(() => ({
 }));
 
 const routeStore = useRouteStore();
-const compareRide = computed(() => comparisonStore.compareRide);
+const ghostRide = computed(() => ghostStore.ghostRide);
 
 const radarRef = ref<SVGElement | null>(null);
 const pbRide = ref<Ride | null>(null);

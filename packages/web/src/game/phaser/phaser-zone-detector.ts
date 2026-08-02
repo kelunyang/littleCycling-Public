@@ -28,10 +28,10 @@ export function detectPhaserZone(
     const d = Math.abs(f.distanceM - distanceM);
     if (d > WINDOW_M) continue;
 
-    // Tunnel: any road feature flagged as tunnel inside the window wins.
-    if (f.type === 'road' && (f.props as any)?.brunnel === 'tunnel') {
-      return 'tunnel';
-    }
+    // Tunnel: classified as its own type now — tunnels are deliberately not
+    // paved (a tunnel is inside the hill, not on it), so they no longer arrive
+    // as 'road'.
+    if (f.type === 'tunnel') return 'tunnel';
     if (f.type === 'tree') trees++;
     else if (f.type === 'building') buildings++;
   }

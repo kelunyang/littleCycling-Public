@@ -22,6 +22,8 @@ export type {
   GameEventDto,
   WsGameStateMessage,
   WsMessage,
+  GhostTracePoint,
+  GhostTraceDto,
   LiveSessionState,
   HostCapabilities,
   RoutePoint,
@@ -35,8 +37,6 @@ export type {
   Ride,
   RideSummaryDto,
   RideSample,
-  ComparisonSample,
-  ComparisonMetrics,
   RideDayCount,
   DebugCategory,
   DebugLogEntry,
@@ -98,6 +98,29 @@ export {
 export type { AppConfig, LlmProvider, UpdateStatus } from './config.js';
 export { DEFAULT_CONFIG } from './config.js';
 
+// Per-world player options（每個世界自己宣告，welcome 畫面泛型渲染）
+export type {
+  WorldStyle,
+  RenderMode,
+  WorldOption,
+  WorldOptionValue,
+  WorldOptionKey,
+  PhaserWorldOptionKey,
+  AnyWorldOptionKey,
+  WorldOptionsConfig,
+} from './world-options.js';
+export {
+  WORLD_OPTIONS,
+  worldOptionsFor,
+  worldOptionDefaults,
+  resolveWorldOptions,
+  sparseWorldOptions,
+  snapWorldOptionValue,
+  withWorldOption,
+  clearWorldOptions,
+  hasWorldOptionOverrides,
+} from './world-options.js';
+
 // Data-source attribution (map / terrain / weather)
 export type { DataSourceAttribution, AttributionLink } from './attributions.js';
 export { DATA_ATTRIBUTIONS } from './attributions.js';
@@ -133,6 +156,7 @@ export {
   WORKOUT_PROFILES,
   WORKOUT_PROFILES_MAP,
   buildWorkoutSegments,
+  workoutRoundCount,
   getSegmentAtTime,
   getSegmentTheme,
   totalWorkoutDuration,

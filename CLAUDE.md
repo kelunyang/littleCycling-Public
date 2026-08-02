@@ -1,7 +1,10 @@
 # littleCycling - Claude Code 規範
 
 ## 重要
+- **這個專案只用 Opus。所有 subagent 一律 Opus，不要傳 `model: "fable"`，任何類別都不例外**——包含圖形、3D 模型、主題皮膚。舊的 plan 文件裡若還看到「Fable = 繪圖與造型 / 視覺工藝」之類的分派規則，那些**已作廢**（實測 Fable 處理 3D 比 Opus 差），文件裡殘留的 `【Fable 5】` 標記只是「當初誰做的」歷史紀錄。
 - 任何架構、設計、功能規格相關問題，請參閱 **DEVPLAN.md**
+- **`plan/*-demo.html` 就是 POC——它的程式碼會被直接搬進前端。** 移植 = **照抄**,不是照著重寫;demo 裡的函式就是 gameview 最後該含有的那段。做法與踩過的坑見 **CUSTOM_WORLD_INSTRUCTIONS.md §0.0**,還差多少跑 `node scripts/headless-check/demo-coverage.mjs`。
+- 要做**新的視覺世界**（造型、貼圖、配色、配樂、以及移植進 gameview）請先讀 **CUSTOM_WORLD_INSTRUCTIONS.md**：裡面有設計法則、效能預算、四個 headless probe 的用法，以及 probe 會騙人的地方。
 
 ## 外部資料源版權規範
 - **所有圖資、地形 / 高程、天氣等外部資料源都必須注意版權與使用政策**（不只授權條款，也包含 tile usage policy、商用限制等）。

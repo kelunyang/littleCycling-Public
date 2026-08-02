@@ -37,6 +37,10 @@ export class AmbientNoise {
   private windFilter: BiquadFilterNode;
   private windGain: GainNode;
   private noiseBuffer: AudioBuffer;
+  // setWindSpeed throttle: it's called every frame with a near-constant speed.
+  private lastWindGain = -1;
+  private lastWindFreq = -1;
+  private lastWindSetSec = -1;
 
   // Rain chain: rainSource → highpass → rainGain → dest
   private rainSource: AudioBufferSourceNode | null = null;
@@ -129,6 +133,16 @@ export class AmbientNoise {
     // Below 2 km/h: silence (coasting / stopped)
     const targetGain = kmh < 2 ? 0 : ratio * WIND_MAX_GAIN;
     const targetFreq = 200 + ratio * 1800; // 200-2000 Hz
+
+    // Called every frame; the 0.3s time constant already smooths, so skip
+    // redundant ramps unless the target moved audibly or ≥100ms elapsed.
+    const changed =
+      Math.abs(targetGain - this.lastWindGain) >= 0.002 ||
+      Math.abs(targetFreq - this.lastWindFreq) >= 10;
+    if (!changed && t - this.lastWindSetSec < 0.1) return;
+    this.lastWindGain = targetGain;
+    this.lastWindFreq = targetFreq;
+    this.lastWindSetSec = t;
 
     this.windGain.gain.setTargetAtTime(targetGain, t, 0.3);
     this.windFilter.frequency.setTargetAtTime(targetFreq, t, 0.3);

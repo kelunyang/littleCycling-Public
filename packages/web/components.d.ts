@@ -45,6 +45,7 @@ declare module 'vue' {
     HudCoins: typeof import('./src/components/game/HudCoins.vue')['default']
     HudCustomizePanel: typeof import('./src/components/game/HudCustomizePanel.vue')['default']
     HudEventBar: typeof import('./src/components/game/HudEventBar.vue')['default']
+    HudGapBoard: typeof import('./src/components/game/HudGapBoard.vue')['default']
     HudTopBar: typeof import('./src/components/game/HudTopBar.vue')['default']
     HudWorkoutBar: typeof import('./src/components/game/HudWorkoutBar.vue')['default']
     LoadingIntroOverlay: typeof import('./src/components/game/LoadingIntroOverlay.vue')['default']
@@ -67,6 +68,8 @@ declare module 'vue' {
     RoutePreviewMap: typeof import('./src/components/welcome/RoutePreviewMap.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    RouteStartWindow: typeof import('./src/components/welcome/RouteStartWindow.vue')['default']
+    SceneInspector: typeof import('./src/components/game/SceneInspector.vue')['default']
     SettingsPanel: typeof import('./src/components/welcome/SettingsPanel.vue')['default']
     StartBar: typeof import('./src/components/welcome/StartBar.vue')['default']
     StartChecklist: typeof import('./src/components/welcome/StartChecklist.vue')['default']
@@ -74,6 +77,7 @@ declare module 'vue' {
     TrainingCalendar: typeof import('./src/components/welcome/TrainingCalendar.vue')['default']
     WelcomeBackdrop: typeof import('./src/components/welcome/WelcomeBackdrop.vue')['default']
     WorkoutElevationPreview: typeof import('./src/components/welcome/WorkoutElevationPreview.vue')['default']
+    WorldOptions: typeof import('./src/components/welcome/WorldOptions.vue')['default']
     ZoneWarning: typeof import('./src/components/game/ZoneWarning.vue')['default']
   }
 }

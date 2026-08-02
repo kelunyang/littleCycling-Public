@@ -36,11 +36,11 @@
               </el-button>
               <el-button
                 size="small"
-                :type="comparisonStore.compareRideId === ride.id ? 'primary' : 'default'"
-                :title="comparisonStore.compareRideId === ride.id ? 'Remove comparison' : 'Compare'"
-                @click="toggleCompare(ride.id)"
+                :type="ghostStore.ghostRideId === ride.id ? 'primary' : 'default'"
+                :title="ghostStore.ghostRideId === ride.id ? '移除幽靈' : '設為幽靈車'"
+                @click="toggleGhost(ride.id)"
               >
-                <font-awesome-icon icon="code-compare" />
+                <font-awesome-icon icon="ghost" />
               </el-button>
             </div>
           </div>
@@ -54,10 +54,10 @@
 import { ref, onMounted } from 'vue';
 import dayjs from 'dayjs';
 import type { Ride } from '@littlecycling/shared';
-import { useComparisonStore } from '@/stores/comparisonStore';
+import { useGhostStore } from '@/stores/ghostStore';
 import { notifyWarn } from '@/utils/notify';
 
-const comparisonStore = useComparisonStore();
+const ghostStore = useGhostStore();
 const rides = ref<Ride[]>([]);
 const expandedArr = ref<string[]>([]);
 
@@ -79,11 +79,11 @@ function exportFit(rideId: number) {
   window.open(`/api/rides/${rideId}/export.fit`, '_blank');
 }
 
-function toggleCompare(rideId: number) {
-  if (comparisonStore.compareRideId === rideId) {
-    comparisonStore.clear();
+function toggleGhost(rideId: number) {
+  if (ghostStore.ghostRideId === rideId) {
+    ghostStore.clear();
   } else {
-    comparisonStore.selectRide(rideId);
+    ghostStore.selectRide(rideId);
   }
 }
 

@@ -12,7 +12,7 @@
  */
 
 import { ref, onUnmounted } from 'vue';
-import type { RoutePoint } from '@littlecycling/shared';
+import { resolveWorldOptions, type RoutePoint } from '@littlecycling/shared';
 import { buildCumulativeDistances } from '@/game/route-geometry';
 import type { CoinVisual } from '@/game/coin-interface';
 import type { PhaserGameInstance } from '@/game/phaser/phaser-game';
@@ -20,6 +20,7 @@ import type { PhaserWeatherSystem, WeatherType } from '@/game/phaser/phaser-weat
 import type { TerrainChunkManager2D } from '@/game/phaser/terrain-builder';
 import type { PhaserCoinLayer } from '@/game/phaser/phaser-coin-layer';
 import type { PhaserStyleStrategy } from '@/game/phaser/phaser-style-strategy';
+import type { SignVocabulary } from '@/game/terrain/sign-spec';
 import type { CyclistSpriteUpdateFn } from '@/game/phaser/cyclist-sprite';
 import { detectPhaserZone, type ZoneType as PhaserZoneType } from '@/game/phaser/phaser-zone-detector';
 // Pure state + curve, no Three.js — shared with the 3D renderer so both modes
@@ -34,6 +35,10 @@ const PX_PER_METER = 3;
 export interface PhaserRendererInitOptions {
   canvas: HTMLCanvasElement;
   points: RoutePoint[];
+  /** Shop shelf or training shelf for this ride's shop signs — the 2D twin of
+   *  `TerrainRendererInitOptions.signVocabulary`. Fixed for the ride, so it is
+   *  an init option with no setter (see `SignVocabulary`); absent = 'shop'. */
+  signVocabulary?: SignVocabulary;
 }
 
 export function usePhaserRenderer() {
@@ -47,6 +52,19 @@ export function usePhaserRenderer() {
   let cyclistSprite: Phaser.GameObjects.Sprite | null = null;
   let styleStrategy: PhaserStyleStrategy | null = null;
   let updateCyclistSpriteFn: CyclistSpriteUpdateFn | null = null;
+  let createCyclistSpriteFn: typeof import('@/game/phaser/cyclist-sprite')['createCyclistSprite'] | null = null;
+
+  // ── Ghost rider (P8 幽靈車) — 半透明的第二個 cyclist sprite + 兩張名牌 ──
+  let ghostSprite: Phaser.GameObjects.Sprite | null = null;
+  let ghostLabel: Phaser.GameObjects.Text | null = null;
+  let playerLabel: Phaser.GameObjects.Text | null = null;
+  /** 幽靈本圈 wrapped 距離(m);null = 本幀無資料(隱藏不銷毀)。 */
+  let ghostDistM: number | null = null;
+  /** 輪動畫用速度 — 由距離差分推導,罰站時腿自然停。 */
+  let ghostPrevDistM: number | null = null;
+  let ghostSpeedKmh = 0;
+  const GHOST_ALPHA = 0.45;
+  const LABEL_OFFSET_PX = 74;
 
   let routePoints: RoutePoint[] = [];
   let cumulativeDists: number[] = [];
@@ -73,7 +91,13 @@ export function usePhaserRenderer() {
     const settingsStore = useSettingsStore();
     const worldStyle = settingsStore.config.map.worldStyle ?? 'plastic';
     const { createStyleStrategy } = await import('@/game/phaser/phaser-style-strategy');
-    styleStrategy = await createStyleStrategy(worldStyle);
+    // The rider-facing world options reach the 2D strategy here, so a
+    // `modes: ['phaser']` switch (cuphead 上色) is applied before the factory
+    // runs — the style never has to know a toggle exists.
+    styleStrategy = await createStyleStrategy(
+      worldStyle,
+      resolveWorldOptions(worldStyle, settingsStore.config.map.worldOptions),
+    );
 
     // Dynamic imports for code splitting
     const [
@@ -91,6 +115,7 @@ export function usePhaserRenderer() {
     ]);
 
     updateCyclistSpriteFn = updateCyclistSprite;
+    createCyclistSpriteFn = createCyclistSprite;
 
     // Create Phaser game and wait for scene.create() to finish
     gameInstance = await createPhaserGame(opts.canvas, styleStrategy);
@@ -144,7 +169,11 @@ export function usePhaserRenderer() {
     // MVT features stream in via Web Worker (non-blocking); loading status is
     // surfaced by the progress bar in LoadingIntroOverlay, not a toast.
     fetchAndProjectFeatures(routePoints, cumulativeDists).then((features) => {
-      chunkManager = new ChunkMgr(scene, elevationProfile, features, styleStrategy!);
+      // The ride's sign vocabulary lands on the CHUNK MANAGER, not on the
+      // strategy: the strategy is rebuilt from scratch whenever the world is
+      // swapped, the manager is not (see `renderBuilding`'s `vocabulary`).
+      chunkManager = new ChunkMgr(
+        scene, elevationProfile, features, styleStrategy!, opts.signVocabulary ?? 'shop');
       // Load initial chunks around start
       chunkManager.update(0);
     }).catch((err) => {
@@ -234,9 +263,14 @@ export function usePhaserRenderer() {
       cyclistSprite?.setAlpha(Math.min(1, introT / 0.4));
     }
 
-    // Building night lights (F2) — fade with the day/night cycle.
-    if (weatherSystem && chunkManager) {
-      chunkManager.setNightFactor(1 - weatherSystem.getDayFactor());
+    // Nightfall, from one source to both halves of it: the additive lights
+    // layer fades IN (chunk manager) while the world itself dims DOWN (glasses
+    // pipeline). Splitting the value would let the windows light up before the
+    // street got dark, which is the one way this can look broken.
+    if (weatherSystem) {
+      const nightFactor = 1 - weatherSystem.getDayFactor();
+      chunkManager?.setNightFactor(nightFactor);
+      scene.setNightFactor(nightFactor);
     }
 
     // Update cyclist sprite
@@ -258,6 +292,48 @@ export function usePhaserRenderer() {
         slopePercent,
         speedKmh: bridge.speedKmh,
       }, styleStrategy ?? undefined);
+
+      // 玩家名牌(幽靈模式限定)跟位 — 先定位再顯示,避免初建時在原點閃一幀。
+      if (playerLabel) {
+        playerLabel.setPosition(worldX, worldY - LABEL_OFFSET_PX);
+        playerLabel.setVisible(true);
+      }
+    }
+
+    // ── Ghost rider (P8) ──
+    if (ghostSprite) {
+      if (ghostDistM === null) {
+        ghostSprite.setVisible(false);
+        ghostLabel?.setVisible(false);
+      } else {
+        const gX = ghostDistM * PX_PER_METER;
+        const gY = scene.getTerrainY(ghostDistM);
+        const gSlopeDeg = scene.getTerrainSlope(ghostDistM);
+        // 速度由差分推導(20Hz 內插後仍平滑);罰站 → 0 → 腿停。
+        if (dt > 0 && ghostPrevDistM !== null) {
+          const inst = Math.max(0, ((ghostDistM - ghostPrevDistM) / dt) * 3.6);
+          // 圈界 wrap(距離倒退一整圈)時不要算出巨大負差 → clamp 已保 0。
+          ghostSpeedKmh += (inst - ghostSpeedKmh) * Math.min(1, dt * 5);
+        }
+        ghostPrevDistM = ghostDistM;
+
+        updateCyclistSpriteFn!(ghostSprite, {
+          worldX: gX,
+          worldY: gY,
+          slopeDeg: gSlopeDeg,
+          // 幽靈沒有踏頻資料 — 移動中就給一個看起來合理的迴轉讓腿動起來。
+          cadenceRpm: ghostSpeedKmh > 1 ? 80 : 0,
+          isDarkened: bridge.isDarkened,
+          slopePercent: Math.tan(gSlopeDeg * Math.PI / 180) * 100,
+          speedKmh: ghostSpeedKmh,
+        }, styleStrategy ?? undefined);
+        ghostSprite.setVisible(true);
+        ghostSprite.setAlpha(GHOST_ALPHA);
+        if (ghostLabel) {
+          ghostLabel.setPosition(gX, gY - LABEL_OFFSET_PX);
+          ghostLabel.setVisible(true);
+        }
+      }
     }
 
     // Update coin animations
@@ -438,6 +514,73 @@ export function usePhaserRenderer() {
     gameInstance.scene.drawWorkoutFlags(flags);
   }
 
+  /**
+   * Feed the finish-line aircraft's hanging banner its live readout (fed ~1 Hz
+   * from the game loop). `remainingMs` is null in freeRoam / when there is no
+   * target duration → the banner shows km only. No-op until the scene exists.
+   */
+  function updateFinishBanner(remainingKm: number, remainingMs: number | null): void {
+    gameInstance?.scene.setFinishBannerInfo(remainingKm, remainingMs);
+  }
+
+  /** 預估終點在玩家前方多少公尺(server finishTarget.remainingM)。 */
+  function updateFinishTarget(leadM: number): void {
+    gameInstance?.scene.setFinishTarget(leadM);
+  }
+
+  /**
+   * 幽靈車模式開關(P8)。`label` = 幽靈名牌(如「幽靈 · 7/12」);null 關閉並
+   * 銷毀幽靈 sprite 與兩張名牌。啟用時玩家頭上同步掛「你」(防搞混)。
+   */
+  function setGhostInfo(label: string | null): void {
+    if (label === null) {
+      ghostSprite?.destroy();
+      ghostLabel?.destroy();
+      playerLabel?.destroy();
+      ghostSprite = null;
+      ghostLabel = null;
+      playerLabel = null;
+      ghostDistM = null;
+      ghostPrevDistM = null;
+      ghostSpeedKmh = 0;
+      return;
+    }
+    if (!gameInstance || !styleStrategy || !updateCyclistSpriteFn || !createCyclistSpriteFn) return;
+    const scene = gameInstance.scene;
+    if (!ghostSprite) {
+      // 與玩家同一套建構管線(動畫/pose 狀態齊全),再半透明 + 略低 depth —
+      // 幽靈永遠畫在玩家後面。
+      ghostSprite = createCyclistSpriteFn(scene, styleStrategy);
+      ghostSprite.setDepth(499);
+      ghostSprite.setAlpha(GHOST_ALPHA);
+      ghostSprite.setVisible(false);
+    }
+    const makeLabel = (text: string, ghost: boolean): Phaser.GameObjects.Text => {
+      const t = scene.add.text(0, 0, text, {
+        fontSize: '10px',
+        color: ghost ? '#cdbfff' : '#ffffff',
+        fontFamily: styleStrategy!.getMarkerFont(),
+        fontStyle: 'bold',
+        backgroundColor: ghost ? 'rgba(30,24,52,0.55)' : 'rgba(10,14,26,0.7)',
+        padding: { x: 6, y: 2 },
+      });
+      t.setOrigin(0.5, 1);
+      t.setDepth(502);
+      if (ghost) t.setAlpha(0.85);
+      return t;
+    };
+    if (!ghostLabel) ghostLabel = makeLabel(label, true);
+    if (!playerLabel) playerLabel = makeLabel('你', false);
+    // 兩張名牌都先藏 — render 迴圈定位後才顯示(防原點閃幀)。
+    ghostLabel.setVisible(false);
+    playerLabel.setVisible(false);
+  }
+
+  /** 每幀餵幽靈的本圈 wrapped 距離(m);null = 資料空窗,隱藏不銷毀。 */
+  function updateGhost(distM: number | null): void {
+    ghostDistM = distM;
+  }
+
   function dispose(): void {
     resizeObserver?.disconnect();
     resizeObserver = null;
@@ -449,6 +592,7 @@ export function usePhaserRenderer() {
     weatherSystem?.dispose();
     chunkManager?.dispose();
     cyclistSprite?.destroy();
+    setGhostInfo(null); // 幽靈 sprite + 兩張名牌
     gameInstance?.destroy();
 
     coinLayer = null;
@@ -490,6 +634,10 @@ export function usePhaserRenderer() {
     updateCheckpointFlags,
     setWorkoutZoneColor,
     drawWorkoutSegmentFlags,
+    updateFinishBanner,
+    updateFinishTarget,
+    setGhostInfo,
+    updateGhost,
     mvtFailed,
     dispose,
   };

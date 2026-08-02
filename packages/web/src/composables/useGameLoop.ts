@@ -6,11 +6,21 @@ import {
 import { useGameStore } from '@/stores/gameStore';
 import { useSensorStore } from '@/stores/sensorStore';
 import { useGameStateStore } from '@/stores/gameStateStore';
+import {
+  startFramePhases, stopFramePhases,
+  phaseFrameStart, phaseFrameEnd,
+} from '@/composables/useFramePhases';
 
 interface GameLoopDeps {
   ballTick: (dtMs: number) => void;
   updateBallVisual: () => void;
   updateCamera: () => void;
+  /**
+   * Fired once per second with the freshly-computed fps, but ONLY while actually
+   * riding (not paused, not tab-hidden) — the quality governor's sample feed.
+   * Lightweight callback so the governor doesn't have to watch a reactive ref.
+   */
+  onFpsSample?: (fps: number) => void;
 }
 
 export interface TimeSeriesSample {
@@ -91,6 +101,12 @@ export function useGameLoop(deps: GameLoopDeps) {
   // (free-roam / recording unavailable).
   function computeElapsedMs(nowPerf: number): number {
     const anchor = sensorStore.serverElapsedMs;
+    // Manual pause: the server clock is frozen (pause stops the ride clock and
+    // the recorder), so hold the last value instead of extrapolating past a
+    // frozen anchor — extrapolation would saw-tooth between sensor frames.
+    if (gameStore.isPaused) {
+      return anchor ?? elapsedMs.value;
+    }
     if (anchor != null) {
       return anchor + (nowPerf - sensorStore.serverElapsedPerfNow);
     }
@@ -99,6 +115,12 @@ export function useGameLoop(deps: GameLoopDeps) {
 
   function frame(now: number) {
     if (!isRunning.value) return;
+
+    // avgOutsideMs 拆帳的起點(只在 debug 下有作用)。`isPaused` 一起記:
+    // 暫停中的幀走的是下面 PAUSED_FRAME_MS 的 15 fps 節流,frame time 會被
+    // 量化成 4~5 個 vsync(66.7 / 83.3 ms)。perf 紀錄以前沒有這個欄位,
+    // 於是那些「14 fps、GPU 只有 6 ms」的秒數被當成效能問題讀了好幾天。
+    phaseFrameStart(now, gameStore.isPaused);
 
     if (gameStore.isPaused) {
       // Physics freezes with the server sim while paused, but RENDERING must
@@ -109,8 +131,9 @@ export function useGameLoop(deps: GameLoopDeps) {
       // interpolation, render) runs behind the PAUSED_FRAME_MS gate; on the
       // skipped rAF ticks there is nothing to recompute, since the paused
       // server stops advancing cumulativeDistance and interpolation would just
-      // re-sample the same spot. The clock keeps running (方案甲: paused time
-      // is not deducted, matching the record) — 15 updates/sec reads smooth.
+      // re-sample the same spot. The clock FREEZES with the server's ride
+      // clock (manual pause stops recording + elapsed; idle auto-pause still
+      // runs it) — 15 updates/sec reads smooth.
       if (now - lastPausedRenderAt >= PAUSED_FRAME_MS) {
         lastPausedRenderAt = now;
         elapsedMs.value = computeElapsedMs(now);
@@ -127,6 +150,7 @@ export function useGameLoop(deps: GameLoopDeps) {
       // over the whole pause span, which would lock fpsMin to a bogus low.
       fpsFrames = 0;
       fpsLastTime = now;
+      phaseFrameEnd();
       scheduleNext();
       return;
     }
@@ -151,6 +175,9 @@ export function useGameLoop(deps: GameLoopDeps) {
       if (elapsedMs.value >= 2000) {
         if (fpsMin.value == null || fps.value < fpsMin.value) fpsMin.value = fps.value;
       }
+      // Feed the quality governor — only while visible (a hidden tab renders
+      // at ~10fps via setTimeout, which must not be read as a real slump).
+      if (!tabHidden) deps.onFpsSample?.(fps.value);
     }
 
     // Server-frame interpolation (always runs)
@@ -204,6 +231,11 @@ export function useGameLoop(deps: GameLoopDeps) {
         power,
       });
     }
+
+    // Frame's own JS is done here — everything after this point is the
+    // browser's (Vue flush, style/layout/paint, vsync). Placed BEFORE the
+    // time-limit early-return so both exits close the phase.
+    phaseFrameEnd();
 
     // Check time limit
     if (elapsedMs.value >= gameStore.targetDurationMs) {
@@ -268,10 +300,14 @@ export function useGameLoop(deps: GameLoopDeps) {
     tabHidden = document.hidden;
     document.addEventListener('visibilitychange', onVisibilityChange);
     scheduleNext();
+    // 註冊順序決定 tail callback 排在誰後面:scheduleNext() 先,tail 後,
+    // 下一批 rAF 就是 [frame, tail]。之後 tail 自己維持這個順序。
+    startFramePhases();
   }
 
   function stop() {
     isRunning.value = false;
+    stopFramePhases();
 
     document.removeEventListener('visibilitychange', onVisibilityChange);
     if (rafId !== null) {

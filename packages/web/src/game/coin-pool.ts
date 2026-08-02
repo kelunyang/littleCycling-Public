@@ -9,6 +9,15 @@ import { createCoinMesh } from './coin-mesh';
  * world-style factory (cuphead → gold push-pin, plastic → stud-topped tile);
  * other renderers fall back to the plain gold disc.
  */
+/**
+ * Hard cap on live coin meshes. The pool keeps every mesh it ever allocated (for
+ * reuse), so `all` grows to the peak concurrent coin count; a coin-dense route
+ * could otherwise grow it without bound. At the cap, a further acquire with
+ * nothing free reuses the oldest mesh (round-robin) rather than allocating —
+ * bounded, and far past any realistic on-screen coin count.
+ */
+const MAX_COINS = 200;
+
 export class CoinPool {
   private free: THREE.Mesh[] = [];
   private all: THREE.Mesh[] = [];
@@ -23,9 +32,16 @@ export class CoinPool {
   acquire(): THREE.Mesh {
     let mesh = this.free.pop();
     if (!mesh) {
-      mesh = this.factory();
-      this.scene.add(mesh);
-      this.all.push(mesh);
+      if (this.all.length >= MAX_COINS) {
+        // At the cap with nothing free — reuse the oldest allocated mesh instead
+        // of growing the pool. Rotate `all` so reuse spreads round-robin.
+        mesh = this.all.shift()!;
+        this.all.push(mesh);
+      } else {
+        mesh = this.factory();
+        this.scene.add(mesh);
+        this.all.push(mesh);
+      }
     }
     mesh.visible = true;
     return mesh;
@@ -42,6 +58,11 @@ export class CoinPool {
       this.scene.remove(mesh);
       mesh.traverse((obj) => {
         const m = obj as THREE.Mesh;
+        // A style may batch a repeated part of the coin (the poker chip's six
+        // knurl nubs) into an InstancedMesh — its instance buffer is a GPU
+        // resource of its own that `geometry.dispose()` does not reach.
+        const inst = obj as THREE.InstancedMesh;
+        if (inst.isInstancedMesh) inst.dispose();
         // The legacy `createCoinMesh` hands out module-level singletons shared
         // with the other renderers — tagged `shared`, and not ours to free.
         if (m.geometry && !m.geometry.userData.shared) m.geometry.dispose();

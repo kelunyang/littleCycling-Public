@@ -27,6 +27,13 @@ export function useWindSimulator(deps: Deps) {
   let elapsedSec = 0;
   let raf = 0;
   let prevMs = 0;
+  let lastPublishMs = 0;
+
+  // Wind evolves slowly (Open-Meteo refreshes every 15 min; our sin-wave
+  // fluctuation is gentle), so there's no visual/audio benefit to publishing a
+  // fresh sample 60×/s. Integrate every frame for identical physics, but only
+  // publish (and thus wake GameView's watch + audio) ~10×/s.
+  const PUBLISH_INTERVAL_MS = 100;
 
   function fluct(t: number): number {
     const s1 = Math.sin(t * 0.13) * 0.20;
@@ -48,12 +55,27 @@ export function useWindSimulator(deps: Deps) {
       + Math.sin(elapsedSec * 0.6) * 2;
     const gust = base > 0 ? speed / base : 1;
 
-    wind.value = {
-      speedKmh: speed,
-      baseSpeedKmh: base,
-      directionDeg: ((dir % 360) + 360) % 360,
-      gustFactor: gust,
-    };
+    // Integrate every frame (identical physics), publish ~10×/s.
+    //
+    // `PUBLISH_INTERVAL_MS` and `lastPublishMs` were declared above with the
+    // comment explaining exactly this, and then never referenced — the throttle
+    // was written and not wired, so every frame wrote `wind.value` and woke
+    // GameView's watcher and the audio graph 60×/s for a quantity that changes
+    // on a 15-minute weather refresh.
+    //
+    // It matters more than it looks. The first real GPU measurement (8700G,
+    // high tier, 1720k triangles at 2115×1148) puts the GPU at 8.17 ms of a
+    // 16.7 ms frame, while `corr(avgFrameMs, avgOutsideMs) = 0.998` — the frame
+    // time IS the non-render main-thread time. This is one of the things in it.
+    if (now - lastPublishMs >= PUBLISH_INTERVAL_MS) {
+      lastPublishMs = now;
+      wind.value = {
+        speedKmh: speed,
+        baseSpeedKmh: base,
+        directionDeg: ((dir % 360) + 360) % 360,
+        gustFactor: gust,
+      };
+    }
 
     raf = requestAnimationFrame(loop);
   }
@@ -61,6 +83,8 @@ export function useWindSimulator(deps: Deps) {
   function start() {
     if (raf) return;
     prevMs = 0;
+    // Publish on the first frame after a start, not 100 ms into the ride.
+    lastPublishMs = 0;
     raf = requestAnimationFrame(loop);
   }
 

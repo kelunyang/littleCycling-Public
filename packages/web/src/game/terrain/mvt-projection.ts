@@ -6,6 +6,8 @@
  */
 
 import type { RoutePoint } from '@littlecycling/shared';
+import { isDrawnRoad, DRAWN_ROAD_CLASSES } from './road-classes';
+import { isLandscapeWater } from './water-classes';
 import type { MVTFeature } from './mvt-fetcher';
 
 /** Maximum distance from route to include a feature (meters). */
@@ -14,7 +16,7 @@ export const FEATURE_CORRIDOR_M = 1000;
 /** A 2D feature projected onto the route distance axis. */
 export interface ProjectedFeature {
   type: 'building' | 'tree' | 'water' | 'grass' | 'sand' | 'road'
-    | 'waterway' | 'aeroway' | 'urban';
+    | 'waterway' | 'aeroway' | 'urban' | 'tunnel';
   /** Route distance in meters (X position). */
   distanceM: number;
   /** Lateral offset from route in meters (for depth/layering). */
@@ -104,7 +106,11 @@ export function classifyFeature(feature: MVTFeature): ProjectedFeature['type'] |
     case 'building':
       return 'building';
     case 'water':
-      return 'water';
+      // Same policy the 3D renderer applies — see water-classes.ts. This layer's
+      // `class` used to be ignored on BOTH sides, so a back-garden swimming pool
+      // was drawn with the sea's material (2901 of them in one Los Angeles tile
+      // window, against 20 lakes and ponds).
+      return isLandscapeWater(feature.properties) ? 'water' : null;
     case 'landcover': {
       const cls = feature.properties.class || feature.properties.subclass || '';
       if (cls === 'forest' || cls === 'wood') return 'tree';
@@ -135,7 +141,20 @@ export function classifyFeature(feature: MVTFeature): ProjectedFeature['type'] |
       return null;
     }
     case 'transportation':
-      return 'road';
+      // Same policy the 3D renderer applies — see road-classes.ts. This used to
+      // map the WHOLE transportation layer to "road", so the 2D world kept
+      // drawing hiking trails, service alleys, the MRT guideway and tunnels
+      // long after the 3D world stopped.
+      //
+      // Tunnels get their own type rather than vanishing: they must not be
+      // PAVED (a tunnel is inside the hill, not on it) but the zone detector
+      // reads them to darken the world and pack the street lamps in. Dropping
+      // them outright silently disabled tunnels in 2D.
+      if (feature.properties.brunnel === 'tunnel') {
+        return DRAWN_ROAD_CLASSES.has(String(feature.properties.class ?? ''))
+          ? 'tunnel' : null;
+      }
+      return isDrawnRoad(feature.properties) ? 'road' : null;
     default:
       return null;
   }

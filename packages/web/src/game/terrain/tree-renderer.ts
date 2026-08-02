@@ -12,6 +12,7 @@ import type { MVTFeature } from './mvt-fetcher';
 import { extractPolygonCoords } from './landuse-renderer';
 import { pointInPolygon } from './zone-detector';
 import type { TerrainStyleStrategy } from './terrain-style-strategy';
+import { createYielder } from './build-yield';
 
 /** Grid spacing for tree placement in meters. */
 const TREE_GRID_SPACING = 20;
@@ -47,6 +48,7 @@ export async function buildTreeMeshes(
   originLon: number,
   originEle: number,
   strategy: TerrainStyleStrategy,
+  owns: (lon: number, lat: number) => boolean = () => true,
 ): Promise<TreeRenderResult> {
   const cosOrigin = Math.cos((originLat * Math.PI) / 180);
 
@@ -65,9 +67,12 @@ export async function buildTreeMeshes(
 
   // Generate tree positions using grid sampling + jitter + point-in-polygon
   const treePositions: { lon: number; lat: number }[] = [];
+  const maybeYield = createYielder();
 
   for (const ring of forestPolygons) {
     if (treePositions.length >= MAX_TREES_PER_CHUNK) break;
+    // Point-in-polygon over a grid can be heavy for a big forest ring.
+    await maybeYield();
 
     // Compute bounding box of polygon (in lon/lat)
     let minLon = Infinity, maxLon = -Infinity;
@@ -97,7 +102,9 @@ export async function buildTreeMeshes(
         const testLon = lon + jLon;
         const testLat = lat + jLat;
 
-        if (pointInPolygon(testLon, testLat, ring)) {
+        // Ownership clip: the padded-corridor overlap band otherwise grows a
+        // second, identical forest from the neighbouring chunk.
+        if (pointInPolygon(testLon, testLat, ring) && owns(testLon, testLat)) {
           treePositions.push({ lon: testLon, lat: testLat });
         }
       }
@@ -118,6 +125,24 @@ export async function buildTreeMeshes(
 
   const count = treePositions.length;
   const instancedMesh = new THREE.InstancedMesh(treeGeometry, material, count);
+  // Shadows: the demos batch their trees through the same box batcher as
+  // everything else standing on the ground, and it opens both flags
+  // (`plastic:738-739`). A tree with no shadow is the other half of 「房子樹木
+  // 就是浮在色塊上」 (plan/2026-summer.md).
+  //
+  // The cut-out styles' canopies are alphaTest cards; three's depth material
+  // carries `alphaTest`/`map`/`alphaMap` across on its own, so no
+  // customDepthMaterial is needed for the leaves to be cut out of the shadow too.
+  //
+  // The pair is per-DRAW and there is one draw per chunk, so a world whose demo
+  // batches its tree parts differently needs its own answer: paper's
+  // `treeBucket.flush` opens `castShadow` on the card batches only and never
+  // touches `receiveShadow` (an alphaTest card standing on edge has nothing to
+  // catch), while plastic and circuit want both. Omitting `treeShadow` keeps
+  // the both-on default those two were already getting.
+  const { cast, receive } = strategy.treeShadow ?? { cast: true, receive: true };
+  instancedMesh.castShadow = cast;
+  instancedMesh.receiveShadow = receive;
 
   // Set instance colors (canopy color variation per tree)
   const instanceColor = new THREE.Color();
@@ -130,15 +155,20 @@ export async function buildTreeMeshes(
     const x = (lon - originLon) * 111320 * cosOrigin;
     const z = -(lat - originLat) * 111320;
 
-    // Elevation
-    let ele: number;
-    try {
-      ele = await sampler.getElevation(lat, lon);
-    } catch {
-      ele = originEle;
+    // Elevation — sync when the covering DEM tile is cached (terrain built
+    // first), awaiting only on a miss.
+    let ele = sampler.getElevationSync(lat, lon);
+    if (ele === null) {
+      try {
+        ele = await sampler.getElevation(lat, lon);
+      } catch {
+        ele = originEle;
+      }
     }
     // Snap the trunk base to the terrain's quantised layer (no floating trees).
     const y = strategy.quantizeElevation(ele) - originEle;
+
+    await maybeYield();
 
     // Deterministic scale and rotation from position
     const hash = deterministicHash(lon, lat);
@@ -164,6 +194,31 @@ export async function buildTreeMeshes(
 
   instancedMesh.instanceMatrix.needsUpdate = true;
   if (instancedMesh.instanceColor) instancedMesh.instanceColor.needsUpdate = true;
+
+  // Ground mark (paper: the ring of white glue) — a SIBLING InstancedMesh over
+  // the very same matrices, exactly like the outline below. The demo's tree is
+  // three meshes, not two, and the third cannot ride on the cards' geometry: the
+  // mark IS its alpha falloff (0.02 → 0.12 over 31 rings), and the card
+  // material's `alphaTest: 0.5` keeps only the inner third of that radius — a
+  // hard-edged blob, which is the opposite of the thing. One more draw call per
+  // chunk buys the whole thing.
+  //
+  // Flags are the demo's: `put(unitDisc, glueMat, glue)` passes no depth
+  // material, so the mark neither casts nor receives. Written out rather than
+  // left to three's defaults so it cannot drift silently.
+  const mark = strategy.treeGroundMark?.();
+  if (mark) {
+    const markMesh = new THREE.InstancedMesh(mark.geometry, mark.material, count);
+    (markMesh.instanceMatrix.array as Float32Array)
+      .set(instancedMesh.instanceMatrix.array as Float32Array);
+    markMesh.instanceMatrix.needsUpdate = true;
+    markMesh.castShadow = false;
+    markMesh.receiveShadow = false;
+    // Same reason as the outline: it is a child of an InstancedMesh, so its own
+    // bounds are not what the parent's culling test used.
+    markMesh.frustumCulled = false;
+    instancedMesh.add(markMesh);
+  }
 
   // Ink outline (paper style) — instanced outline child sharing the instance
   // matrices. Must be created after the matrices are filled in. Cut-out trees
@@ -314,10 +369,19 @@ export function disposeTreeMesh(result: TreeRenderResult): void {
   // Frees the instanceMatrix/instanceColor GPU buffers — geometry.dispose()
   // does not reach them (they live on the mesh, not the geometry).
   result.mesh.dispose();
-  // Dispose any child outline's material (geometry shared → already freed).
+  // Children: the ink outline (whose geometry IS the parent's, already freed)
+  // and the ground mark (whose geometry is its own — free it, or every chunk
+  // leaks one disc). Anything a style marked `userData.shared` is a strategy
+  // singleton and is left alone.
   for (const child of result.mesh.children) {
-    const m = (child as THREE.Mesh).material;
-    if (m instanceof THREE.Material) m.dispose();
+    const mesh = child as THREE.Mesh;
+    const m = mesh.material;
+    if (m instanceof THREE.Material && !m.userData.shared) m.dispose();
+    if (mesh.geometry
+      && mesh.geometry !== result.mesh.geometry
+      && !mesh.geometry.userData.shared) {
+      mesh.geometry.dispose();
+    }
     if ((child as THREE.InstancedMesh).isInstancedMesh) {
       (child as THREE.InstancedMesh).dispose();
     }

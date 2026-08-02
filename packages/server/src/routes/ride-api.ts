@@ -1,9 +1,11 @@
 /**
- * Ride history REST API — list, detail, delete, comparison window.
+ * Ride history REST API — list, detail, delete, ghost trace (P8), FIT export.
  */
 
 import type { FastifyInstance } from 'fastify';
+import type { GhostTraceDto } from '@littlecycling/shared';
 import type { RideDatabase } from '../lib/database.js';
+import { buildGhostTrace } from '../lib/ghost-trace.js';
 import { exportRideToFit } from '../lib/fit-exporter.js';
 
 export default async function rideApi(
@@ -156,22 +158,25 @@ export default async function rideApi(
     return { samples };
   });
 
-  /** Get comparison samples for a time window. */
-  fastify.get<{
-    Params: { id: string };
-    Querystring: { from?: string; to?: string };
-  }>('/api/rides/:id/comparison', async (req, reply) => {
+  /**
+   * P8 幽靈車:輸出所選騎乘的 distance-vs-time trace(GhostTraceDto)。
+   * 前端多半不需要(sim 開賽時廣播 ghost 狀態),此端點供名牌 metadata 與
+   * 未來用途。空 trace(騎乘無樣本)→ 422:此騎乘不能當幽靈。
+   */
+  fastify.get<{ Params: { id: string } }>('/api/rides/:id/ghost-trace', async (req, reply) => {
     const id = parseInt(req.params.id, 10);
     if (isNaN(id)) return reply.code(400).send({ error: 'Invalid ride ID' });
-
-    const from = parseInt(req.query.from ?? '0', 10) || 0;
-    const to = parseInt(req.query.to ?? '120000', 10) || 120000;
 
     const ride = db.getRide(id);
     if (!ride) return reply.code(404).send({ error: 'Ride not found' });
 
-    const samples = db.getComparisonWindow(id, from, to);
-    return { samples };
+    const { points, source } = buildGhostTrace(db.getSamplesForGhost(id));
+    if (points.length === 0) {
+      return reply.code(422).send({ error: 'Ride has no samples — cannot be used as a ghost' });
+    }
+
+    const dto: GhostTraceDto = { rideId: id, startedAt: ride.startedAt, source, points };
+    return dto;
   });
 
   /** Export ride as FIT file for Strava/Garmin upload. */

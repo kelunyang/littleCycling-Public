@@ -52,11 +52,14 @@ interface BufferedSnapshot {
   cum: number;
   speedKmh: number;
   steeringAngle: number;
+  /** 幽靈的單調距離(P8)— null = 本場無幽靈。與 cum 同軸內插。 */
+  ghostCum: number | null;
 }
 
 export const useGameStateStore = defineStore('gameState', () => {
   // ── Route geometry (set once per game) ──
   let routePoints: RoutePoint[] = [];
+  let startOffset = 0;
   let cumulativeDists: number[] = [];
   let totalDist = 0;
 
@@ -95,6 +98,31 @@ export const useGameStateStore = defineStore('gameState', () => {
   /** True once at least one game_state frame has arrived this game. */
   const hasFrames = ref(false);
 
+  // ── Ghost (P8) — 幽靈車模式的鏡像輸出 ──
+  /** 本場有幽靈(game_state 帶 ghost 區塊)。 */
+  const ghostActive = ref(false);
+  /** 幽靈內插後的單調距離(m);無幽靈為 null。 */
+  const ghostDistanceM = ref<number | null>(null);
+  /** 幽靈位置 — 由內插距離經同一套 interpolateAlongRoute 導出。 */
+  const ghostPosition = shallowRef<InterpolatedPosition | null>(null);
+  /** 幽靈的 wrapped 每圈距離(2D 卷軸的 x 軸用)。 */
+  const ghostDistanceTraveled = ref(0);
+  const ghostLaps = ref(0);
+  /** 時間差(ms):正 = 玩家領先。離散值,latest wins(看板 1 Hz 級顯示)。 */
+  const ghostGapMs = ref<number | null>(null);
+  /** 幽靈已騎完它的錄製全程(停在終點)。 */
+  const ghostFinished = ref(false);
+
+  // ── 終點飛船目標 ──
+  /** 預估結束位置的單調距離(m)。限時模式會隨配速漂移;無幀時為 null。
+   *  刻意不內插:它本來就是個緩慢漂移的預估值,20 Hz 的階梯肉眼看不出,
+   *  而飛船端另有指數平滑吸收跳動。 */
+  const finishTargetCum = ref<number | null>(null);
+  /** 距離預估終點還有多少(m)。 */
+  const finishRemainingM = ref(0);
+  /** 剩餘時間(ms);freeRoam/無時間目標為 null。 */
+  const finishRemainingMs = ref<number | null>(null);
+
   // ── Coin ops pass-through (P5) ──
   // Coin deltas carry renderer resources (visual handles live in the coin
   // layer), so the store doesn't own them — it forwards each message's ops
@@ -107,12 +135,20 @@ export const useGameStateStore = defineStore('gameState', () => {
     coinOpsHandler = handler;
   }
 
-  function setRoute(points: RoutePoint[]): void {
+  function setRoute(points: RoutePoint[], startOffsetM = 0): void {
     routePoints = points;
     cumulativeDists = points.length > 0 ? buildCumulativeDistances(points) : [];
     totalDist = cumulativeDists.length > 0 ? cumulativeDists[cumulativeDists.length - 1] : 0;
+    // Welcome-screen start window: the server sim uses the same offset, so the
+    // ridden-space `cum` it broadcasts maps to route space via offset + cum on
+    // both ends identically.
+    startOffset = totalDist > 0 ? Math.max(0, startOffsetM) % totalDist : 0;
+    // Seed the derived state at the offset too — before the first server frame
+    // arrives, consumers (chunk streaming, HUD) must already sit at the start
+    // window, not at route km 0.
+    distanceTraveled.value = startOffset;
     if (points.length > 0) {
-      position.value = interpolateAlongRoute(routePoints, cumulativeDists, 0);
+      position.value = interpolateAlongRoute(routePoints, cumulativeDists, startOffset);
     }
   }
 
@@ -122,6 +158,7 @@ export const useGameStateStore = defineStore('gameState', () => {
       cum: msg.cumulativeDistance,
       speedKmh: msg.speedKmh,
       steeringAngle: msg.steeringAngle,
+      ghostCum: msg.ghost?.distanceM ?? null,
     });
     if (buffer.length > BUFFER_MAX) {
       buffer.splice(0, buffer.length - BUFFER_MAX);
@@ -141,6 +178,24 @@ export const useGameStateStore = defineStore('gameState', () => {
     autoPaused.value = msg.autoPaused ?? false;
     hasFrames.value = true;
 
+    // Ghost 離散值(gap/圈數/完賽)— latest wins;距離走內插(見 sample)。
+    if (msg.ghost) {
+      ghostActive.value = true;
+      ghostGapMs.value = msg.ghost.gapMs;
+      ghostLaps.value = msg.ghost.laps;
+      ghostFinished.value = msg.ghost.finished;
+    } else if (ghostActive.value) {
+      ghostActive.value = false;
+      ghostGapMs.value = null;
+      ghostFinished.value = false;
+    }
+
+    if (msg.finishTarget) {
+      finishTargetCum.value = msg.finishTarget.cumulativeM;
+      finishRemainingM.value = msg.finishTarget.remainingM;
+      finishRemainingMs.value = msg.finishTarget.remainingMs;
+    }
+
     if (msg.coins && coinOpsHandler) {
       coinOpsHandler(msg.coins);
     }
@@ -159,6 +214,7 @@ export const useGameStateStore = defineStore('gameState', () => {
     let cum: number;
     let spd: number;
     let steer: number;
+    let ghostCum: number | null;
 
     const newest = buffer[n - 1];
     if (target >= newest.rx || n === 1) {
@@ -166,11 +222,13 @@ export const useGameStateStore = defineStore('gameState', () => {
       cum = newest.cum;
       spd = newest.speedKmh;
       steer = newest.steeringAngle;
+      ghostCum = newest.ghostCum;
     } else if (target <= buffer[0].rx) {
       const oldest = buffer[0];
       cum = oldest.cum;
       spd = oldest.speedKmh;
       steer = oldest.steeringAngle;
+      ghostCum = oldest.ghostCum;
     } else {
       // Scan from the tail — target is almost always inside the last pair.
       let i = n - 2;
@@ -184,15 +242,34 @@ export const useGameStateStore = defineStore('gameState', () => {
       cum = a.cum + (b.cum - a.cum) * t;
       spd = a.speedKmh + (b.speedKmh - a.speedKmh) * t;
       steer = a.steeringAngle + (b.steeringAngle - a.steeringAngle) * t;
+      // Ghost 距離同軸同法內插(也是單調);任一端缺值就 clamp 到有值端。
+      ghostCum = a.ghostCum !== null && b.ghostCum !== null
+        ? a.ghostCum + (b.ghostCum - a.ghostCum) * t
+        : (b.ghostCum ?? a.ghostCum);
     }
 
     cumulativeDistance.value = cum;
     speedKmh.value = spd;
     steeringAngle.value = steer;
 
+    if (ghostCum !== null && totalDist > 0 && routePoints.length > 0) {
+      const gLaps = Math.floor(ghostCum / totalDist);
+      const gWrapped = ghostCum - gLaps * totalDist;
+      ghostDistanceM.value = ghostCum;
+      ghostDistanceTraveled.value = gWrapped;
+      ghostPosition.value = interpolateAlongRoute(routePoints, cumulativeDists, gWrapped);
+    } else if (ghostCum === null) {
+      ghostDistanceM.value = null;
+      ghostPosition.value = null;
+      ghostDistanceTraveled.value = 0;
+    }
+
     if (totalDist > 0) {
-      const lapCount = Math.floor(cum / totalDist);
-      const wrapped = cum - lapCount * totalDist;
+      // Shift ridden-space cum into route space (start window) — mirrors the
+      // server sim's derivation exactly.
+      const routeCum = startOffset + cum;
+      const lapCount = Math.floor(routeCum / totalDist);
+      const wrapped = routeCum - lapCount * totalDist;
       laps.value = lapCount;
       distanceTraveled.value = wrapped;
       if (routePoints.length > 0) {
@@ -224,6 +301,16 @@ export const useGameStateStore = defineStore('gameState', () => {
     idleMs.value = 0;
     autoPaused.value = false;
     hasFrames.value = false;
+    ghostActive.value = false;
+    ghostDistanceM.value = null;
+    ghostPosition.value = null;
+    ghostDistanceTraveled.value = 0;
+    ghostLaps.value = 0;
+    ghostGapMs.value = null;
+    ghostFinished.value = false;
+    finishTargetCum.value = null;
+    finishRemainingM.value = 0;
+    finishRemainingMs.value = null;
     routePoints = [];
     cumulativeDists = [];
     totalDist = 0;
@@ -234,6 +321,8 @@ export const useGameStateStore = defineStore('gameState', () => {
     // outputs
     position, cumulativeDistance, distanceTraveled, laps, speedKmh, steeringAngle,
     paused, ended, powerW, powerSource, zone, combo, coinsTotal, elapsed, event, idleMs, autoPaused, hasFrames,
+    ghostActive, ghostDistanceM, ghostPosition, ghostDistanceTraveled, ghostLaps, ghostGapMs, ghostFinished,
+    finishTargetCum, finishRemainingM, finishRemainingMs,
     // actions
     setRoute, push, sample, reset, onCoinOps,
   };

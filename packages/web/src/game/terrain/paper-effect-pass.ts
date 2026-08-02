@@ -1,13 +1,42 @@
 /**
- * Paper-craft post-processing pass ("Paper Tank" 紙風格).
+ * Paper-craft post-processing pass — the paper GRAIN, and nothing else.
  *
- * Turns the neon plastic world into a paper-diorama look with a single
- * screen-space pass — no per-material changes required:
- *  1. Posterize    — quantize colors into flat printed bands.
- *  2. Desaturate   — pull neon saturation down toward matte construction paper.
- *  3. Warm tint    — shift whites toward cream / kraft-paper tone.
- *  4. Paper fiber  — multiply a procedural paper-grain texture (screen-space,
- *                    tiled at native pixel size so fibers stay crisp).
+ * ## What this pass is allowed to do, and why it is so little
+ *
+ * It was written in the "Paper Tank" era, when the corrugated world WAS a
+ * screen-space filter laid over the neon plastic one: posterize, desaturate,
+ * warm kraft tint, fibre. Since then the world grew its own geometry, its own
+ * palette and its own materials — and `plan/paper-town-demo.html`, which is the
+ * POC this world is ported from, has **no post-processing at all**: it draws
+ * with a bare `renderer.render(scene, camera)`. Every bit of its paper feel is
+ * carried by the gouache/kraft textures, the corrugated cut edges and the toon
+ * gradient.
+ *
+ * Three of the four steps were therefore doing the job a SECOND time, to the
+ * whole frame, including to colours that were never neon to begin with:
+ *
+ *  - **Warm kraft tint** (`× vec3(1, 0.92, 0.76)`). The palette is already
+ *    kraft-shifted at source — `paperify()` bakes exactly that shift into the
+ *    building/tree/road colours (and reproduces the demo's own `ERASER_COLORS`
+ *    hex for hex), while `TERRAIN_BAND` / the gouache `PAINT` pigments are paper
+ *    colours to begin with. Multiplying blue by 0.76 across the frame moved the
+ *    ground's green `#6d9a46` to `#808457` — R ≈ G, i.e. khaki. Measured over
+ *    the demo's own palette: hue drift up to 36°, saturation down 25–73%. That
+ *    is the "整個顏色都偏棕色" the rider reported. Removed.
+ *  - **Posterize.** The flat printed banding is the toon `gradientMap`, which
+ *    every material in this world already carries. Doing it again in screen
+ *    space is worse than redundant: the pass runs BEFORE `OutputPass` (chain is
+ *    RenderPass → this → OutputPass), so it quantises LINEAR values, where four
+ *    levels crush the whole mid-tone range onto 0 / 0.25. Kept as a knob,
+ *    defaulted off (`defaultStyleParams` override in `paper-terrain-style.ts`).
+ *  - **Desaturate.** Same story: `paperify()` already takes 45% out, at source,
+ *    once. Kept as a knob, defaulted off.
+ *
+ * What survives is the fibre: a near-white grain sampled through its RED
+ * channel only, so it is a pure grey multiply and cannot move a hue. That is
+ * the one thing a screen-space pass can add that per-material textures cannot
+ * (it sits at native pixel size, so the paper stays paper-sized no matter how
+ * far away the surface is).
  *
  * The paper texture is generated procedurally on a <canvas> (no image assets),
  * matching the project's "所有視覺元素都是程序化" convention.
@@ -97,12 +126,12 @@ const PaperShader = {
     uFiberStrength: { value: 0.4 },
     /** Posterize band count (higher = smoother). */
     uLevels: { value: 4.0 },
-    /** How much of the posterized color to blend in (0-1). */
-    uPosterize: { value: 0.75 },
-    /** Desaturation amount toward matte paper (0-1). */
-    uDesaturate: { value: 0.62 },
-    /** Warm cream/kraft paper tint (multiplied). */
-    uPaperColor: { value: new THREE.Vector3(1.0, 0.92, 0.76) },
+    /** How much of the posterized color to blend in (0-1). Off by default —
+     *  the toon gradientMap already bands, and this one bands LINEAR values. */
+    uPosterize: { value: 0.0 },
+    /** Desaturation amount toward matte paper (0-1). Off by default —
+     *  `paperify()` already takes 45% out, at source, once. */
+    uDesaturate: { value: 0.0 },
     /** Master effect strength (0 = original, 1 = full paper). */
     uStrength: { value: 1.0 },
   },
@@ -124,7 +153,6 @@ const PaperShader = {
     uniform float uLevels;
     uniform float uPosterize;
     uniform float uDesaturate;
-    uniform vec3 uPaperColor;
     uniform float uStrength;
 
     varying vec2 vUv;
@@ -133,18 +161,17 @@ const PaperShader = {
       vec4 src = texture2D(tDiffuse, vUv);
       vec3 col = src.rgb;
 
-      // 1. Posterize — flat printed color bands.
+      // 1. Posterize — flat printed color bands. Off by default (see header).
       vec3 post = floor(col * uLevels + 0.5) / uLevels;
       col = mix(col, post, uPosterize);
 
-      // 2. Desaturate toward matte construction paper.
+      // 2. Desaturate toward matte construction paper. Off by default.
       float lum = dot(col, vec3(0.299, 0.587, 0.114));
       col = mix(col, vec3(lum), uDesaturate);
 
-      // 3. Warm cream / kraft-paper tint.
-      col *= uPaperColor;
-
-      // 4. Paper fiber — tiled at native pixel size, multiply blend.
+      // 3. Paper fiber — tiled at native pixel size, multiply blend. RED channel
+      //    only, so this is a grey multiply: it can dim, it cannot re-tint. The
+      //    kraft tint that used to sit here is what turned the world brown.
       vec2 puv = vUv * uResolution / uTileSize;
       float fiber = texture2D(uPaper, puv).r;
       col *= mix(1.0, fiber, uFiberStrength);

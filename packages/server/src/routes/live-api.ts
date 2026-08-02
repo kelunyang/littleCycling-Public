@@ -22,16 +22,29 @@ interface StartGameBody {
   randomEventsEnabled: boolean;
   selectedWorkoutId: string;
   /**
+   * Repeat the workout at its designed length to fill the ride, instead of
+   * stretching one round over it. Optional — absent means off, which is the
+   * historical behaviour.
+   */
+  repeatWorkout?: boolean;
+  /**
    * 課表訓練時帶上：由此組出 rides.workout_id = `plan:<planId>:<day>`，
    * 優先於 selectedWorkoutId。自由騎 / 一般 workout 不帶。
    */
   planRef?: { planId: string; day: number };
+  /** Welcome-screen start window: begin the ride this many metres along the route. */
+  startOffsetM?: number;
 }
 
 interface StartBody {
   routeId?: string;
   routeName?: string;
   game?: StartGameBody;
+  /**
+   * P8 幽靈車:所選歷史騎乘 id,以幽靈形式在世界裡對騎。僅在有 game 時有意義;
+   * 該騎乘無樣本 → server 記 warning 略過(不擋開賽)。
+   */
+  ghostRideId?: number;
 }
 
 /** Returns an error string, or null when the body is a valid GameSimConfig. */
@@ -43,6 +56,9 @@ function validateGameConfig(game: StartGameBody): string | null {
   if (typeof game.targetDurationMs !== 'number' || game.targetDurationMs <= 0) return 'game.targetDurationMs must be a positive number';
   if (typeof game.randomEventsEnabled !== 'boolean') return 'game.randomEventsEnabled must be a boolean';
   if (typeof game.selectedWorkoutId !== 'string') return 'game.selectedWorkoutId is required';
+  if (game.startOffsetM !== undefined && (typeof game.startOffsetM !== 'number' || !Number.isFinite(game.startOffsetM) || game.startOffsetM < 0)) {
+    return 'game.startOffsetM must be a non-negative number';
+  }
   if (game.planRef !== undefined) {
     if (typeof game.planRef !== 'object' || game.planRef === null) return 'game.planRef must be an object';
     if (typeof game.planRef.planId !== 'string' || game.planRef.planId.length === 0) return 'game.planRef.planId must be a non-empty string';
@@ -103,13 +119,24 @@ export default async function liveApi(
         workoutId = deriveWorkoutId(body.game);
       }
 
+      // P8 幽靈車:選填,帶上就是正整數 ride id(sim 建好後由 LiveSession 載入)。
+      if (body.ghostRideId !== undefined) {
+        if (!Number.isInteger(body.ghostRideId) || body.ghostRideId <= 0) {
+          return reply.code(400).send({ error: 'ghostRideId must be a positive integer' });
+        }
+      }
+
       const rideId = await liveSession.startRecording({
         routeId: body.routeId,
         routeName: body.routeName,
         workoutId,
+        repeatWorkout: body.game?.repeatWorkout ?? false,
         game,
+        ghostRideId: body.ghostRideId,
       });
-      return { rideId };
+      // The prescribed segments come back so the client renders what the SERVER
+      // decided rather than deriving its own copy — see LiveSession for why.
+      return { rideId, workoutSegments: liveSession.prescribedSegments };
     } catch (err: any) {
       return reply.code(400).send({ error: err.message });
     }

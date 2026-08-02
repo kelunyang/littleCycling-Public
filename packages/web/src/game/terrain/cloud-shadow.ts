@@ -21,6 +21,48 @@ export const CLOUD_SHADOW_UV_SCALE = 0.0009;
 
 /** Shared uniforms — the SAME objects are assigned into every injected shader,
  *  so updating `.value` here propagates to all chunk materials at once. */
+/**
+ * Live diagnostic: force cloud shadows off.
+ *
+ * This is the ONLY per-fragment multiply applied to the terrain albedo and to
+ * nothing else, which makes it the only candidate that can darken a hillside
+ * without touching the roads or buildings on it. Two properties matter:
+ *
+ *  - The texture bottoms out at ~0.13, not the 0.5 its per-blob alpha suggests:
+ *    14 blobs are each stamped at 9 wrap offsets, and overlapping source-over
+ *    composites multiply down (0.5 -> 0.25 -> 0.125 ...). So a "soft shadow"
+ *    can take 87% of the albedo.
+ *  - It is sampled in world XZ. On flat ground that is a soft round patch; on a
+ *    steep slope the planar projection smears one texel down the whole face,
+ *    which turns those patches into long dark STREAKS.
+ *
+ * Flat ground clean, hillsides streaked — switch it off and find out.
+ */
+let cloudShadowDisabled = false;
+let cloudStrengthBeforeDisable = 0;
+
+export function setCloudShadowEnabled(enabled: boolean): void {
+  if (enabled === !cloudShadowDisabled) return;
+  if (enabled) {
+    cloudShadowDisabled = false;
+    cloudShadowUniforms.uCloudStrength.value = cloudStrengthBeforeDisable;
+  } else {
+    cloudStrengthBeforeDisable = cloudShadowUniforms.uCloudStrength.value;
+    cloudShadowDisabled = true;
+    cloudShadowUniforms.uCloudStrength.value = 0;
+  }
+}
+
+export function getCloudShadowEnabled(): boolean {
+  return !cloudShadowDisabled;
+}
+
+/** True while the diagnostic is holding strength at zero — the weather driver
+ *  must not fight it. */
+export function isCloudShadowDisabled(): boolean {
+  return cloudShadowDisabled;
+}
+
 export const cloudShadowUniforms = {
   uCloudOffset: { value: new THREE.Vector2(0, 0) },
   uCloudStrength: { value: 0 },

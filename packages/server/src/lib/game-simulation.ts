@@ -54,6 +54,7 @@ import {
 import type { ServerWind } from './server-weather.js';
 import type { WsRelay } from './ws-relay.js';
 import type { LiveSensorSnapshot } from './live-session.js';
+import type { GhostTraceLookup } from './ghost-trace.js';
 
 /** Broadcast/tick rate: 20Hz. */
 const TICK_MS = 50;
@@ -104,6 +105,10 @@ export interface GameSimConfig {
   targetDurationMs: number;
   randomEventsEnabled: boolean;
   selectedWorkoutId: string;
+  /** Start the ride this many metres along the route (welcome-screen start
+   *  window). Wrapped into [0, totalDist); stats/coins stay in ridden space —
+   *  only the route-position mapping shifts. */
+  startOffsetM?: number;
 }
 
 /**
@@ -164,6 +169,9 @@ export class GameSimulation {
 
   private readonly cumulativeDists: number[];
   private readonly totalDist: number;
+  /** Route-space start offset (m) — added to ridden cumulativeDistance wherever
+   *  a route position is resolved. */
+  private readonly startOffset: number;
   private readonly estimator: VirtualPowerEstimator;
 
   // ── Authoritative state ──
@@ -265,6 +273,13 @@ export class GameSimulation {
   private idleMs = 0;
   private autoPaused = false;
 
+  // Manual-pause clock accounting: while MANUALLY paused (Space/pause button,
+  // and the born-paused start prompt) the ride clock stops — elapsed, the
+  // countdown, and the recorder's samples all freeze. Idle AUTO-pause keeps
+  // the clock and recording running (方案甲) and never touches these stamps.
+  private pausedWallMs = 0;
+  private pauseStartedAt: number | null = null;
+
   private timer: NodeJS.Timeout | null = null;
   private lastTickAt = 0;
   private comboAccumMs = 0;
@@ -286,10 +301,17 @@ export class GameSimulation {
       ? this.cumulativeDists[this.cumulativeDists.length - 1]
       : 0;
     this.estimator = new VirtualPowerEstimator({ trainerModel: this.config.trainerModel });
+    this.startOffset = this.totalDist > 0
+      ? Math.max(0, this.config.startOffsetM ?? 0) % this.totalDist
+      : 0;
 
     this.position = this.routePoints.length > 0
-      ? interpolateAlongRoute(this.routePoints, this.cumulativeDists, 0)
+      ? interpolateAlongRoute(this.routePoints, this.cumulativeDists, this.startOffset)
       : { lat: 0, lon: 0, ele: 0, bearing: 0 };
+
+    // Born paused at the start prompt: that gap is paused time too, so the
+    // clock reads 0 until the first resume.
+    this.pauseStartedAt = this.recordingStartTime;
   }
 
   // ── Lifecycle ──
@@ -315,10 +337,17 @@ export class GameSimulation {
 
   // ── Control ──
 
-  /** Manual pause/resume (Space key → REST). Resume counts as "started". */
+  /** Manual pause/resume (Space key → REST). Resume counts as "started".
+   *  Manual pause stops the ride clock (see pausedWallMs); idle auto-pause
+   *  never routes through here and keeps the clock running. */
   setPaused(paused: boolean): void {
     if (this.ended) return;
     this.clientControlled = true;
+    if (paused) {
+      if (this.pauseStartedAt === null) this.pauseStartedAt = this.now();
+    } else {
+      this.closePauseStamp();
+    }
     this.paused = paused;
     if (!paused) this.hasStarted = true;
     // A manual pause/resume overrides any idle auto-pause: a manual pause must
@@ -328,9 +357,43 @@ export class GameSimulation {
     this.idleMs = 0;
   }
 
+  /** Fold an open manual-pause stamp into the accumulated total. */
+  private closePauseStamp(): void {
+    if (this.pauseStartedAt !== null) {
+      this.pausedWallMs += this.now() - this.pauseStartedAt;
+      this.pauseStartedAt = null;
+    }
+  }
+
+  /** Total manually-paused wall time so far, including an in-flight pause. */
+  pausedMsTotal(): number {
+    return this.pausedWallMs + (this.pauseStartedAt !== null ? this.now() - this.pauseStartedAt : 0);
+  }
+
+  /** Manually paused (start prompt or pause button) — the recorder gates
+   *  sample writes on this; idle auto-pause deliberately keeps recording. */
+  get isManuallyPaused(): boolean {
+    return this.paused && !this.autoPaused;
+  }
+
   /** Award coins (random events in P6; collisions credit via collideCoins). */
   addCoins(amount: number): void {
     this.coinsTotal += amount;
+  }
+
+  // ── Ghost (P8) ──
+
+  /** 幽靈 trace — 有值時每次 broadcast 帶 ghost 區塊。 */
+  private ghostTrace: GhostTraceLookup | null = null;
+
+  /**
+   * 掛上幽靈(startRecording 時由 LiveSession 設定;null 清除)。
+   * 幽靈沿 `gameTimeMs`(active-play 時間)推進 — 玩家暫停,幽靈同步凍結。
+   * 注意不對稱:幽靈自己錄下的暫停/停踩是 trace 上的平坦段,回放時它會
+   * 原地罰站 — 誠實重現該次騎乘,刻意不壓縮。
+   */
+  setGhostTrace(trace: GhostTraceLookup | null): void {
+    this.ghostTrace = trace;
   }
 
   /**
@@ -395,7 +458,9 @@ export class GameSimulation {
     const now = this.now();
     const dt = Math.min(now - this.lastTickAt, MAX_TICK_DT);
     this.lastTickAt = now;
-    const elapsed = now - this.recordingStartTime;
+    // Ride clock: wall time minus manually-paused time — the countdown and
+    // game-end check freeze while the rider is at the pause screen.
+    const elapsed = now - this.recordingStartTime - this.pausedMsTotal();
 
     const snapshot = this.getSnapshot();
     const stale = now - this.getLastDataAt() > SENSOR_STALE_MS;
@@ -406,6 +471,7 @@ export class GameSimulation {
     if (this.paused && !this.hasStarted && !this.clientControlled && !stale) {
       const signal = Math.max(snapshot.power ?? 0, snapshot.cadence ?? 0);
       if (signal > 0) {
+        this.closePauseStamp(); // born-paused gap ends here
         this.paused = false;
         this.hasStarted = true;
       }
@@ -452,6 +518,11 @@ export class GameSimulation {
       // Span-based collision over (prevCum, cum] — immune to dt size, a
       // large tick can never tunnel past a coin (see clock-model note).
       this.collideCoins(prevCum);
+
+      // Active-play clock — frozen on pause/end. Drives the event state
+      // machine and the ghost (P8). Hoisted out of tickEvents: its mode gate
+      // (workout / events-off) must not freeze the ghost's clock.
+      this.gameTimeMs += dt;
 
       // Random-event state machine advances on the same frozen-on-pause
       // game time.
@@ -517,9 +588,12 @@ export class GameSimulation {
     const deltaDist = speed * (dtMs / 3_600_000) * 1000; // km/h → m
     this.cumulativeDistance += deltaDist;
 
-    // Derive wrapped distance + laps from the monotonic accumulator.
-    this.laps = Math.floor(this.cumulativeDistance / this.totalDist);
-    this.distanceTraveled = this.cumulativeDistance - this.laps * this.totalDist;
+    // Derive wrapped distance + laps from the monotonic accumulator, shifted
+    // into route space by the start offset (a lap completes at the route END,
+    // regardless of where the ride began).
+    const routeCum = this.startOffset + this.cumulativeDistance;
+    this.laps = Math.floor(routeCum / this.totalDist);
+    this.distanceTraveled = routeCum - this.laps * this.totalDist;
 
     const pos = interpolateAlongRoute(this.routePoints, this.cumulativeDists, this.distanceTraveled);
 
@@ -628,7 +702,7 @@ export class GameSimulation {
       this.spawnedSlots.add(key);
 
       const cum = slot * spacing;
-      const wrapped = cum % this.totalDist;
+      const wrapped = (this.startOffset + cum) % this.totalDist;
       const pos = interpolateAlongRoute(this.routePoints, this.cumulativeDists, wrapped);
       const dto: CoinDto = {
         id: this.nextCoinId++,
@@ -696,7 +770,7 @@ export class GameSimulation {
     const SPREAD_MAX = 150;
     for (let i = 0; i < count; i++) {
       const cum = this.cumulativeDistance + SPREAD_MIN + Math.random() * (SPREAD_MAX - SPREAD_MIN);
-      const wrapped = cum % this.totalDist;
+      const wrapped = (this.startOffset + cum) % this.totalDist;
       const pos = interpolateAlongRoute(this.routePoints, this.cumulativeDists, wrapped);
       const dto: CoinDto = {
         id: this.nextCoinId++,
@@ -713,10 +787,9 @@ export class GameSimulation {
   // ── Random-event state machine (port of useRandomEvents) ──
 
   private tickEvents(dtMs: number, elapsedWall: number): void {
-    // Freeride only, and only when random events are enabled.
+    // Freeride only, and only when random events are enabled. (gameTimeMs is
+    // advanced by tick() for every mode — the ghost depends on it too.)
     if (this.config.selectedWorkoutId !== 'none' || !this.config.randomEventsEnabled) return;
-
-    this.gameTimeMs += dtMs; // active-play clock — frozen on pause/end
 
     if (this.eventState === 'active') {
       this.eventElapsedMs = this.gameTimeMs - this.eventStartGameMs;
@@ -827,6 +900,59 @@ export class GameSimulation {
     return dto;
   }
 
+  /**
+   * 終點飛船的目標位置。
+   *
+   * 限時模式(targetDurationMs > 0)下「終點」不是路線終點——時間到就結束,
+   * 所以真正的結束點是「用目前均速再騎完剩餘時間」的預估距離。這個值會隨
+   * 配速漂移(騎快了往前飄、慢了往回飄),隨著剩餘時間歸零收斂到玩家身上。
+   *
+   * 剩餘時間用 WALL-clock elapsed 算,不是 gameTimeMs——結束判定是
+   * `elapsed >= targetDurationMs`(見 tick),暫停時 gameTimeMs 凍結但結束
+   * 時鐘照走;用錯時鐘的話,暫停過的場次看板會多報整段暫停時間,遊戲會在
+   * 倒數還沒歸零時直接結束。(同 tickEvents 的 wall-clock remaining guard。)
+   *
+   * 均速取全場 active-play 平均(cumulativeDistance / statActiveMs)而非瞬時
+   * 速度:它天生平滑,不會因為一次抽車就把飛船甩出去。開場 10 秒內樣本太少,
+   * 退回瞬時速度免得預估是 0。
+   *
+   * freeRoam 也走預估(API 保證 targetDurationMs > 0,sim 一樣在時限到時
+   * 結束,指路線終點的話長路線永遠看不到飛船),但 remainingMs 回報 null
+   * ——自由騎的看板只顯示公里,不倒數(見 WsGameStateMessage 型別註解)。
+   *
+   * targetDurationMs <= 0(只有測試會出現)時退回路線實體終點。
+   */
+  private buildFinishTarget(elapsedWall: number): NonNullable<WsGameStateMessage['finishTarget']> {
+    const targetMs = this.config.targetDurationMs;
+    if (targetMs > 0) {
+      const remainingMs = Math.max(0, targetMs - elapsedWall);
+      const avgMs =
+        this.statActiveMs > 10_000
+          ? this.cumulativeDistance / this.statActiveMs // m per ms
+          : this.speedKmh / 3600;
+      const remainingM = Math.max(0, avgMs * remainingMs);
+      return {
+        cumulativeM: this.cumulativeDistance + remainingM,
+        remainingM,
+        remainingMs: this.config.freeRoam ? null : remainingMs,
+        predicted: true,
+      };
+    }
+
+    // 路線終點:繞圈時是「本圈的終點」,所以每圈重新出現在前方。
+    // Ridden-space distance at which the (laps+1)-th route end arrives —
+    // shifted back by the start offset, since laps live in route space.
+    const endCum = this.totalDist > 0
+      ? (this.laps + 1) * this.totalDist - this.startOffset
+      : this.cumulativeDistance;
+    return {
+      cumulativeM: endCum,
+      remainingM: Math.max(0, endCum - this.cumulativeDistance),
+      remainingMs: null,
+      predicted: false,
+    };
+  }
+
   private broadcast(now: number, elapsed: number): void {
     const msg: WsGameStateMessage = {
       type: 'game_state',
@@ -849,6 +975,22 @@ export class GameSimulation {
 
     if (this.idleMs > 0) msg.idleMs = this.idleMs;
     if (this.autoPaused) msg.autoPaused = true;
+
+    // Ghost (P8): 純查表,無累積狀態 — 兩個二分搜尋 @20Hz。
+    // gapMs = 幽靈首次到達「玩家目前距離」的時刻 − 玩家目前 gameTimeMs;
+    // 正值 = 玩家更早到達這裡 = 領先。玩家超出幽靈全程時 timeAtDistance
+    // clamp 到幽靈終點時刻(低估領先幅度,finished 旗標補語意)。
+    if (this.ghostTrace) {
+      const ghostDist = this.ghostTrace.distanceAt(this.gameTimeMs);
+      msg.ghost = {
+        distanceM: ghostDist,
+        laps: this.totalDist > 0 ? Math.floor(ghostDist / this.totalDist) : 0,
+        gapMs: this.ghostTrace.timeAtDistance(this.cumulativeDistance) - this.gameTimeMs,
+        finished: this.gameTimeMs >= this.ghostTrace.finalTimeMs,
+      };
+    }
+
+    msg.finishTarget = this.buildFinishTarget(elapsed);
 
     const event = this.buildEventDto();
     if (event) msg.event = event;

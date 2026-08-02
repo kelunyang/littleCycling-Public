@@ -14,7 +14,9 @@
  */
 
 import Phaser from 'phaser';
+import type { ZoneKind } from '@/game/terrain/land-zone';
 import type { WaterFeaturePos } from './terrain-builder';
+import { zoneAtDistance, type ZoneBand } from './zone-bands';
 import { lerpColor } from './phaser-weather';
 import { INTRO_DURATION_S, type PhaserStyleStrategy } from './phaser-style-strategy';
 import {
@@ -123,6 +125,15 @@ export class Phaser2DScene extends Phaser.Scene {
   private currentMarksWeather: GlassesWeatherType = 'sunny';
   private currentZone: GlassesZoneType = 'open';
 
+  /** Second camera for the chunks' additive night lights — carries NO post
+   *  pipelines and renders after the main camera, so what it draws composites
+   *  ABOVE the night veil in the glasses pipeline. The 2D demos do the same
+   *  thing with depth (glow 885 over veil 880); a post pass has no "above",
+   *  only another camera does. Null in welcome mode, which runs without the
+   *  pipelines and therefore has no veil to escape.
+   *  See adoptNightLights() and plan/phaser-2d-lighting.md (option D). */
+  private lightsCamera: Phaser.Cameras.Scene2D.Camera | null = null;
+
   // Speed/wind particle emitter (driven by ride speed, not weather wind)
   private windEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
   /** Last rounded speed pushed into windEmitter — avoids reallocating the
@@ -136,6 +147,8 @@ export class Phaser2DScene extends Phaser.Scene {
   private waterShimmerGfx!: Phaser.GameObjects.Graphics;
   private waterShimmerFrame = 0;
   private waterFeatures: WaterFeaturePos[] = [];
+  /** Land-use districts along the route, sorted and non-overlapping. */
+  private zoneBands: ZoneBand[] = [];
 
   // Terrain data (set externally after scene is ready)
   private elevationProfile: { distM: number; eleM: number }[] = [];
@@ -149,6 +162,22 @@ export class Phaser2DScene extends Phaser.Scene {
    *  before redrawing (a resize re-lays the markers; untracked texts would be
    *  left floating at the old ground height). */
   private staticFlagTexts: Phaser.GameObjects.Text[] = [];
+
+  // ── Finish-line aircraft (Lakitu-style guide hovering over the route finish) ──
+  /** Redrawn each frame while riding; lives in routeLayer so plastic gets the
+   *  route bloom and cuphead stays matte. */
+  private finishAircraftGfx!: Phaser.GameObjects.Graphics;
+  /** Banner Text pinned over the aircraft's board — created lazily on the first
+   *  aircraft frame (Phaser Text = one texture each; never per-frame recreate). */
+  private finishBannerText: Phaser.GameObjects.Text | null = null;
+  /** Current banner string — only setText when it actually changes. */
+  private finishBannerStr = '';
+  /** Smoothed terrain-follow base Y for the hover (exponential), so the craft
+   *  doesn't judder on terrain steps while pinned to the moving screen edge.
+   *  NaN = snap to target next frame. */
+  private finishAircraftBaseY = NaN;
+  /** 預估終點在玩家前方多少公尺(server finishTarget)。NaN = 還沒收到幀 → 不畫。 */
+  private finishLeadM = NaN;
 
   // Workout checkpoint flags (2D counterpart of CheckpointFlagManager)
   private workoutFlagGfx!: Phaser.GameObjects.Graphics;
@@ -213,6 +242,29 @@ export class Phaser2DScene extends Phaser.Scene {
   }
 
   create() {
+    // ── Lights camera (option D) — set up FIRST, before any object exists ──
+    // The glasses pipeline's night veil runs on the main camera's COMPOSITED
+    // frame, so anything that camera renders — the additive lights included —
+    // is veiled with the world, and the lit:unlit ratio stays where it was
+    // (check:3d asserts that arithmetic). The demos draw their glow ABOVE the
+    // veil; the only thing that runs after a camera's post pipeline is a later
+    // camera, so the lights get one of their own, with no pipelines on it.
+    //
+    // Membership is default-OUT: every object is ignored by this camera the
+    // moment it is added (the scene-level ADDED_TO_SCENE event fires for root
+    // and Layer adds alike), and adoptNightLights() exempts the chunk lights
+    // layers one by one. Default-out because the failure mode of a hand-kept
+    // ignore list is an object drawn TWICE — once veiled, once not — and
+    // nobody enumerates every label, emitter and tree a scene grows.
+    if (this.mode === 'game') {
+      const lightsCam = this.cameras.add();
+      this.lightsCamera = lightsCam;
+      this.events.on(
+        Phaser.Scenes.Events.ADDED_TO_SCENE,
+        (obj: Phaser.GameObjects.GameObject) => { obj.cameraFilter |= lightsCam.id; },
+      );
+    }
+
     // Terrain graphics — scrolls with the world
     this.terrainGfx = this.add.graphics();
 
@@ -240,6 +292,12 @@ export class Phaser2DScene extends Phaser.Scene {
     this.workoutFlagFadedGfx.setDepth(49);
     this.workoutFlagFadedGfx.setAlpha(PASSED_FLAG_ALPHA);
     this.routeLayer.add(this.workoutFlagFadedGfx);
+
+    // Finish-line aircraft — above the flags, inside the route layer so the
+    // plastic saucer picks up the route bloom (cuphead's matte layer has none).
+    this.finishAircraftGfx = this.add.graphics();
+    this.finishAircraftGfx.setDepth(52);
+    this.routeLayer.add(this.finishAircraftGfx);
 
     // Apply Bloom FX to the route layer so markers/flags get a soft glow —
     // plastic only, fewer blur steps (see applyRouteBloom).
@@ -372,6 +430,24 @@ export class Phaser2DScene extends Phaser.Scene {
   }
 
   /**
+   * The route's land-use districts, as distance bands (see `buildZoneBands`).
+   *
+   * Pushed by `TerrainChunkManager2D` when it is built, because the manager is
+   * the only thing that holds the projected features. Empty means "no zoning
+   * known", and `drawTerrain` then hands `drawTerrainSurface` nothing — which is
+   * the state every style drew in before the zones existed.
+   */
+  setZoneBands(bands: ZoneBand[]) {
+    this.zoneBands = bands;
+    this.lastTerrainScrollX = NaN;   // the board's colours changed; redraw
+  }
+
+  /** The district at a route distance, or null outside every band. */
+  private zoneAtDist(distM: number): ZoneKind | null {
+    return zoneAtDistance(this.zoneBands, distM);
+  }
+
+  /**
    * Called every frame by Phaser (driven externally via tick()).
    */
   update(_time: number, _delta: number) {
@@ -421,6 +497,15 @@ export class Phaser2DScene extends Phaser.Scene {
       cam.centerOn(chaseX, chaseY);
     }
 
+    // The lights camera shadows the main camera exactly — same scroll, same
+    // zoom. It is not a different view, only a different place in the
+    // compositing order. Copied after every branch above so 自由 mode and the
+    // re-attach ease stay in lockstep too.
+    if (this.lightsCamera) {
+      this.lightsCamera.setScroll(cam.scrollX, cam.scrollY);
+      this.lightsCamera.setZoom(cam.zoom);
+    }
+
     // ── Style backdrop parallax ──
     // The backdrop is screen-fixed; its texture scrolls at a fraction of the
     // camera, which parallaxes without ever sliding the sprite off screen.
@@ -464,6 +549,9 @@ export class Phaser2DScene extends Phaser.Scene {
         }
       }
     }
+
+    // ── Finish-line aircraft (Lakitu-style guide over the route finish) ──
+    this.updateFinishAircraft(dtSec);
 
     // ── Speed/wind particles ──
     const speed = this.bridge.speedKmh;
@@ -574,6 +662,46 @@ export class Phaser2DScene extends Phaser.Scene {
     this.tunnelPipeline.setIntensity(intensity);
   }
 
+  /**
+   * How far into night we are (0 = noon, 1 = deep night).
+   *
+   * This is what makes the 2D WORLD darken. Phaser has no light term, so
+   * nothing in a chunk reacts to nightfall on its own; the glasses pipeline is
+   * the only place a multiplier can reach every drawn pixel at once. See
+   * night-grade.ts, and `plan/phaser-2d-lighting.md` for why it lives here.
+   *
+   * The additive lights layers are the one thing NOT under it: they render on
+   * lightsCamera, above the veil (adoptNightLights), which is what gives them
+   * headroom to read at all.
+   *
+   * Welcome-backdrop mode deliberately runs without the pipelines, so it also
+   * runs without the night dim — the same exemption the glasses effect has.
+   */
+  setNightFactor(f: number) {
+    this.glassesPipeline?.setNightFactor(f, this.strategy.style);
+  }
+
+  /**
+   * Route a chunk's additive lights layer past the night veil (option D).
+   *
+   * The main camera stops rendering it — otherwise it would ALSO be drawn
+   * under the veil, i.e. twice — and the pipeline-free lights camera picks it
+   * up (clearing the bit the ADDED_TO_SCENE hook set). What the lights give up
+   * by leaving the main camera: lens tint, vignette, barrel distortion and the
+   * tunnel-vision blur no longer touch them — the demos make the same trade,
+   * their glow layer sits above every screen effect. Distortion is the visible
+   * one: at the frame's far corners a glow can sit a few px off its distorted
+   * building; at the centre, where the rider's eye lives, the offset is ~0.
+   *
+   * Welcome mode has no veil, so the lights simply stay on the main camera
+   * and this is a no-op.
+   */
+  adoptNightLights(gfx: Phaser.GameObjects.Graphics): void {
+    if (!this.lightsCamera) return;
+    this.cameras.main.ignore(gfx);
+    gfx.cameraFilter &= ~this.lightsCamera.id;
+  }
+
   setEnvironmentZone(zone: GlassesZoneType) {
     if (this.currentZone === zone) return;
     this.currentZone = zone;
@@ -636,6 +764,95 @@ export class Phaser2DScene extends Phaser.Scene {
   }
 
   /**
+   * Redraw the finish-line aircraft (a Lakitu-style guide, NES-Mario cloud
+   * turtle). The target is the *predicted* end of the ride, not the route's end
+   * — in a timed session the clock stops the ride long before the route runs
+   * out (see the server's finishTarget). While that point is off-screen the
+   * craft is pinned near the screen's leading (right) edge; once it scrolls into
+   * view the craft settles over it. Single clamp:
+   *   displayedX = min(playerX + leadPx, view.right − MARGIN_PX).
+   *
+   * The craft is always on-screen (the clamp guarantees it), so there is no
+   * culling — a single object redrawn each frame, which the blink/bob/spin
+   * animation needs. The banner Text is created once and only repositioned.
+   */
+  private updateFinishAircraft(dtSec: number) {
+    const draw = this.strategy.drawAircraft;
+    if (this.mode !== 'game' || this.totalRouteDistM <= 0 || !draw || Number.isNaN(this.finishLeadM)) {
+      // Welcome mode / no route / a style without an aircraft: keep it clear.
+      this.finishAircraftGfx.clear();
+      this.finishBannerText?.setVisible(false);
+      return;
+    }
+
+    // Lakitu clamp — pin to the leading screen edge until the finish is in view.
+    const MARGIN_PX = 80;
+    const view = this.getViewRect();
+    const targetX = (this.bridge.distanceM + this.finishLeadM) * PX_PER_METER;
+    const displayedX = Math.min(targetX, view.right - MARGIN_PX);
+
+    // Hover above the terrain at the displayed X. Smooth the terrain-follow
+    // BASE (so steps/edge motion don't judder), then add a crisp bob on top.
+    const HOVER_PX = 150;
+    const baseTarget = this.getTerrainY(displayedX / PX_PER_METER) - HOVER_PX;
+    if (Number.isNaN(this.finishAircraftBaseY)) this.finishAircraftBaseY = baseTarget;
+    this.finishAircraftBaseY += (baseTarget - this.finishAircraftBaseY) * (1 - Math.exp(-dtSec * 6));
+    const bob = Math.sin((this.time.now / 1000) * 0.9) * 6;
+    const y = this.finishAircraftBaseY + bob;
+
+    const animPhase = this.time.now / 1000;
+    // Fixed seed — the finish aircraft is a single persistent object, not a
+    // per-position feature, so its wobble stays put frame to frame.
+    const seed = 4207;
+
+    this.finishAircraftGfx.clear();
+    const banner = draw(this.finishAircraftGfx, displayedX, y, seed, animPhase);
+
+    // Banner Text — one texture, created once, then only moved (perf discipline:
+    // never destroy/recreate a Phaser Text per frame).
+    if (!this.finishBannerText) {
+      // plastic's board is dark → white text; cuphead's kraft sign → ink text;
+      // circuit has no aircraft hook today, but if one lands its banner is an
+      // e-paper module on a dark board → silk white (never a silent else).
+      const color = this.strategy.style === 'cuphead' ? '#2a2420' : '#ffffff';
+      this.finishBannerText = this.add.text(banner.bannerCx, banner.bannerCy, this.finishBannerStr, {
+        fontSize: '11px',
+        color,
+        fontFamily: this.strategy.getMarkerFont(),
+        align: 'center',
+      });
+      this.finishBannerText.setOrigin(0.5);
+      this.finishBannerText.setDepth(53);
+      this.textLayer.add(this.finishBannerText);
+    }
+    this.finishBannerText.setPosition(banner.bannerCx, banner.bannerCy);
+    this.finishBannerText.setVisible(true);
+  }
+
+  /**
+   * Set the finish-banner readout (fed ~1 Hz from the game loop). Formats the
+   * zh-TW string 「剩 X.X km」 plus optional 「 · N 分」 (Math.ceil(ms/60000),
+   * clamped ≥0; freeRoam/no target passes null → km only). Skips the setText
+   * when the string is unchanged.
+   */
+  /** 餵預估終點:玩家前方 leadM 公尺(server finishTarget.remainingM)。 */
+  setFinishTarget(leadM: number) {
+    this.finishLeadM = Math.max(0, leadM);
+  }
+
+  setFinishBannerInfo(remainingKm: number, remainingMs: number | null) {
+    const km = Math.max(0, remainingKm);
+    let str = `剩 ${km.toFixed(1)} km`;
+    if (remainingMs !== null) {
+      const mins = Math.max(0, Math.ceil(remainingMs / 60000));
+      str += ` · ${mins} 分`;
+    }
+    if (str === this.finishBannerStr) return;
+    this.finishBannerStr = str;
+    this.finishBannerText?.setText(str);
+  }
+
+  /**
    * (Re)apply the route-layer bloom. Neon glow suits the plastic style; the
    * cuphead hand-drawn ink should stay matte, so it gets no bloom at all. Fewer
    * blur steps (2 vs the former 4) roughly halves the per-frame blur-chain cost.
@@ -644,7 +861,11 @@ export class Phaser2DScene extends Phaser.Scene {
     const fx = this.routeLayer.postFX;
     if (!fx) return;
     fx.clear();
-    if (this.strategy.style === 'plastic') {
+    // plastic: neon route tape. circuit: the route IS the powered dupont wire —
+    // the one thing in that world that must visibly glow (its 3D demo is the
+    // only strong-bloom world of the three). cuphead: poster paint does not
+    // glow, so no bloom, and that is a look decision (DEVPLAN).
+    if (this.strategy.style === 'plastic' || this.strategy.style === 'circuit') {
       // (color, offsetX, offsetY, blurStrength, strength, steps)
       fx.addBloom(0xffffff, 1, 1, 1, 1.2, 2);
     }
@@ -799,12 +1020,19 @@ export class Phaser2DScene extends Phaser.Scene {
     const visLeft = view.left - margin;
     const visRight = view.right + margin;
 
-    // Build point array for the visible terrain surface
+    // Build point array for the visible terrain surface, and — when the route
+    // has been zoned — the district at each of those samples. The two arrays are
+    // filled in the same pass because `drawTerrainSurface`'s contract is that
+    // `zones[i]` belongs to `points[i]`; building them separately is how they
+    // would come to disagree by one sample at a chunk edge.
     const points: { x: number; y: number }[] = [];
+    const zoned = this.zoneBands.length > 0;
+    const zones: (ZoneKind | null)[] | undefined = zoned ? [] : undefined;
     for (const pt of this.elevationProfile) {
       const x = pt.distM * PX_PER_METER;
       if (x < visLeft) continue;
       points.push({ x, y: this.eleToY(pt.eleM, baselineY) });
+      zones?.push(this.zoneAtDist(pt.distM));
       if (x > visRight) break;
     }
 
@@ -818,7 +1046,7 @@ export class Phaser2DScene extends Phaser.Scene {
     const intro = this.introT < INTRO_DURATION_S
       ? { t: this.introT, originX: this.introOriginX }
       : undefined;
-    this.strategy.drawTerrainSurface(this.terrainGfx, points, view.bottom + 8, seed, intro);
+    this.strategy.drawTerrainSurface(this.terrainGfx, points, view.bottom + 8, seed, intro, zones);
   }
 
   /**
@@ -1049,6 +1277,15 @@ export class Phaser2DScene extends Phaser.Scene {
     });
     this.windEmitter.setScrollFactor(0);
     this.windEmitter.setDepth(450);
+
+    // Finish-banner Text: font (getMarkerFont) and colour are style-dependent,
+    // so drop it — the next aircraft frame lazily recreates it with the new
+    // strategy. The last banner string is retained (finishBannerStr) and passed
+    // straight back in, so the readout doesn't blank on a theme swap.
+    this.finishBannerText?.destroy();
+    this.finishBannerText = null;
+    // Next drawAircraft frame uses the new strategy automatically (cleared gfx).
+    this.finishAircraftGfx.clear();
 
     // Force terrain redraw next frame
     this.lastTerrainScrollX = NaN;

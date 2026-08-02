@@ -7,11 +7,13 @@ import Database from 'better-sqlite3';
 import type BetterSqlite3 from 'better-sqlite3';
 import dayjs from 'dayjs';
 import type {
-  Ride, RideSample, RideDayCount, ComparisonSample, ActivePlanState, PlanDayCompletion,
+  Ride, RideSample, RideDayCount, ActivePlanState, PlanDayCompletion,
   DetectedSensor, LlmProvider, TrainingPlan, TrainingPlanSummary,
   AnalysisReport, AnalysisReportSummary, AnalysisFocus,
+  WorkoutSegment,
 } from '@littlecycling/shared';
 import { getHrZone, resampleTo1Hz } from '@littlecycling/shared';
+import type { GhostSampleRow } from './ghost-trace.js';
 
 /** 由課表名稱產生 URL/檔名友善的 slug（原 PlanStore 搬過來，供課表 id 用）。 */
 export function slugify(text: string): string {
@@ -33,6 +35,8 @@ export interface CreateRideOpts {
    * `plan:<planId>:<day>`（課表訓練）。自由騎不帶（NULL）。
    */
   workoutId?: string;
+  /** Prescribed training segments, decided at start. JSON in the DB. */
+  workoutSegments?: WorkoutSegment[];
 }
 
 /** listRides 查詢選項；全部選填，維持既有預設行為。 */
@@ -76,6 +80,12 @@ export interface InsertSampleOpts {
   powerW?: number;
   cadence?: number;
   speedKmh?: number;
+  /**
+   * sim 權威 cumulativeDistance（m）— P8 幽靈 trace 的 recorded 路徑來源。
+   * 純錄製（recorder CLI，無 sim）寫 null，屆時 buildGhostTrace 走
+   * reintegrated fallback。
+   */
+  distanceM?: number | null;
 }
 
 export class RideDatabase {
@@ -208,6 +218,15 @@ export class RideDatabase {
     if (!cols.some((c) => c.name === 'zone_sustain_pct')) {
       this.db.exec(`ALTER TABLE rides ADD COLUMN zone_sustain_pct REAL`);
     }
+    if (!cols.some((c) => c.name === 'workout_segments')) {
+      // The PRESCRIBED segments, as decided at start. Reconstructing them
+      // afterwards from workout_id + durationMs cannot be right: the profile is
+      // percentage-based, so the answer depends on options the ride was started
+      // with (repeat-to-fill) and on the TARGET duration rather than however
+      // long the rider actually went. Record what was prescribed instead of
+      // guessing it back.
+      this.db.exec(`ALTER TABLE rides ADD COLUMN workout_segments TEXT`);
+    }
     if (!cols.some((c) => c.name === 'workout_id')) {
       this.db.exec(`ALTER TABLE rides ADD COLUMN workout_id TEXT`);
     }
@@ -222,6 +241,13 @@ export class RideDatabase {
     const reportCols = this.db.prepare(`PRAGMA table_info(analysis_reports)`).all() as { name: string }[];
     if (!reportCols.some((c) => c.name === 'ride_ids')) {
       this.db.exec(`ALTER TABLE analysis_reports ADD COLUMN ride_ids TEXT`);
+    }
+
+    // ride_samples.distance_m — P8 幽靈車:每筆樣本記 sim 權威 cumulativeDistance。
+    // 舊列（此欄追加前錄的）為 NULL → buildGhostTrace 走 reintegrated fallback。
+    const sampleCols = this.db.prepare(`PRAGMA table_info(ride_samples)`).all() as { name: string }[];
+    if (!sampleCols.some((c) => c.name === 'distance_m')) {
+      this.db.exec(`ALTER TABLE ride_samples ADD COLUMN distance_m REAL`);
     }
   }
 
@@ -314,8 +340,8 @@ export class RideDatabase {
 
   createRide(opts: CreateRideOpts): number {
     const stmt = this.db.prepare(`
-      INSERT INTO rides (started_at, route_id, route_name, sensors, workout_id)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO rides (started_at, route_id, route_name, sensors, workout_id, workout_segments)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
     const sensorsJson = opts.sensors && opts.sensors.length > 0
       ? JSON.stringify(opts.sensors)
@@ -326,6 +352,9 @@ export class RideDatabase {
       opts.routeName ?? null,
       sensorsJson,
       opts.workoutId ?? null,
+      opts.workoutSegments && opts.workoutSegments.length > 0
+        ? JSON.stringify(opts.workoutSegments)
+        : null,
     );
     return result.lastInsertRowid as number;
   }
@@ -455,8 +484,8 @@ export class RideDatabase {
   private get insertSampleStmt(): BetterSqlite3.Statement {
     if (!this._insertSampleStmt) {
       this._insertSampleStmt = this.db.prepare(`
-        INSERT INTO ride_samples (ride_id, elapsed_ms, hr, power_w, cadence, speed_kmh)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO ride_samples (ride_id, elapsed_ms, hr, power_w, cadence, speed_kmh, distance_m)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
       `);
     }
     return this._insertSampleStmt;
@@ -470,23 +499,28 @@ export class RideDatabase {
       sample.powerW ?? null,
       sample.cadence ?? null,
       sample.speedKmh ?? null,
+      sample.distanceM ?? null,
     );
   }
 
-  getComparisonWindow(rideId: number, fromMs: number, toMs: number): ComparisonSample[] {
+  /**
+   * P8 幽靈車:取一筆騎乘的樣本(elapsed / distance / power / speed),供
+   * buildGhostTrace 建 distance-vs-time trace。依 elapsed_ms 升冪(走
+   * (ride_id, elapsed_ms) index),與 GhostSampleRow 對齊。
+   */
+  getSamplesForGhost(rideId: number): GhostSampleRow[] {
     const rows = this.db.prepare(`
-      SELECT elapsed_ms, hr, power_w, cadence, speed_kmh
+      SELECT elapsed_ms, distance_m, power_w, speed_kmh
       FROM ride_samples
-      WHERE ride_id = ? AND elapsed_ms >= ? AND elapsed_ms <= ?
-      ORDER BY elapsed_ms
-    `).all(rideId, fromMs, toMs) as any[];
+      WHERE ride_id = ?
+      ORDER BY elapsed_ms ASC
+    `).all(rideId) as any[];
 
     return rows.map((r) => ({
       elapsedMs: r.elapsed_ms,
-      hr: r.hr ?? undefined,
-      speed: r.speed_kmh ?? undefined,
-      cadence: r.cadence ?? undefined,
-      power: r.power_w ?? undefined,
+      distanceM: r.distance_m ?? null,
+      powerW: r.power_w ?? null,
+      speedKmh: r.speed_kmh ?? null,
     }));
   }
 
@@ -652,6 +686,9 @@ export class RideDatabase {
       rpe: row.rpe ?? undefined,
       sensors,
       workoutId: row.workout_id ?? undefined,
+      workoutSegments: row.workout_segments
+        ? (JSON.parse(row.workout_segments) as WorkoutSegment[])
+        : undefined,
       // planId/planDay 僅 listRides 的 LEFT JOIN 會帶回 pc_* 別名；其餘查詢為 undefined。
       planId: row.pc_plan_id ?? undefined,
       planDay: row.pc_day ?? undefined,

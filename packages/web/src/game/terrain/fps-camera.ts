@@ -86,11 +86,48 @@ function chaseZoom(heightAboveM: number): number {
   return THREE.MathUtils.clamp(heightAboveM / DEFAULT_HEIGHT, 0.45, 2.2);
 }
 
-/** Pitch (deg) at which the gaze sits at `CHASE_LOOK_HEIGHT`. Matches the config default. */
+/**
+ * Pitch (deg) at which the gaze sits at `CHASE_LOOK_HEIGHT` — i.e. the pitch
+ * that reproduces the demos' framing exactly (their follow cam looks from
+ * 17 back / 9.5 up at a point 8 ahead, 4 up, and at this pitch so do we).
+ *
+ * ⚠ It does NOT "match the config default", which is what this comment used to
+ * claim: `DEFAULT_CONFIG.map.cameraPitch` is **12**, not 30 (`shared/src/
+ * config.ts`). So the shipped default gaze sits 1.44 m ABOVE the demos' — the
+ * frame's top edge reaches elevation 19.9° where the demos reach 15.1°. That
+ * matters to anything reasoning about how much sky is on screen; believing this
+ * comment is how the circuit sky's visible band got computed as 15.1° at first.
+ */
 const CHASE_NEUTRAL_PITCH = DEFAULT_PITCH_DEG;
 
 /** Metres the gaze drops per degree of pitch above neutral. */
 const CHASE_PITCH_GAIN = 0.08;
+
+/**
+ * Elevation (deg above horizontal) of the TOP EDGE of the frame, for the chase
+ * camera at a given pitch/height slider setting and vertical FOV.
+ *
+ * Exported because it is the only honest way for a check to ask "how much sky
+ * can the rider actually see?" — the alternative is transcribing the five rig
+ * constants into the check, which re-confirms whatever was typed there rather
+ * than what the camera does. `[sky covers the visible band]` in diorama.ts is
+ * the caller; see the derivation in `circuit-terrain-style.ts`'s skyPalette.
+ *
+ * Positive = the frame top is above the horizon. The gaze pitches DOWN by
+ * `atan((gaze − camY) / (lookAhead + back))`, and the frame top is half the
+ * vertical FOV above that.
+ */
+export function chaseFrameTopElevationDeg(
+  pitchDeg: number,
+  heightAboveM: number,
+  fovDeg: number,
+): number {
+  const zoom = chaseZoom(heightAboveM);
+  const gaze = CHASE_LOOK_HEIGHT - (pitchDeg - CHASE_NEUTRAL_PITCH) * CHASE_PITCH_GAIN;
+  const dy = gaze - CHASE_UP * zoom;
+  const dz = CHASE_LOOK_AHEAD + CHASE_BACK * zoom;
+  return (Math.atan2(dy, dz) * 180) / Math.PI + fovDeg / 2;
+}
 
 /**
  * Update a Three.js PerspectiveCamera for the cycling view.

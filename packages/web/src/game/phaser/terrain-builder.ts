@@ -14,9 +14,19 @@
  */
 
 import type { RoutePoint } from '@littlecycling/shared';
-import { fetchFeaturesInWorker } from '@/game/terrain/mvt-worker-client';
+import { computeRouteBounds } from '@/game/terrain/mvt-projection';
+import { zoneFromLanduseClass, type ZoneKind } from '@/game/terrain/land-zone';
+import type { SignVocabulary } from '@/game/terrain/sign-spec';
 import { PX_PER_METER, type Phaser2DScene } from './phaser2d-scene';
 import type { PhaserStyleStrategy } from './phaser-style-strategy';
+import { nightLightAlpha } from './night-grade';
+import { buildZoneBands } from './zone-bands';
+
+// Re-exported so a consumer that already imports the chunk manager does not need
+// to know the arithmetic moved out of here (it moved because Phaser cannot be
+// loaded in Node, and the districts had to stay checkable — see zone-bands.ts).
+export type { ZoneBand } from './zone-bands';
+export { buildZoneBands } from './zone-bands';
 
 // Re-export ProjectedFeature so existing consumers don't need to change imports
 export type { ProjectedFeature } from '@/game/terrain/mvt-projection';
@@ -25,11 +35,10 @@ import type { ProjectedFeature } from '@/game/terrain/mvt-projection';
 /** Sampling interval for elevation profile (meters). */
 const ELEVATION_SAMPLE_INTERVAL = 5;
 
-/** Window-light layer opacity from the night factor — smoothstep dusk 0.25→0.6. */
-function nightLightAlpha(nightFactor: number): number {
-  const t = Math.max(0, Math.min(1, (nightFactor - 0.25) / 0.35));
-  return t * t * (3 - 2 * t) * 0.9;
-}
+// `nightLightAlpha` used to live here, module-private, which forced the
+// headless probe to hand-copy it. It now shares `duskRamp` with the night veil
+// in night-grade.ts — the windows lighting up and the world darkening have to
+// happen over the SAME window, and two copies of a curve is how they drift.
 
 /** Chunk size in meters for progressive loading. */
 export const CHUNK_SIZE_M = 500;
@@ -133,14 +142,26 @@ export class TerrainChunkManager2D {
    *  treatment; gaps read as unpaved trail. */
   private roadSpans: { start: number; end: number }[] = [];
 
+  /** Which shelf this ride's shop signs draw from — see the `vocabulary`
+   *  argument on `PhaserStyleStrategy.renderBuilding`. Deliberately `readonly`
+   *  with no setter, exactly like the 3D `TerrainChunkManager.signVocabulary`:
+   *  the answer is fixed before the first chunk builds, and a chunk already on
+   *  screen is not rebuilt, so a mid-ride change would only reach the chunks
+   *  ahead and the street would say two different things at once. */
+  private readonly signVocabulary: SignVocabulary;
+
   constructor(
     scene: Phaser2DScene,
     elevationProfile: ElevationSample[],
     features: ProjectedFeature[],
     strategy: PhaserStyleStrategy,
+    /** Omitted = `'shop'`, which is what the Welcome backdrop and every free
+     *  ride want. `usePhaserRenderer` passes the ride's answer. */
+    signVocabulary: SignVocabulary = 'shop',
   ) {
     this.scene = scene;
     this.strategy = strategy;
+    this.signVocabulary = signVocabulary;
     this.elevationProfile = elevationProfile;
     this.features = features;
 
@@ -159,6 +180,11 @@ export class TerrainChunkManager2D {
     }
 
     this.roadSpans = buildRoadSpans(features);
+    // Pushed rather than returned: the districts belong to the WHOLE route, not
+    // to a chunk, and this is the only object that holds the projected features.
+    // Doing it here also means no renderer call site has to learn about zoning —
+    // the scene just finds itself with a zoned board.
+    this.scene.setZoneBands(buildZoneBands(features));
   }
 
   /**
@@ -210,6 +236,11 @@ export class TerrainChunkManager2D {
     lightsGfx.setDepth(16);
     lightsGfx.setBlendMode(Phaser.BlendModes.ADD);
     lightsGfx.setAlpha(nightLightAlpha(this.currentNightFactor));
+    // The veil must not dim the lights: hand this layer to the scene's
+    // pipeline-free lights camera so it composites ABOVE the night veil
+    // (option D, plan/phaser-2d-lighting.md). No-op in welcome mode, which
+    // has no veil.
+    this.scene.adoptNightLights(lightsGfx);
     const objects: Phaser.GameObjects.GameObject[] = [];
 
     const chunkFeatures = this.featuresByChunk.get(index) || [];
@@ -220,11 +251,26 @@ export class TerrainChunkManager2D {
     // Road surface first — it lies on the ground, everything else stands on it.
     this.renderRoadSpans(gfx, startDistM, endDistM);
 
+    // Every thin upright in this chunk, so a shop sign can step sideways out
+    // from behind one (`renderBuilding`'s `posts`). Gathered BEFORE the draw
+    // loop because a sign has to know about the lamp two metres to its right
+    // that has not been drawn yet — and gathered read-only, because the demos'
+    // rule is that the sign moves and nothing else does.
+    //
+    // Lamps are collected before `renderRoadLamp`'s minimum-spacing filter has
+    // run (that filter carries state across chunks and cannot be replayed here),
+    // so the list is a superset: a sign may occasionally dodge a lamp that was
+    // skipped. The cost of that is a sign a few px off centre.
+    const posts: number[] = [];
+    for (const f of chunkFeatures) {
+      if (f.type === 'road' || f.type === 'tree') posts.push(f.distanceM * PX_PER_METER);
+    }
+
     const chunkWaters: WaterFeaturePos[] = [];
     for (const f of chunkFeatures) {
       switch (f.type) {
         case 'building':
-          this.renderBuilding(gfx, f, baselineY, elevRange, lightsGfx);
+          this.renderBuilding(gfx, f, baselineY, elevRange, lightsGfx, posts);
           break;
         case 'tree':
           this.renderTree(f, baselineY, elevRange, objects);
@@ -292,6 +338,7 @@ export class TerrainChunkManager2D {
     baselineY: number,
     elevRange: number,
     lightsGfx: Phaser.GameObjects.Graphics,
+    posts: readonly number[],
   ) {
     const groundY = this.getGroundY(feature.distanceM, baselineY, elevRange);
     const heightM = feature.props.render_height || feature.props.height || 8;
@@ -307,16 +354,51 @@ export class TerrainChunkManager2D {
 
     const bx = x - widthPx / 2;
     const by = groundY - heightPx;
-    this.strategy.renderBuilding(gfx, bx, by, widthPx, heightPx, colorIndex, hash);
+    // The land-use district this footprint stands in, resolved in the worker
+    // (see mvt-zone-worker.ts — the polygon rings never cross the postMessage).
+    // `undefined` is what a feature built by hand carries: the Welcome backdrop
+    // fabricates ProjectedFeatures with no map under them. It must land as
+    // UNZONED, not residential — outside every landuse polygon is most of a real
+    // route, and reading that as housing turns a country road into a suburb.
+    const zone = (feature.props.zone as ZoneKind | null | undefined) ?? null;
+    const drawn = this.strategy.renderBuilding(
+      gfx, bx, by, widthPx, heightPx, colorIndex, hash, zone, posts, this.signVocabulary);
 
-    // Warm window glows on the same grid the strategies use — a deterministic
-    // ~40% are lit. Drawn into the additive night-lights layer (F2).
+    // ── Night lights ──
+    // Ask the STYLE first, exactly the way the 3D `building-renderer` does.
+    // DEVPLAN's rule is that whatever decided the shape decides the lights, and
+    // the grid below cannot: it divides a bounding box into rows and columns and
+    // stamps the same little dot onto an eraser, an abacus and a domino wall
+    // alike. Declaring the hook and drawing nothing is a real answer ("this
+    // building has no lights"); only OMITTING it falls through to the grid.
+    if (this.strategy.renderBuildingLights) {
+      this.strategy.renderBuildingLights(
+        lightsGfx, bx, by, widthPx, heightPx, colorIndex, hash, zone);
+      return;
+    }
+
+    // The fallback grid, for a style that has not declared its lights yet.
+    //
+    // Laid over what `renderBuilding` REPORTED it drew, not over the nominal
+    // box (`plan/migrate-demo-worlds.md` §3.8). Styles reshape their box —
+    // snapping it up to a grid, or deliberately staying low and spreading wide —
+    // and a grid computed from the nominal box puts a short building's glows in
+    // the sky above it. A style that reports nothing gets the nominal box, which
+    // is what this always used.
+    //
+    // Warm glows, a deterministic ~40% lit. Cost is linear in the HEIGHT, which
+    // is why a themed body should never be on this path: a 125 m tower is ~120
+    // additive circles for one building.
+    const ex = drawn ? drawn.x : bx;
+    const ey = drawn ? drawn.y : by;
+    const ew = drawn ? drawn.w : widthPx;
+    const eh = drawn ? drawn.h : heightPx;
     const gap = 6, size = 2.4;
-    for (let wy = by + 5; wy < by + heightPx - 4; wy += gap) {
-      for (let wx = bx + 4; wx < bx + widthPx - 4; wx += gap) {
+    lightsGfx.fillStyle(0xffdd88, 0.9);
+    for (let wy = ey + 5; wy < ey + eh - 4; wy += gap) {
+      for (let wx = ex + 4; wx < ex + ew - 4; wx += gap) {
         const r = Math.sin(wx * 12.9898 + wy * 78.233) * 43758.5453;
         if (r - Math.floor(r) >= 0.42) continue;
-        lightsGfx.fillStyle(0xffdd88, 0.9);
         lightsGfx.fillCircle(wx, wy, size);
       }
     }
@@ -397,6 +479,16 @@ export class TerrainChunkManager2D {
 
     const glowGfx = this.scene.add.graphics();
     glowGfx.setDepth(15);
+    // The lamp's glow takes the same route past the night veil as the chunk
+    // window lights (option D): both 2D demos composite it there — plastic
+    // draws the bubble's shine on the glow layer (depth 40) over the veil
+    // (30, "夜幕壓在 depth 30,會亮的東西要畫在 glow 層(40)"), handdrawn on
+    // glowGfx 885 over 880. Unlike the window layer this one is visible by
+    // DAY too (always-on pulse), so it also rides above the lens tint and
+    // barrel distortion in daylight — the demos swap layers at nightfall
+    // instead, but a per-dusk camera swap buys back only a few px of
+    // distortion at the frame's corners. No-op in welcome mode (no veil).
+    this.scene.adoptNightLights(glowGfx);
     this.strategy.renderRoadLampGlow(glowGfx, 0, 0, seed);
     glowGfx.setPosition(x, groundY);
 
@@ -443,7 +535,14 @@ export class TerrainChunkManager2D {
     this.strategy.renderSand(gfx, x, groundY, 40, 5, seed);
   }
 
-  /** Render built-up-area ground tint — delegates to strategy. */
+  /** Render built-up-area ground tint — delegates to strategy.
+   *
+   *  The district comes straight off the polygon's own landuse class, not from
+   *  the `ZoneIndex` the buildings use: an `urban` feature IS a landuse polygon,
+   *  so asking the index which polygon it is inside would be asking it about
+   *  itself. `zoneFromLanduseClass` is the same function the worker builds the
+   *  index with, so the band and the buildings standing on it can never disagree
+   *  about what district this is. */
   private renderUrban(
     gfx: Phaser.GameObjects.Graphics,
     feature: ProjectedFeature,
@@ -453,8 +552,9 @@ export class TerrainChunkManager2D {
     const groundY = this.getGroundY(feature.distanceM, baselineY, elevRange);
     const x = feature.distanceM * PX_PER_METER;
     const seed = Math.abs(Math.round(x * 23)) % 100;
+    const zone = zoneFromLanduseClass(feature.props.class as string | undefined);
 
-    this.strategy.renderUrban(gfx, x, groundY, 60, 5, seed);
+    this.strategy.renderUrban(gfx, x, groundY, 60, 5, seed, zone);
   }
 
   /** Render a linear watercourse (river/canal/stream) crossing the route.
@@ -614,14 +714,38 @@ export function buildRoadSpans(
 }
 
 /**
- * Fetch MVT features along a route and project them to 2D.
- * Runs in a Web Worker to avoid blocking the main thread.
- * Returns ProjectedFeature[] sorted by distance.
+ * Fetch MVT features along a route, project them to 2D, and tag every building
+ * with its land-use zone. Runs in a Web Worker to avoid blocking the main
+ * thread. Returns ProjectedFeature[] sorted by distance.
+ *
+ * The worker is `./mvt-zone-worker.ts`, not the shared
+ * `terrain/mvt-worker-client.fetchFeaturesInWorker` this used to call: the
+ * zoning has to happen on the far side of the postMessage, because the landuse
+ * polygon rings it needs do not survive the trip. That file's header has the
+ * full argument.
  */
 export async function fetchAndProjectFeatures(
   points: RoutePoint[],
   cumulativeDists: number[],
 ): Promise<ProjectedFeature[]> {
   if (points.length < 2) return [];
-  return fetchFeaturesInWorker(points, cumulativeDists);
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(
+      new URL('./mvt-zone-worker.ts', import.meta.url),
+      { type: 'module' },
+    );
+    const bounds = computeRouteBounds(points);
+    // Strip Vue reactivity — Proxy objects are not structured-cloneable.
+    const plainPoints = points.map((p) => ({ lat: p.lat, lon: p.lon, ele: p.ele }));
+    worker.postMessage({ points: plainPoints, cumulativeDists: [...cumulativeDists], bounds });
+    worker.onmessage = (e) => {
+      if (e.data.ok) resolve(e.data.features);
+      else reject(new Error(e.data.error));
+      worker.terminate();
+    };
+    worker.onerror = (e) => {
+      reject(e);
+      worker.terminate();
+    };
+  });
 }

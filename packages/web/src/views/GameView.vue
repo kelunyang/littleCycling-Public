@@ -41,9 +41,19 @@
       <CountdownOverlay :countdown="activeCountdown" />
 
       <!-- Debug-only live style tuning (blocks/paper strategy params) -->
+      <SceneInspector
+        v-if="settingsStore.config.debug && isThreeJs"
+        :on="inspectorOn"
+        :hits="inspectorHits"
+        :pos="inspectorPos"
+      />
       <StyleTuningPanel
         v-if="settingsStore.config.debug && isThreeJs"
         :get-strategy="getTerrainStrategy"
+        :get-scene="getTerrainScene"
+        :set-inspector="setInspector"
+        :set-freeze-camera="setFreezeCamera"
+        :set-bypass-post="setBypassPost"
         :apply-post-params="applyTerrainStyleParams"
         :rebuild-terrain="rebuildTerrainMeshes"
         :world-style="worldStyle"
@@ -65,6 +75,7 @@
       :ball-bearing="ballPos.bearing"
       :elapsed-ms="gameLoop.elapsedMs.value"
       :distance-traveled="ballDist"
+      :total-route-dist-m="totalRouteDistM"
       :combo="coinSystem.comboMultiplier.value"
       :red-line="coinSystem.redLine.value"
       :virtual-power="effectivePower"
@@ -149,11 +160,14 @@ import { useGameMessages } from '@/composables/useGameMessages';
 import { useRandomEvents } from '@/composables/useRandomEvents';
 import { updateFpsCamera as updateMapLibreCamera } from '@/game/camera';
 import type { CoinLayerInterface } from '@/game/coin-interface';
-import { setDebugEnabled } from '@/game/debug-logger';
-import { AudioManager } from '@/game/audio/audio-manager';
+import { setDebugEnabled, debugLog } from '@/game/debug-logger';
+import { createQualityGovernor, type QualityGovernor } from '@/game/quality/graphics-quality';
+import { useThemeBgm } from '@/composables/useThemeBgm';
 import { useDocumentPiP } from '@/composables/useDocumentPiP';
 import { useWakeLock } from '@/composables/useWakeLock';
 import { usePlanStore } from '@/stores/planStore';
+import { useGhostStore } from '@/stores/ghostStore';
+import dayjs from 'dayjs';
 import MapContainer from '@/components/game/MapContainer.vue';
 import GlassesOverlay from '@/components/game/GlassesOverlay.vue';
 import Hud from '@/components/game/Hud.vue';
@@ -162,12 +176,14 @@ import PauseOverlay from '@/components/game/PauseOverlay.vue';
 import CountdownOverlay from '@/components/game/CountdownOverlay.vue';
 import LoadingIntroOverlay from '@/components/game/LoadingIntroOverlay.vue';
 import StyleTuningPanel from '@/components/game/StyleTuningPanel.vue';
+import SceneInspector from '@/components/game/SceneInspector.vue';
 import { notifyError } from '@/utils/notify';
 
 const router = useRouter();
 const routeStore = useRouteStore();
 const gameStore = useGameStore();
 const settingsStore = useSettingsStore();
+const ghostStore = useGhostStore();
 const sensorStore = useSensorStore();
 const loading = useLoadingStore();
 const planStore = usePlanStore();
@@ -354,27 +370,42 @@ const ws = useWebSocket();
 let mapSetup: MapSetupAPI | null = null;
 let threeBall: ThreeBallAPI | null = null;
 let terrainRenderer: TerrainRendererAPI | null = null;
+// Runtime graphics-quality governor (Three.js + 'auto' only). Fed one fps
+// sample/sec from the game loop; drives terrainRenderer.applyQualityTier.
+let qualityGovernor: QualityGovernor | null = null;
 
 // Phaser 2D renderer (Excitebike mode)
 const phaserRenderer = usePhaserRenderer();
 
 // ── Debug style-tuning panel bridges (Three.js world-style strategy) ──
 const getTerrainStrategy = () => terrainRenderer?.getStrategy() ?? null;
+const getTerrainScene = () => terrainRenderer?.getScene() ?? null;
+const inspectorOn = computed(() => terrainRenderer?.inspectorOn.value ?? false);
+const inspectorHits = computed(() => terrainRenderer?.inspectorHits.value ?? []);
+const inspectorPos = computed(() => terrainRenderer?.inspectorPos.value ?? { x: 0, y: 0 });
+const setInspector = (v: boolean) => {
+  if (!terrainRenderer) return;
+  terrainRenderer.inspectorOn.value = v;
+  // Drop the stale highlight/readout the moment the tool is switched off.
+  if (!v) terrainRenderer.inspectorHits.value = [];
+};
+const setFreezeCamera = (v: boolean) => {
+  if (terrainRenderer) terrainRenderer.freezeCamera.value = v;
+};
+const setBypassPost = (v: boolean) => {
+  if (terrainRenderer) terrainRenderer.bypassPost.value = v;
+};
 const applyTerrainStyleParams = () => terrainRenderer?.applyStyleParams();
 const rebuildTerrainMeshes = () => terrainRenderer?.rebuildTerrain();
 
 // Debug mode — enable global debug logger based on config
 setDebugEnabled(settingsStore.config.debug);
 
-// Audio manager — NES synth + ambient noise
-const audioManager = new AudioManager(isThreeJs.value || isPhaser.value);
-audioManager.setEnabled(settingsStore.config.sound.enabled);
-
-// Watch sound enabled toggle
-watch(
-  () => settingsStore.config.sound.enabled,
-  (on) => audioManager.setEnabled(on),
-);
+// Audio — NES synth + ambient noise + generative BGM. The manager is a session
+// singleton shared with WelcomeView, so the theme song the welcome screen was
+// already playing carries straight into the ride.
+const { audio: audioManager, start: startBgm } = useThemeBgm();
+audioManager.setAmbientEnabled(isThreeJs.value || isPhaser.value);
 
 // Real-time weather from Open-Meteo API
 const weatherApi = useWeatherApi();
@@ -402,7 +433,8 @@ const gameStateStore = useGameStateStore();
 watch(
   routePoints,
   (pts) => {
-    if (pts.length > 0) gameStateStore.setRoute(pts);
+    // 起點視窗:client 端的 cum→路線位置映射要跟 server sim 用同一個 offset。
+    if (pts.length > 0) gameStateStore.setRoute(pts, gameStore.startOffsetM);
   },
   { immediate: true },
 );
@@ -458,8 +490,19 @@ gameStateStore.onCoinOps(serverCoins.apply);
 // Track last frame time for dt calculation
 let lastFrameTime = 0;
 
+// Total route distance (metres), captured once at init — feeds the finish
+// banner's "remaining km" and the ghost gap board (template binding → ref).
+const totalRouteDistM = ref(0);
+
+// 幽靈車(P8):輪組動畫的 dt 來源(updateBallVisual 沒有 dt 參數)。
+let lastGhostFrameT = 0;
+let lastFinishFrameT = 0;
+
 // Game loop
 const gameLoop = useGameLoop({
+  // Feed the quality governor (only present in Three.js 'auto' mode). The loop
+  // already gates this to real riding frames (not paused, not hidden).
+  onFpsSample: (fps: number) => { qualityGovernor?.pushFpsSample(fps); },
   ballTick: () => {
     // No local physics — interpolate the buffered 20Hz server frames at
     // render time (~75ms behind receipt).
@@ -485,9 +528,53 @@ const gameLoop = useGameLoop({
       threeBall!.setDarkened(coinSystem.redLine.value);
     }
 
-    // Update checkpoint flags (fade passed ones)
+    // ── 幽靈車(P8)每幀餵位 ──
+    // 內插後的幽靈狀態來自 gameStateStore(與玩家同一條 server 幀管線);
+    // null = 本場無幽靈或封包空窗 → renderer 端隱藏不銷毀。
     if (isThreeJs.value) {
-      terrainRenderer!.updateCheckpointFlags(ballDist.value);
+      const nowT = performance.now();
+      const gdt = lastGhostFrameT > 0 ? Math.min(0.2, (nowT - lastGhostFrameT) / 1000) : 0;
+      lastGhostFrameT = nowT;
+      const gp = gameStateStore.ghostPosition;
+      terrainRenderer!.updateGhost(
+        gp && gameStateStore.ghostDistanceM !== null
+          ? { lat: gp.lat, lon: gp.lon, ele: gp.ele, bearing: gp.bearing, distM: gameStateStore.ghostDistanceM }
+          : null,
+        gdt,
+      );
+    } else if (isPhaser.value) {
+      phaserRenderer.updateGhost(
+        gameStateStore.ghostActive && gameStateStore.ghostDistanceM !== null
+          ? gameStateStore.ghostDistanceTraveled
+          : null,
+      );
+    }
+
+    // ── 終點飛船每幀餵位 ──
+    // 目標是 server 推估的「這趟實際會停在哪」;3D 端吃絕對距離(自帶平滑與
+    // Lakitu clamp),2D 端只要「前方多少公尺」。
+    const finishCum = gameStateStore.finishTargetCum;
+    if (finishCum !== null) {
+      if (isThreeJs.value) {
+        const nowT = performance.now();
+        const fdt = lastFinishFrameT > 0 ? Math.min(0.2, (nowT - lastFinishFrameT) / 1000) : 0;
+        lastFinishFrameT = nowT;
+        // finishTarget 與 cumulativeDistance 都是「已騎」空間;飛船內部用
+        // % totalDist 轉路線位置,所以兩者都要先加上起點偏移。
+        terrainRenderer!.updateFinishTarget(
+          finishCum + gameStore.startOffsetM,
+          gameStateStore.cumulativeDistance + gameStore.startOffsetM,
+          fdt,
+        );
+      } else if (isPhaser.value) {
+        phaserRenderer.updateFinishTarget(gameStateStore.finishRemainingM);
+      }
+    }
+
+    // Update checkpoint flags (fade passed ones). Three.js flags live on the
+    // RIDDEN axis (start-window & lap safe); Phaser keeps wrapped distance.
+    if (isThreeJs.value) {
+      terrainRenderer!.updateCheckpointFlags(gameStateStore.cumulativeDistance);
     } else if (isPhaser.value) {
       phaserRenderer.updateCheckpointFlags(ballDist.value);
     }
@@ -517,6 +604,14 @@ const gameLoop = useGameLoop({
         coinSystem.currentZone.value?.zone ?? null,
         ballSpeed.value,
       );
+      // 騎士的即時訊號 → 3D 造型層(曲柄轉速、以及宣告了 updateRiderSignals 的世界)。
+      // 純轉手:欄位就是 store 裡的欄位,`hasFrames` 只是「後端還沒開口」,那要傳成
+      // null 而不是 0 —— 0 W 是「沒踩」,null 是「不知道」。
+      terrainRenderer!.setRiderSignals({
+        cadenceRpm: currentCadence.value,
+        powerW: gameStateStore.hasFrames ? gameStateStore.powerW : null,
+        powerSource: gameStateStore.hasFrames ? gameStateStore.powerSource : null,
+      });
       terrainRenderer!.render(dt);
       // Update wind sound intensity based on speed (Three.js only)
       audioManager.updateWind(ballSpeed.value);
@@ -643,6 +738,36 @@ function tryLightning(elapsedMs: number) {
   lightningTick.nextEarliestMs = elapsedMs + 3000 + Math.random() * 9000;
 }
 watch(() => gameLoop.elapsedMs.value, tryLightning);
+
+// 幽靈車啟用(P8):第一個帶 ghost 的 server 幀到達時,把名牌文字交給當前
+// renderer(「幽靈 · <日期>」,日期來自 ghostStore 選定騎乘的 startedAt)。
+// 用 watch 而非 init 時機 — 對 handleContinue 重開局也成立。
+watch(() => gameStateStore.ghostActive, (active) => {
+  if (!active) return;
+  const startedAt = ghostStore.ghostRide?.startedAt;
+  const label = startedAt ? `幽靈 · ${dayjs(startedAt).format('M/D')}` : '幽靈';
+  if (isThreeJs.value) terrainRenderer?.setGhostInfo(label);
+  else if (isPhaser.value) phaserRenderer.setGhostInfo(label);
+});
+
+// Finish-banner feed — 1 Hz, driven by gameLoop time (same gating as lightning).
+// Both numbers now come from the server's finishTarget (CLAUDE.md: logic on the
+// backend), which in a timed session predicts where the ride actually ends
+// rather than pointing at the route's far end.
+const finishBannerTick = { lastMs: 0 };
+function tickFinishBanner(elapsedMs: number) {
+  const targetCum = gameStateStore.finishTargetCum;
+  if (targetCum === null) return;
+  if (elapsedMs - finishBannerTick.lastMs < 1000) return;
+  finishBannerTick.lastMs = elapsedMs;
+
+  const remainingKm = gameStateStore.finishRemainingM / 1000;
+  const remainingMs = gameStateStore.finishRemainingMs;
+
+  if (isThreeJs.value) terrainRenderer?.updateFinishBanner(remainingKm, remainingMs);
+  else if (isPhaser.value) phaserRenderer.updateFinishBanner(remainingKm, remainingMs);
+}
+watch(() => gameLoop.elapsedMs.value, tickFinishBanner);
 
 // ── Audio event watchers ──
 
@@ -785,6 +910,14 @@ async function beginRide() {
     }
     const data = await res.json();
     gameStore.currentRideId = data.rideId;
+    // The server decided the prescribed segments and recorded them with the
+    // ride; adopt them rather than keeping the copy the client built for the
+    // preview. Two independent derivations of the same workout drift — that is
+    // exactly how the coach ended up grading rides against a workout that never
+    // happened. Free rides send back an empty array, which correctly clears it.
+    if (Array.isArray(data.workoutSegments)) {
+      gameStore.workoutSegments = data.workoutSegments;
+    }
     gameStore.pendingStart = null; // clear only on success
     // The sim is born paused with auto-start armed: the pedal path self-starts
     // on the tick's first-signal rule, but a Space/click start has no power
@@ -926,6 +1059,8 @@ async function handleStop() {
   await finaliseRide();
 
   gameMessages.pushMessage('game-end');
+  // BGM keeps playing through the summary and back to the welcome screen —
+  // stopping it here would leave a hole the moment the ride ends.
   audioManager.gameEnd();
 
   gameStore.endGame();
@@ -957,6 +1092,10 @@ function handleContinue() {
           targetDurationMs: settingsStore.config.training.defaultDuration,
           randomEventsEnabled: gameStore.randomEventsEnabled,
           selectedWorkoutId: gameStore.selectedWorkoutId,
+          // 幽靈跟著續騎(P8)— 與 StartBar 的組建條件一致。
+          ghostRideId: gameStore.ghostPickerEnabled && ghostStore.ghostRideId
+            ? ghostStore.ghostRideId
+            : undefined,
         }
       : undefined,
   };
@@ -973,6 +1112,7 @@ watch(
   async (state) => {
     if (state === 'playing') {
       finaleFired = false; // a new ride gets its own finale
+      finishBannerTick.lastMs = 0; // re-arm the banner tick (elapsed resets)
       return;
     }
     if (state === 'ended') {
@@ -1015,11 +1155,16 @@ onMounted(async () => {
   // Up before anything awaits, so the black canvas is covered from frame one.
   loading.reset(settingsStore.config.map.renderMode);
 
+  // Failsafe ceiling on the loading gate. The threejs path unlocks the instant
+  // its preload gate (current + next chunk built) resolves — see below — so its
+  // ceiling is only a backstop for a hung tile server and can be generous. Other
+  // render modes keep the flat LOADING_TIMEOUT_MS behaviour unchanged.
+  const failsafeMs = isThreeJs.value ? 60_000 : LOADING_TIMEOUT_MS;
   const unlockTimer = setTimeout(() => {
     if (!loading.unlocked) {
       loading.unlock('載入時間過長，部分場景仍在背景載入');
     }
-  }, LOADING_TIMEOUT_MS);
+  }, failsafeMs);
 
   const stopUnlockWatch = watch(
     () => loading.allDone,
@@ -1074,10 +1219,55 @@ onMounted(async () => {
         pitchDeg: mapConfig.cameraPitch,
       },
       corridorHalfWidth: mapConfig.viewRange,
+      // 起點視窗:preload 以這個里程所在的 chunk 為中心,而不是 chunk 0。
+      startDistanceM: gameStore.startOffsetM,
       dayNightEnabled: mapConfig.dayNightEnabled,
       // World style: 'plastic' → blocks, 'cuphead' → corrugated paper.
       worldStyle: mapConfig.worldStyle,
+      // The rider's per-world knobs (welcome screen → World drawer). Sparse:
+      // absent = the world's declared default, so tuning a default later still
+      // reaches people who have already played.
+      worldOptions: mapConfig.worldOptions,
+      // Graphics-quality tier: 'auto' hands runtime control to the governor
+      // created below; a fixed tier pins the effect budget.
+      graphicsQuality: mapConfig.graphicsQuality,
+      resolvedQualityTier: mapConfig.resolvedQualityTier,
+      // 訓練模式的店面招牌改喊激勵詞(GO / PLAY / …),自由騎維持店名。
+      //
+      // 判定用的是「這趟騎乘有沒有 prescribed segments」,不是階段的強度或名稱 ——
+      // 那條線只走到里程碑旗子,而招牌換的是語域不是儀表(見 `SignVocabulary`)。
+      //
+      // 讀的是 `startGame()` 建的暫時版而不是伺服器版:伺服器的那份要等
+      // `/api/live/start` 回來,而第一批 chunk 早就開建了。**只有「空不空」這件事
+      // 會被讀到**,而空不空在來回之前就定了 —— 自由騎兩邊都空,訓練兩邊都不空
+      // (`resolvePrescribedSegments` 跟 `startGame` 走同一組 workoutId / plan)。
+      signVocabulary: gameStore.workoutSegments.length > 0 ? 'training' : 'shop',
     });
+
+    // Unlock the "start riding" button the moment the preload gate resolves —
+    // i.e. the current + next chunk are in the scene. The rest of the world keeps
+    // streaming in behind the (dismissable) overlay. whenTerrainReady never
+    // rejects (a failed preload resolves, degraded), so this always fires long
+    // before the 60s failsafe on a slow dense route.
+    void terrainRenderer.whenTerrainReady().then(() => {
+      if (!loading.unlocked) {
+        clearTimeout(unlockTimer);
+        loading.unlock();
+      }
+    });
+
+    // Quality governor — only in 'auto'. A manual tier disables runtime tuning.
+    if (mapConfig.graphicsQuality === 'auto') {
+      qualityGovernor = createQualityGovernor({
+        initialTier: terrainRenderer.getTier(),
+        onTierChange: (tier, reason) => {
+          terrainRenderer?.applyQualityTier(tier);
+          debugLog('terrain', `Quality governor → ${tier}`, { reason });
+          // Persist so the next launch warm-starts here instead of re-probing.
+          settingsStore.updateMap({ resolvedQualityTier: tier });
+        },
+      });
+    }
 
     // Set coin layer to terrain renderer
     coinLayer.value = {
@@ -1110,6 +1300,15 @@ onMounted(async () => {
       { immediate: true },
     );
 
+    // Cloud deck altitude, from the weather's temperature/dew-point spread.
+    // Re-pushed on every 15-minute poll: the condensation level moves with the
+    // day, so a morning deck really should lift by the afternoon.
+    watch(
+      () => weatherApi.cloudBaseAltitudeM.value,
+      (baseAltitudeM) => terrainRenderer!.setCloudLayer(baseAltitudeM),
+      { immediate: true },
+    );
+
     // Glasses lens mode
     watch(
       () => gameStore.glassesLens,
@@ -1130,6 +1329,10 @@ onMounted(async () => {
     terrainRenderer.updatePosition([startPos.lon, startPos.lat], startPos.ele);
     terrainRenderer.updateCamera(startPos.bearing, 0);
     terrainRenderer.render(0);
+
+    // Capture total route distance for the finish banner (1 Hz ticker).
+    const cumDists = buildCumulativeDistances(pts);
+    totalRouteDistM.value = cumDists.length > 0 ? cumDists[cumDists.length - 1] : 0;
 
     // Rain sound driven by weather (Three.js mode only)
     watch(
@@ -1154,6 +1357,7 @@ onMounted(async () => {
 
     gameLoop.start();
     audioManager.gameStart();
+    startBgm();
     markFirstFrame();
   } else if (isPhaser.value) {
     // ── Phaser 2D Excitebike mode ──
@@ -1167,7 +1371,13 @@ onMounted(async () => {
     canvas.width = canvas.clientWidth;
     canvas.height = canvas.clientHeight;
 
-    await phaserRenderer.init({ canvas, points: pts });
+    // 招牌詞彙:跟 Three.js 那條線同一個判定、同一份注解（見上面的 3D 分支）——
+    // 「這趟騎乘有沒有 prescribed segments」，不是階段強度也不是階段名稱。
+    await phaserRenderer.init({
+      canvas,
+      points: pts,
+      signVocabulary: gameStore.workoutSegments.length > 0 ? 'training' : 'shop',
+    });
 
     // Set coin layer to Phaser renderer
     coinLayer.value = {
@@ -1217,11 +1427,14 @@ onMounted(async () => {
     phaserRenderer.updateDistance(0);
     phaserRenderer.render(0);
 
+    // Capture total route distance for the finish banner (1 Hz ticker).
+    const cumDists = buildCumulativeDistances(pts);
+    totalRouteDistM.value = cumDists.length > 0 ? cumDists[cumDists.length - 1] : 0;
+
     // Draw workout segment flags if applicable
     if (gameStore.workoutSegments.length > 1) {
       const totalMs = workoutTracker.totalDurationMs.value;
-      const cumDists = buildCumulativeDistances(pts);
-      const totalDist = cumDists.length > 0 ? cumDists[cumDists.length - 1] : 0;
+      const totalDist = totalRouteDistM.value;
       if (totalMs > 0 && totalDist > 0) {
         let cumTime = 0;
         const flags = gameStore.workoutSegments.map((seg: any) => {
@@ -1255,6 +1468,7 @@ onMounted(async () => {
 
     gameLoop.start();
     audioManager.gameStart();
+    startBgm();
     markFirstFrame();
   } else {
     // ── MapLibre mode (legacy) ──
@@ -1301,6 +1515,7 @@ onMounted(async () => {
             });
             gameLoop.start();
             audioManager.gameStart();
+            startBgm();
             markFirstFrame();
           }, 500);
         }
@@ -1336,6 +1551,8 @@ onUnmounted(() => {
   pip.close();
 
   gameLoop.stop();
+  qualityGovernor?.dispose();
+  qualityGovernor = null;
   serverCoins.clear();
   windSim.stop();
   gameStateStore.reset();
@@ -1344,7 +1561,9 @@ onUnmounted(() => {
   terrainRenderer?.dispose();
   phaserRenderer.dispose();
   mapSetup?.dispose();
-  audioManager.dispose();
+  // Not dispose() — the manager is shared with WelcomeView and closing its
+  // AudioContext would cut the theme song off mid-bar on the way back.
+  audioManager.stopGameSounds();
 });
 </script>
 

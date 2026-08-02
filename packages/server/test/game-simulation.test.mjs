@@ -524,3 +524,115 @@ test('explicit pause takes over: auto-start disabled once a client controls paus
   assert.equal(sim.state.paused, false);
   assert.ok(sim.state.cumulativeDistance > 0, 'moves after explicit resume');
 });
+
+// ── 終點飛船目標(finishTarget)──
+// 限時模式下「終點」是時間到的位置,不是路線終點。EuroVelo 那種千公里路線
+// 踩 30 分鐘永遠到不了路線終點,飛船若釘在路線終點就等於不存在。
+
+test('finishTarget: 限時模式預估「時間到會停在哪」,並隨時間收斂到玩家身上', () => {
+  const { sim, snap, step, frames } = makeSim({
+    config: { targetDurationMs: 60_000, randomEventsEnabled: false },
+  });
+  snap.value = { power: 200, hr: 140 };
+  step(1000); // auto-start
+
+  // 20 秒後:均速已穩定,預估終點應在前方約「剩餘 40 秒 × 均速」。
+  for (let i = 0; i < 19; i++) step(1000);
+  const ft = frames[frames.length - 1].finishTarget;
+  assert.ok(ft, 'finishTarget 隨每幀廣播');
+  assert.equal(ft.predicted, true, '限時模式 = 預估');
+  assert.equal(ft.remainingMs, 40_000);
+
+  const avgMs = sim.state.cumulativeDistance / 20_000; // m per ms
+  const expected = avgMs * 40_000;
+  assert.ok(
+    Math.abs(ft.remainingM - expected) < expected * 0.05,
+    `剩餘距離 ≈ 均速×剩餘時間(expected ${expected.toFixed(1)}, got ${ft.remainingM.toFixed(1)})`,
+  );
+  assert.ok(
+    Math.abs(ft.cumulativeM - (sim.state.cumulativeDistance + ft.remainingM)) < 1e-6,
+    'cumulativeM 與 remainingM 同軸一致',
+  );
+
+  // 再騎到時間上限 → 預估終點收斂到玩家身上(飛船迎面而來)。
+  // 注意:結束的那一 tick 之後 sim 就 ended,最後一幀停在 target 前一步,
+  // 所以這裡驗「收斂」而非剛好等於 0。
+  for (let i = 0; i < 40; i++) step(1000);
+  const end = frames[frames.length - 1].finishTarget;
+  assert.ok(end.remainingMs <= 1000, `剩餘時間收斂到 0,got ${end.remainingMs}`);
+  assert.ok(
+    end.remainingM < ft.remainingM * 0.05,
+    `剩餘距離收斂到 ~0(from ${ft.remainingM.toFixed(1)} to ${end.remainingM.toFixed(1)})`,
+  );
+});
+
+test('finishTarget: 倒數走 wall-clock — 暫停時 gameTimeMs 凍結但結束時鐘照走', () => {
+  // 結束判定是 elapsed >= targetDurationMs(牆鐘,暫停不停錶)。倒數若用
+  // active-play 時鐘,暫停過的場次會多報整段暫停時間,遊戲在看板還沒歸零
+  // 時就結束 — 這裡騎 10s、暫停 20s,驗倒數反映的是牆鐘。
+  const { sim, snap, step, frames } = makeSim({
+    config: { targetDurationMs: 60_000, randomEventsEnabled: false },
+  });
+  snap.value = { power: 200, hr: 140 };
+  for (let i = 0; i < 10; i++) step(1000); // auto-start + 騎 10s
+
+  sim.setPaused(true);
+  for (let i = 0; i < 20; i++) step(1000); // 暫停 20s(牆鐘 30s,active 10s)
+  const ft = frames[frames.length - 1].finishTarget;
+  assert.equal(ft.remainingMs, 30_000, '剩餘時間 = 60s − 牆鐘 30s,不是 − active 10s');
+
+  // 暫停中距離凍結 → 預估位置也跟著往回收(剩餘時間變少、均速不變)。
+  sim.setPaused(false);
+  step(1000);
+  assert.ok(
+    frames[frames.length - 1].finishTarget.remainingMs === 29_000,
+    '恢復後繼續按牆鐘倒數',
+  );
+});
+
+test('finishTarget: freeRoam 位置照樣預估,但 remainingMs 為 null(看板只顯示公里)', () => {
+  // 正式流程 API 保證 targetDurationMs > 0(freeRoam 也送 defaultDuration,
+  // sim 一樣在時限到時結束)— 指路線終點的話,長路線(EuroVelo)永遠看不到
+  // 飛船,重蹈這功能要修的原始 bug。
+  const { sim, snap, step, frames } = makeSim({
+    config: { freeRoam: true, targetDurationMs: 60_000, randomEventsEnabled: false },
+  });
+  snap.value = { power: 200, hr: 140 };
+  for (let i = 0; i < 20; i++) step(1000);
+
+  const ft = frames[frames.length - 1].finishTarget;
+  assert.equal(ft.predicted, true, 'freeRoam 也走時限預估');
+  assert.equal(ft.remainingMs, null, '但不倒數 — 自由騎看板只顯示公里');
+  const avgMs = sim.state.cumulativeDistance / 20_000;
+  const expected = avgMs * 40_000;
+  assert.ok(
+    Math.abs(ft.remainingM - expected) < expected * 0.05,
+    `位置預估與限時模式同一套(expected ${expected.toFixed(1)}, got ${ft.remainingM.toFixed(1)})`,
+  );
+});
+
+test('finishTarget: 無時間目標(僅測試可達)時指向本圈路線終點,且每圈重新出現在前方', () => {
+  const { sim, snap, step, frames } = makeSim({
+    config: { freeRoam: true, targetDurationMs: 0, randomEventsEnabled: false },
+  });
+  snap.value = { power: 200, hr: 140 };
+  step(1000);
+
+  const ft = frames[frames.length - 1].finishTarget;
+  assert.equal(ft.predicted, false, '無時間目標 = 路線實體終點');
+  assert.equal(ft.remainingMs, null, '看板只顯示公里');
+
+  // 路線 ~111 m;騎到第二圈後目標應跳到第二圈的終點,而非停在第一圈。
+  const lapLen = ft.cumulativeM;
+  assert.ok(lapLen > 100 && lapLen < 125, `第一圈終點 ≈ 路線長,got ${lapLen.toFixed(1)}`);
+  for (let i = 0; i < 30; i++) step(1000); // 遠超一圈
+  const next = frames[frames.length - 1].finishTarget;
+  assert.ok(
+    next.cumulativeM > sim.state.cumulativeDistance,
+    '目標永遠在玩家前方(本圈終點)',
+  );
+  assert.ok(
+    Math.abs(next.cumulativeM - (sim.state.laps + 1) * lapLen) < 1e-6,
+    '目標 = (已完成圈數+1) × 圈長',
+  );
+});

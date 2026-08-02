@@ -13,6 +13,12 @@
       </button>
 
       <div v-if="elevExpanded" class="start-bar__elev-full">
+        <RouteStartWindow
+          v-if="routeStore.activeRoute"
+          v-model="gameStore.startOffsetM"
+          :route-points="routeStore.activeRoute.points"
+          :target-duration-ms="settingsStore.config.training.defaultDuration"
+        />
         <WorkoutElevationPreview
           v-if="routeStore.activeRoute"
           :route-points="routeStore.activeRoute.points"
@@ -52,7 +58,7 @@
         size="large"
         :disabled="!allPassed"
         class="start-bar__start"
-        @click="openComparisonDialog"
+        @click="openGhostDialog"
       >
         <font-awesome-icon icon="play" style="margin-right: 8px;" />
         Start Ride
@@ -244,45 +250,45 @@
       </div>
     </el-drawer>
 
-    <!-- Comparison ride picker — a list-pick, so it wears the same fullscreen
+    <!-- Ghost ride picker — a list-pick, so it wears the same fullscreen
          drawer as the appearance pickers rather than a dialog. Closing it is
          *not* a cancel: the ride is already starting, so the close button means
-         "skip the comparison", same as the Skip button. -->
+         "skip the ghost", same as the Skip button. -->
     <el-drawer
-      v-model="showCompareDialog"
+      v-model="showGhostDialog"
       direction="btt"
       size="100%"
       :with-header="false"
       :close-on-click-modal="false"
       append-to-body
-      class="compare-drawer"
-      @close="onCompareDrawerClose"
+      class="ghost-drawer"
+      @close="onGhostDrawerClose"
     >
-      <div class="compare-drawer__header">
+      <div class="ghost-drawer__header">
         <h3>
-          <font-awesome-icon icon="clock-rotate-left" />
-          Load Comparison Ride?
+          <font-awesome-icon icon="ghost" />
+          選擇幽靈車?
         </h3>
-        <el-button circle @click="proceedWithoutComparison">
+        <el-button circle @click="proceedWithoutGhost">
           <font-awesome-icon icon="xmark" />
         </el-button>
       </div>
 
-      <div class="compare-drawer__body">
-        <div v-if="historyRides.length === 0" class="compare-drawer__empty">
+      <div class="ghost-drawer__body">
+        <div v-if="historyRides.length === 0" class="ghost-drawer__empty">
           No previous rides found.
         </div>
 
         <div
           v-for="ride in historyRides"
           :key="ride.id"
-          class="compare-drawer__item"
-          :class="{ 'compare-drawer__item--selected': comparisonStore.compareRideId === ride.id }"
-          @click="toggleCompare(ride.id)"
+          class="ghost-drawer__item"
+          :class="{ 'ghost-drawer__item--selected': ghostStore.ghostRideId === ride.id }"
+          @click="toggleGhost(ride.id)"
         >
-          <div class="compare-drawer__info">
-            <span class="compare-drawer__date">{{ formatDate(ride.startedAt) }}</span>
-            <span class="compare-drawer__stats">
+          <div class="ghost-drawer__info">
+            <span class="ghost-drawer__date">{{ formatDate(ride.startedAt) }}</span>
+            <span class="ghost-drawer__stats">
               {{ formatDuration(ride.durationMs) }}
               <template v-if="ride.avgHr"> | {{ Math.round(ride.avgHr) }} bpm</template>
               <template v-if="ride.avgPowerW"> | {{ Math.round(ride.avgPowerW) }} W</template>
@@ -290,21 +296,21 @@
             </span>
           </div>
           <font-awesome-icon
-            v-if="comparisonStore.compareRideId === ride.id"
+            v-if="ghostStore.ghostRideId === ride.id"
             icon="check"
-            class="compare-drawer__check"
+            class="ghost-drawer__check"
           />
         </div>
       </div>
 
-      <div class="compare-drawer__footer">
-        <el-button @click="proceedWithoutComparison">
+      <div class="ghost-drawer__footer">
+        <el-button @click="proceedWithoutGhost">
           <font-awesome-icon icon="xmark" style="margin-right: 6px;" />
           Skip
         </el-button>
         <el-button type="primary" @click="proceedToGame">
           <font-awesome-icon icon="play" style="margin-right: 6px;" />
-          {{ comparisonStore.compareRideId ? 'Start with Comparison' : 'Start Ride' }}
+          {{ ghostStore.ghostRideId ? '與幽靈對騎' : 'Start Ride' }}
         </el-button>
       </div>
     </el-drawer>
@@ -312,7 +318,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import dayjs from 'dayjs';
 import type { Ride } from '@littlecycling/shared';
@@ -321,22 +327,29 @@ import { useRouteStore } from '@/stores/routeStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useSensorStore } from '@/stores/sensorStore';
 import { useGameStore } from '@/stores/gameStore';
-import { useComparisonStore } from '@/stores/comparisonStore';
+import { useGhostStore } from '@/stores/ghostStore';
 import { usePlanStore } from '@/stores/planStore';
 import { notifyWarn } from '@/utils/notify';
 import WorkoutElevationPreview from './WorkoutElevationPreview.vue';
+import RouteStartWindow from './RouteStartWindow.vue';
 
 const router = useRouter();
 const routeStore = useRouteStore();
 const settingsStore = useSettingsStore();
 const sensorStore = useSensorStore();
 const gameStore = useGameStore();
-const comparisonStore = useComparisonStore();
+const ghostStore = useGhostStore();
 const planStore = usePlanStore();
 
-const elevExpanded = ref(false);
+// Open by default: this is the control for WHERE and HOW FAR you ride, not an
+// optional detail, and collapsed it was a strip of elevation with no hint that
+// the start point could be dragged at all.
+const elevExpanded = ref(true);
+
+// 換路線時起點視窗歸零——上一條路線的里程對新路線沒有意義。
+watch(() => routeStore.activeRoute?.id, () => { gameStore.startOffsetM = 0; });
 const showSensorDrawer = ref(false);
-const showCompareDialog = ref(false);
+const showGhostDialog = ref(false);
 const historyRides = ref<Ride[]>([]);
 const mapReachable = ref(false);
 const starting = ref(false);
@@ -371,7 +384,11 @@ async function rescanSensors() {
 const workoutPreviewSegments = computed(() => {
   const profile = WORKOUT_PROFILES_MAP[gameStore.selectedWorkoutId];
   if (!profile) return [];
-  return buildWorkoutSegments(profile, settingsStore.config.training.defaultDuration);
+  // Same options the ride will use (gameStore.startGame) — a preview that
+  // disagrees with the ride is worse than no preview.
+  return buildWorkoutSegments(profile, settingsStore.config.training.defaultDuration, {
+    repeat: settingsStore.config.training.repeatWorkout ?? false,
+  });
 });
 
 const todayTrainingSessions = computed(() =>
@@ -450,47 +467,47 @@ async function fetchHistoryRides() {
   }
 }
 
-function openComparisonDialog() {
-  comparisonStore.clear();
+function openGhostDialog() {
+  ghostStore.clear();
   // The picker only appears when the welcome-screen switch is on; otherwise
-  // Start launches the ride directly with no comparison.
-  if (!gameStore.comparePickerEnabled) {
+  // Start launches the ride directly with no ghost.
+  if (!gameStore.ghostPickerEnabled) {
     launchGame();
     return;
   }
   fetchHistoryRides();
-  showCompareDialog.value = true;
+  showGhostDialog.value = true;
 }
 
-function toggleCompare(rideId: number) {
-  if (comparisonStore.compareRideId === rideId) {
-    comparisonStore.clear();
+function toggleGhost(rideId: number) {
+  if (ghostStore.ghostRideId === rideId) {
+    ghostStore.clear();
   } else {
-    comparisonStore.selectRide(rideId);
+    ghostStore.selectRide(rideId);
   }
 }
 
-function proceedWithoutComparison() {
-  comparisonStore.clear();
-  showCompareDialog.value = false;
+function proceedWithoutGhost() {
+  ghostStore.clear();
+  showGhostDialog.value = false;
   launchGame();
 }
 
 function proceedToGame() {
-  showCompareDialog.value = false;
+  showGhostDialog.value = false;
   launchGame();
 }
 
 /**
- * Dismissing the drawer (Esc / close button) means "skip the comparison" — the
+ * Dismissing the drawer (Esc / close button) means "skip the ghost" — the
  * ride is already on its way, so we must not leave the user stranded on the
  * welcome screen. Guarded on `starting` because Skip/Start close the drawer
  * themselves, and this would otherwise fire *after* proceedToGame() and clear
- * the comparison the user just picked.
+ * the ghost the user just picked.
  */
-function onCompareDrawerClose() {
+function onGhostDrawerClose() {
   if (starting.value) return;
-  proceedWithoutComparison();
+  proceedWithoutGhost();
 }
 
 function launchGame() {
@@ -517,9 +534,17 @@ function launchGame() {
           targetDurationMs: settingsStore.config.training.defaultDuration,
           randomEventsEnabled: gameStore.randomEventsEnabled,
           selectedWorkoutId: gameStore.selectedWorkoutId,
+          repeatWorkout: settingsStore.config.training.repeatWorkout ?? false,
+          // 起點視窗:server sim 與 client 內插都從這個里程起算。
+          startOffsetM: gameStore.startOffsetM,
           planRef: todayTraining
             ? { planId: todayTraining.plan.id, day: todayTraining.day }
             : undefined,
+          // 幽靈車模式:switch 開著且已選歷史騎乘時帶上,後端載入其 trace。
+          ghostRideId:
+            gameStore.ghostPickerEnabled && ghostStore.ghostRideId !== null
+              ? ghostStore.ghostRideId
+              : undefined,
         }
       : undefined,
   };
@@ -762,8 +787,8 @@ onUnmounted(() => {
   letter-spacing: 1px;
 }
 
-/* ── Comparison drawer ── mirrors the appearance drawers in StartChecklist. */
-.compare-drawer__header {
+/* ── Ghost drawer ── mirrors the appearance drawers in StartChecklist. */
+.ghost-drawer__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -772,7 +797,7 @@ onUnmounted(() => {
   border-bottom: 1.5px solid var(--hud-border);
 }
 
-.compare-drawer__header h3 {
+.ghost-drawer__header h3 {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -784,7 +809,7 @@ onUnmounted(() => {
   color: var(--hud-cyan);
 }
 
-.compare-drawer__body {
+.ghost-drawer__body {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -797,7 +822,7 @@ onUnmounted(() => {
   scrollbar-color: rgba(var(--accent-rgb), 0.3) transparent;
 }
 
-.compare-drawer__empty {
+.ghost-drawer__empty {
   font-size: 12px;
   color: var(--hud-text);
   opacity: 0.6;
@@ -807,7 +832,7 @@ onUnmounted(() => {
   letter-spacing: 0.5px;
 }
 
-.compare-drawer__item {
+.ghost-drawer__item {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -820,31 +845,31 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
-.compare-drawer__item:hover {
+.ghost-drawer__item:hover {
   background: rgba(var(--accent-rgb), 0.06);
   border-color: rgba(var(--accent-rgb), 0.3);
 }
 
-.compare-drawer__item--selected {
+.ghost-drawer__item--selected {
   background: rgba(var(--accent-rgb), 0.1);
   border-color: var(--hud-cyan);
   box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.2);
 }
 
-.compare-drawer__info {
+.ghost-drawer__info {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.compare-drawer__date {
+.ghost-drawer__date {
   color: var(--hud-text-bright);
   font-family: var(--font-display);
   font-weight: 600;
   letter-spacing: 0.5px;
 }
 
-.compare-drawer__stats {
+.ghost-drawer__stats {
   color: var(--hud-text);
   opacity: 0.7;
   font-size: 10px;
@@ -852,12 +877,12 @@ onUnmounted(() => {
   text-transform: uppercase;
 }
 
-.compare-drawer__check {
+.ghost-drawer__check {
   color: var(--zone-3);
   font-size: 16px;
 }
 
-.compare-drawer__footer {
+.ghost-drawer__footer {
   display: flex;
   justify-content: flex-end;
   gap: 10px;

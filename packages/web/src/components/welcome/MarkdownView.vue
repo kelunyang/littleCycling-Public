@@ -50,7 +50,8 @@ const MdPreview = shallowRef<Component | null>(null);
 const sanitize = ref<(html: string) => string>((html) => html);
 
 // worldStyle 與 App.vue 同源（含 ?? 'plastic' 的預設,兩邊要一致）:
-// plastic / cuphead → 淺色,其餘（cyberpunk 基底）→ 深色。
+// plastic / cuphead → 淺色紙卡;circuit → 深色（決定,不是 fallthrough:電路
+// 世界的 UI 底是暗色 PCB / cyberpunk 基調）;其餘（cyberpunk 基底）→ 深色。
 const mdTheme = computed<'light' | 'dark'>(() => {
   const ws = settingsStore.config.map.worldStyle ?? 'plastic';
   return ws === 'plastic' || ws === 'cuphead' ? 'light' : 'dark';

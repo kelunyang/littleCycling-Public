@@ -6,10 +6,11 @@
 import { ref, computed, onMounted, toRef } from 'vue';
 import { useWelcomeBackdrop } from '@/composables/useWelcomeBackdrop';
 import { useGameStore } from '@/stores/gameStore';
+import { useSettingsStore } from '@/stores/settingsStore';
 import type { WeatherType } from '@/game/phaser/phaser-weather';
 
 const props = withDefaults(
-  defineProps<{ styleVariant?: 'plastic' | 'cuphead' }>(),
+  defineProps<{ styleVariant?: 'plastic' | 'cuphead' | 'circuit' }>(),
   { styleVariant: 'cuphead' },
 );
 
@@ -25,7 +26,13 @@ const weatherType = computed<WeatherType | null>(() => {
 });
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
-const { init } = useWelcomeBackdrop(toRef(props, 'styleVariant'), weatherType);
+const settingsStore = useSettingsStore();
+const { init } = useWelcomeBackdrop(
+  toRef(props, 'styleVariant'),
+  weatherType,
+  // 世界選項要跟著進預覽:騎士是**看著這張圖**在翻開關的。
+  () => settingsStore.config.map.worldOptions,
+);
 
 onMounted(async () => {
   if (!canvasRef.value) return;

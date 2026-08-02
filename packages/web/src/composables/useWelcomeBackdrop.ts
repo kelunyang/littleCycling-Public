@@ -18,6 +18,7 @@
 
 import { onBeforeUnmount, toValue, watch, type MaybeRefOrGetter } from 'vue';
 import type Phaser from 'phaser';
+import { resolveWorldOptions, type WorldOptionsConfig } from '@littlecycling/shared';
 import { createPhaserGame, type PhaserGameInstance } from '@/game/phaser/phaser-game';
 import {
   createStyleStrategy,
@@ -234,6 +235,10 @@ const ROAD_SAMPLE_STEP_M = 10;
 export function useWelcomeBackdrop(
   styleVariant: MaybeRefOrGetter<PhaserStyle>,
   weatherType: MaybeRefOrGetter<WeatherType | null> = () => null,
+  // The rider flips a world option while LOOKING at this backdrop. Without it
+  // the preview always renders the default, so cupheads 上色 switch appears to
+  // do nothing until the ride starts.
+  worldOptions: MaybeRefOrGetter<WorldOptionsConfig | undefined> = () => undefined,
 ) {
   const resolveWeather = (): WeatherType =>
     toValue(weatherType) ?? WELCOME_WEATHER_FALLBACK;
@@ -257,7 +262,10 @@ export function useWelcomeBackdrop(
     canvas.width = Math.max(320, Math.floor(rect.width));
     canvas.height = Math.max(240, Math.floor(rect.height));
 
-    strategy = await createStyleStrategy(toValue(styleVariant));
+    strategy = await createStyleStrategy(
+      toValue(styleVariant),
+      resolveWorldOptions(toValue(styleVariant), toValue(worldOptions)),
+    );
     gameInstance = await createPhaserGame(canvas, strategy, { mode: 'welcome' });
     await gameInstance.scene.ready;
 
@@ -458,7 +466,10 @@ export function useWelcomeBackdrop(
     () => toValue(styleVariant),
     async (newVariant) => {
       if (!gameInstance || !weatherSystem || !cyclistSprite) return;
-      const newStrategy = await createStyleStrategy(newVariant);
+      const newStrategy = await createStyleStrategy(
+        newVariant,
+        resolveWorldOptions(newVariant, toValue(worldOptions)),
+      );
       strategy = newStrategy;
       gameInstance.scene.setStrategy(newStrategy);
       weatherSystem.setStrategy(newStrategy);

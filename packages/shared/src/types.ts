@@ -1,3 +1,4 @@
+import type { WorkoutSegment } from './workouts.js';
 /**
  * Shared type definitions for littleCycling.
  * Used by both server (recorder/replay) and web (game frontend).
@@ -214,6 +215,56 @@ export interface WsGameStateMessage {
     reconcile?: CoinDto[];
   };
   event?: GameEventDto;
+  /** 幽靈車（P8）— 只在本場開啟幽靈模式時出現。幽靈沿自己錄下的
+   *  distance-vs-time 曲線推進,時間軸對齊本場的 gameTimeMs(active-play,
+   *  暫停凍結),所以玩家暫停時幽靈也停,對比公平。 */
+  ghost?: {
+    /** 幽靈當下的單調累積距離(m)— 前端用它經 interpolateAlongRoute 定位。 */
+    distanceM: number;
+    /** 由 distanceM 推導的圈數(與玩家同一 totalDist)。 */
+    laps: number;
+    /** 時間差(ms):幽靈「首次到達玩家目前距離」的時刻 − 玩家目前 gameTimeMs。
+     *  正值 = 玩家領先(比幽靈更早到達這裡),負值 = 落後。 */
+    gapMs: number;
+    /** 幽靈已騎完它錄下的全程(停在終點距離,不消失)。 */
+    finished: boolean;
+  };
+  /** 終點飛船要飄在哪裡。「終點」不等於路線終點——限時模式(FTP 30 分)是
+   *  時間到就結束,真正的結束點是「用目前均速再騎完剩餘時間」的預估位置。
+   *  由 server 算(CLAUDE.md:邏輯在後端),2D/3D 共用同一個值。 */
+  finishTarget?: {
+    /** 預估結束時的單調累積距離(m)— 與 cumulativeDistance 同軸。 */
+    cumulativeM: number;
+    /** cumulativeM − cumulativeDistance(m,>=0)。 */
+    remainingM: number;
+    /** 剩餘時間(ms,wall-clock — 結束判定的同一個鐘);freeRoam 時為 null
+     *  (自由騎看板只顯示公里,不倒數;位置照樣預估)。 */
+    remainingMs: number | null;
+    /** true = 由剩餘時間×均速推估(會隨配速漂移);false = 路線實體終點
+     *  (只在無時間目標時 — 正式流程 API 保證有時限,恆為 true)。 */
+    predicted: boolean;
+  };
+}
+
+// ── 幽靈車 trace(P8)──
+
+/** 幽靈 distance-vs-time 曲線上的一點。tMs = 該次騎乘自身的 elapsed(ms)。 */
+export interface GhostTracePoint {
+  tMs: number;
+  distM: number;
+}
+
+/**
+ * 幽靈騎乘的完整 trace + 名牌資訊,開賽時一次性下發(~1 Hz,一小時 ≈ 3600 點)。
+ * `source`:'recorded' = 由 ride_samples.distance_m 而來(sim 權威距離);
+ * 'reintegrated' = 舊騎乘無距離欄,後端用同套物理從 power/speed 樣本重新積分。
+ */
+export interface GhostTraceDto {
+  rideId: number;
+  /** 該次騎乘開始時間(epoch ms)— 幽靈名牌顯示日期用。 */
+  startedAt: number;
+  source: 'recorded' | 'reintegrated';
+  points: GhostTracePoint[];
 }
 
 export type WsMessage = WsSensorMessage | WsSessionStartMessage | WsSessionEndMessage | WsStatusMessage | WsGameStateMessage;
@@ -309,6 +360,15 @@ export interface Ride {
    * 一律 undefined，課表訓練可由 planId/planDay（plan_completions join）推斷。
    */
   workoutId?: string;
+  /**
+   * 開賽當下**決定並記錄**的訓練階段(prescribed segments)。
+   *
+   * 不能事後由 workoutId + durationMs 重建:profile 是百分比制的,展開結果取決
+   * 於開賽選項(repeat-to-fill)與**目標**時長,而不是騎士實際騎了多久。事後重建
+   * 會拿一份從未發生過的課表去評分。舊紀錄(加欄位前)為 undefined,分析端
+   * 仍退回重建。
+   */
+  workoutSegments?: WorkoutSegment[];
   /** 由 plan_completions 反推的課表連結（僅列表 API 填入）。 */
   planId?: string;
   planDay?: number;
@@ -348,21 +408,6 @@ export interface RideSample {
   powerW?: number;
   cadence?: number;
   speedKmh?: number;
-}
-
-export interface ComparisonSample {
-  elapsedMs: number;
-  hr?: number;
-  speed?: number;
-  cadence?: number;
-  power?: number;
-}
-
-export interface ComparisonMetrics {
-  hr?: number;
-  speed?: number;
-  cadence?: number;
-  power?: number;
 }
 
 // ── Calendar ──

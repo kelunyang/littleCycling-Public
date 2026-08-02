@@ -526,6 +526,12 @@ function resolveWorkoutSegments(
   ctx: ToolContext,
   ride: Ride,
 ): { segments: WorkoutSegment[]; source: string } | { error: string } {
+  // Recorded at start — the only version that is certainly what the rider was
+  // actually shown. Everything below is a best-effort reconstruction for rides
+  // predating rides.workout_segments.
+  if (ride.workoutSegments && ride.workoutSegments.length > 0) {
+    return { segments: ride.workoutSegments, source: ride.workoutId ?? 'recorded' };
+  }
   const workoutId = ride.workoutId;
   if (!workoutId) {
     return { error: `騎乘 ${ride.id} 沒有 workoutId（自由騎），無對應課表可比對遵從度` };
@@ -547,7 +553,11 @@ function resolveWorkoutSegments(
   if (!profile) return { error: `未知的 workoutId "${workoutId}"` };
   const durationMs = ride.durationMs ?? 0;
   if (durationMs <= 0) return { error: `騎乘 ${ride.id} 缺少時長，無法展開 workout profile` };
-  return { segments: buildWorkoutSegments(profile, durationMs), source: profile.id };
+  // Legacy path only. This expands the profile against the ride's ACTUAL
+  // duration and without knowing whether repeat-to-fill was on, so it can only
+  // approximate what the rider rode. Rides recorded since workout_segments
+  // exists never reach here.
+  return { segments: buildWorkoutSegments(profile, durationMs), source: `${profile.id} (reconstructed)` };
 }
 
 function getWorkoutComplianceTool(ctx: ToolContext): AgentTool {

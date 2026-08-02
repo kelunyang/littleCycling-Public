@@ -10,26 +10,116 @@ import type { MVTFeature } from './mvt-fetcher';
 export type ZoneType = 'urban' | 'forest' | 'tunnel' | 'open';
 
 /**
- * Detect the zone type at (lat, lon) from cached MVT features.
+ * The ONLY slice of a chunk's decoded MVT features that zone detection needs.
+ * The chunk manager retains this per chunk instead of the full GeoJSON:
+ *
+ * - `tunnelLines`  — transportation lines flagged `brunnel === 'tunnel'` (whole
+ *                    features; their coords are walked for the nearest-segment test)
+ * - `forestPolys`  — landcover `wood`/`forest` polygons (point-in-polygon)
+ * - `urbanPolys`   — landuse `residential`/`commercial`/`industrial`/`retail`
+ *                    polygons (point-in-polygon)
+ * - `buildingCentroids` — one representative [lon, lat] per building, packed as a
+ *                    flat Float32Array (…lon, lat, lon, lat…). The urban fallback
+ *                    only ever counted buildings near the rider, so a centroid is
+ *                    all it needs — the footprint polygons are dropped.
+ */
+export interface ZoneFeatures {
+  tunnelLines: MVTFeature[];
+  forestPolys: MVTFeature[];
+  urbanPolys: MVTFeature[];
+  buildingCentroids: Float32Array;
+}
+
+const EMPTY_CENTROIDS = new Float32Array(0);
+
+/**
+ * Reduce a chunk's full decoded MVT features to the slim {@link ZoneFeatures}
+ * subset. Everything not consumed by detectZone (roads, water, POIs, and every
+ * building footprint polygon) is left behind to be garbage-collected.
+ */
+export function extractZoneFeatures(features: MVTFeature[]): ZoneFeatures {
+  const tunnelLines: MVTFeature[] = [];
+  const forestPolys: MVTFeature[] = [];
+  const urbanPolys: MVTFeature[] = [];
+  const centroids: number[] = [];
+
+  for (const f of features) {
+    switch (f.layer) {
+      case 'transportation':
+        if (f.properties.brunnel === 'tunnel') tunnelLines.push(f);
+        break;
+      case 'landcover': {
+        const cls = f.properties.class;
+        if (cls === 'wood' || cls === 'forest') forestPolys.push(f);
+        break;
+      }
+      case 'landuse': {
+        const cls = f.properties.class;
+        if (cls === 'residential' || cls === 'commercial' || cls === 'industrial' || cls === 'retail') {
+          urbanPolys.push(f);
+        }
+        break;
+      }
+      case 'building': {
+        const first = getFirstCoord(f);
+        if (first) centroids.push(first[0], first[1]);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return {
+    tunnelLines,
+    forestPolys,
+    urbanPolys,
+    buildingCentroids: centroids.length ? new Float32Array(centroids) : EMPTY_CENTROIDS,
+  };
+}
+
+/** Rough retained-byte estimate for a {@link ZoneFeatures} (for the cache
+ *  budget): the centroid array plus ~16 B per polygon/line coordinate. */
+export function estimateZoneFeatureBytes(zf: ZoneFeatures): number {
+  let bytes = zf.buildingCentroids.byteLength;
+  const coordBytes = (f: MVTFeature): number => {
+    let n = 0;
+    const walk = (arr: unknown): void => {
+      if (!Array.isArray(arr)) return;
+      if (typeof arr[0] === 'number') { n++; return; }
+      for (const el of arr) walk(el);
+    };
+    const coords = (f.geometry as { coordinates?: unknown }).coordinates;
+    if (coords) walk(coords);
+    return n * 16;
+  };
+  for (const f of zf.tunnelLines) bytes += coordBytes(f);
+  for (const f of zf.forestPolys) bytes += coordBytes(f);
+  for (const f of zf.urbanPolys) bytes += coordBytes(f);
+  return bytes;
+}
+
+/**
+ * Detect the zone type at (lat, lon) from a chunk's slimmed zone features.
  *
  * @param lat  Rider latitude
  * @param lon  Rider longitude
- * @param features  MVT features from the current chunk
+ * @param zf   Slimmed zone features for the current chunk
  */
 export function detectZone(
   lat: number,
   lon: number,
-  features: MVTFeature[],
+  zf: ZoneFeatures,
 ): ZoneType {
   // 1. Tunnel — check if nearest transportation segment has brunnel=tunnel
-  if (isInTunnel(lat, lon, features)) return 'tunnel';
+  if (isInTunnel(lat, lon, zf.tunnelLines)) return 'tunnel';
 
   // 2. Forest — point-in-polygon for landcover wood/forest
-  if (isInForest(lat, lon, features)) return 'forest';
+  if (isInForest(lat, lon, zf.forestPolys)) return 'forest';
 
   // 3. Urban — point-in-polygon for landuse residential/commercial/industrial
   //    OR high building density nearby
-  if (isInUrban(lat, lon, features)) return 'urban';
+  if (isInUrban(lat, lon, zf.urbanPolys, zf.buildingCentroids)) return 'urban';
 
   return 'open';
 }
@@ -39,11 +129,9 @@ export function detectZone(
 /** Max distance (in degrees, ~30m ≈ 0.00027°) to consider a road segment. */
 const TUNNEL_DISTANCE_DEG = 0.0003;
 
-function isInTunnel(lat: number, lon: number, features: MVTFeature[]): boolean {
-  for (const f of features) {
-    if (f.layer !== 'transportation') continue;
-    if (f.properties.brunnel !== 'tunnel') continue;
-
+function isInTunnel(lat: number, lon: number, tunnelLines: MVTFeature[]): boolean {
+  for (const f of tunnelLines) {
+    // Already filtered to transportation lines with brunnel === 'tunnel'.
     // Check if any segment of this feature is close to (lat, lon)
     const coords = extractLineCoords(f);
     for (const line of coords) {
@@ -62,12 +150,9 @@ function isInTunnel(lat: number, lon: number, features: MVTFeature[]): boolean {
 
 // ── Forest detection ──
 
-function isInForest(lat: number, lon: number, features: MVTFeature[]): boolean {
-  for (const f of features) {
-    if (f.layer !== 'landcover') continue;
-    const cls = f.properties.class;
-    if (cls !== 'wood' && cls !== 'forest') continue;
-
+function isInForest(lat: number, lon: number, forestPolys: MVTFeature[]): boolean {
+  for (const f of forestPolys) {
+    // Already filtered to landcover wood/forest polygons.
     if (isPointInFeaturePolygon(lon, lat, f)) return true;
   }
   return false;
@@ -79,26 +164,25 @@ function isInForest(lat: number, lon: number, features: MVTFeature[]): boolean {
 const BUILDING_RADIUS_DEG = 0.00045;
 const BUILDING_COUNT_THRESHOLD = 5;
 
-function isInUrban(lat: number, lon: number, features: MVTFeature[]): boolean {
-  // Check landuse polygons first
-  for (const f of features) {
-    if (f.layer !== 'landuse') continue;
-    const cls = f.properties.class;
-    if (cls !== 'residential' && cls !== 'commercial' && cls !== 'industrial' && cls !== 'retail') continue;
-
+function isInUrban(
+  lat: number,
+  lon: number,
+  urbanPolys: MVTFeature[],
+  buildingCentroids: Float32Array,
+): boolean {
+  // Check landuse polygons first (already filtered to the urban classes).
+  for (const f of urbanPolys) {
     if (isPointInFeaturePolygon(lon, lat, f)) return true;
   }
 
-  // Fallback: count nearby buildings
+  // Fallback: count nearby buildings from their pre-extracted centroids
+  // (flat [lon, lat, lon, lat, …] pairs).
   let buildingCount = 0;
-  for (const f of features) {
-    if (f.layer !== 'building') continue;
-    // Use centroid approximation from first coordinate
-    const firstCoord = getFirstCoord(f);
-    if (!firstCoord) continue;
-    const dLon = firstCoord[0] - lon;
-    const dLat = firstCoord[1] - lat;
-    if (dLon * dLon + dLat * dLat < BUILDING_RADIUS_DEG * BUILDING_RADIUS_DEG) {
+  const r2 = BUILDING_RADIUS_DEG * BUILDING_RADIUS_DEG;
+  for (let i = 0; i + 1 < buildingCentroids.length; i += 2) {
+    const dLon = buildingCentroids[i] - lon;
+    const dLat = buildingCentroids[i + 1] - lat;
+    if (dLon * dLon + dLat * dLat < r2) {
       buildingCount++;
       if (buildingCount >= BUILDING_COUNT_THRESHOLD) return true;
     }

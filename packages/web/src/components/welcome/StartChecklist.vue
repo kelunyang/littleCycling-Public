@@ -42,8 +42,31 @@
         </label>
         <el-switch v-model="gameStore.randomEventsEnabled" />
       </div>
+      <!-- Repeat the pattern instead of stretching it. Only meaningful once the
+           ride is longer than one round of the chosen profile, so it hides
+           itself otherwise rather than sitting there doing nothing. -->
+      <div v-if="canRepeatWorkout" class="checklist__toggle checklist__toggle--indent">
+        <label>
+          <font-awesome-icon icon="repeat" />
+          Repeat to fill time
+        </label>
+        <el-switch v-model="repeatWorkout" />
+      </div>
       <div v-if="selectedWorkoutProfile" class="checklist__workout-desc">
         {{ selectedWorkoutProfile.description }}
+        <template v-if="canRepeatWorkout">
+          <br >
+          <span class="checklist__workout-rounds">
+            <font-awesome-icon icon="repeat" />
+            <template v-if="repeatWorkout">
+              {{ workoutRounds }}× at its designed {{ nativeMinutes }} min
+              (last round trimmed to fit)
+            </template>
+            <template v-else>
+              stretched to {{ rideMinutes }} min — one round is {{ nativeMinutes }} min
+            </template>
+          </span>
+        </template>
       </div>
     </div>
 
@@ -68,13 +91,13 @@
       </button>
     </div>
 
-    <!-- Comparison ride toggle: when on, Start opens the comparison-ride picker -->
+    <!-- Ghost ride toggle: when on, Start opens the ghost-ride picker -->
     <div class="checklist__toggle">
       <label>
-        <font-awesome-icon icon="clock-rotate-left" />
-        Comparison Ride
+        <font-awesome-icon icon="ghost" />
+        幽靈車
       </label>
-      <el-switch v-model="gameStore.comparePickerEnabled" />
+      <el-switch v-model="gameStore.ghostPickerEnabled" />
     </div>
 
     <!-- Free roam toggle (only if dual-sided power detected) -->
@@ -208,6 +231,17 @@
           </el-segmented>
         </div>
 
+        <!-- Graphics quality — Three.js only (the 3D renderer is the one with a
+             tunable effect budget). 'auto' hands the tier to the in-game fps
+             governor; the rest pin it. -->
+        <div v-if="renderModeModel === 'threejs'" class="checklist__frame-material">
+          <label>
+            <font-awesome-icon icon="gauge-high" />
+            畫質
+          </label>
+          <el-segmented v-model="graphicsQualityModel" :options="graphicsQualityOptions" size="small" />
+        </div>
+
         <!-- World style — only meaningful for the stylised renderers (Three.js /
              Phaser). MapLibre is the realistic "classic" map, so there's no style
              to choose; it just renders straight. -->
@@ -216,12 +250,24 @@
             <font-awesome-icon icon="paintbrush" />
             World Style
           </label>
-          <el-segmented v-model="worldStyleModel" :options="worldStyleOptions" size="small" />
+          <el-segmented v-model="worldStyleModel" :options="worldStyleOptions" size="small">
+            <template #default="{ item }">
+              <span class="segmented-item">
+                <font-awesome-icon :icon="item.icon" />
+                {{ item.label }}
+              </span>
+            </template>
+          </el-segmented>
         </div>
         <p v-else class="appearance-drawer__note">
           <font-awesome-icon icon="circle-info" />
           Classic map renders realistically — no world style to pick.
         </p>
+
+        <!-- Whatever the picked world declares for itself. Renders nothing when
+             the world has no options the current renderer can honour, so there
+             is never an empty frame sitting here. -->
+        <WorldOptions />
       </div>
     </el-drawer>
   </div>
@@ -229,13 +275,47 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { WORKOUT_PROFILES, WORKOUT_PROFILES_MAP, isDualSidedPower, type AppConfig } from '@littlecycling/shared';
+import {
+  WORKOUT_PROFILES, WORKOUT_PROFILES_MAP, isDualSidedPower, workoutRoundCount,
+  type AppConfig,
+} from '@littlecycling/shared';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useSensorStore } from '@/stores/sensorStore';
 import { useGameStore, resolveLensColor, type FrameColorMode } from '@/stores/gameStore';
 import { usePlanStore } from '@/stores/planStore';
+// Per-world knobs, rendered generically from each world's own declaration.
+import WorldOptions from '@/components/welcome/WorldOptions.vue';
 
 const settingsStore = useSettingsStore();
+
+// ── Repeat-to-fill ──
+const repeatWorkout = computed({
+  get: () => settingsStore.config.training.repeatWorkout ?? false,
+  set: (val: boolean) => settingsStore.updateTraining({ repeatWorkout: val }),
+});
+
+/** Only offer the switch when it would change something: a real profile is
+ *  selected and the ride is longer than one round of it. */
+const canRepeatWorkout = computed(() => {
+  const p = WORKOUT_PROFILES_MAP[gameStore.selectedWorkoutId];
+  if (!p?.nativeDurationMs) return false;
+  return settingsStore.config.training.defaultDuration > p.nativeDurationMs;
+});
+
+const nativeMinutes = computed(() => {
+  const p = WORKOUT_PROFILES_MAP[gameStore.selectedWorkoutId];
+  return p ? Math.round(p.nativeDurationMs / 60000) : 0;
+});
+
+const rideMinutes = computed(
+  () => Math.round(settingsStore.config.training.defaultDuration / 60000),
+);
+
+const workoutRounds = computed(() => {
+  const p = WORKOUT_PROFILES_MAP[gameStore.selectedWorkoutId];
+  if (!p) return 1;
+  return workoutRoundCount(p, settingsStore.config.training.defaultDuration, true);
+});
 const sensorStore = useSensorStore();
 const gameStore = useGameStore();
 const planStore = usePlanStore();
@@ -299,14 +379,18 @@ const lensOptions = [
   { label: 'Auto', value: 'auto' },
 ];
 
+// Font Awesome only, per CLAUDE.md — 'microchip' is already in main.ts's
+// library (the sensor UI uses it), so the circuit world costs no new import.
 const worldStyleOptions = [
-  { label: 'Plastic', value: 'plastic' },
-  { label: 'Hand-drawn', value: 'cuphead' },
+  { label: 'Plastic', value: 'plastic', icon: 'cube' },
+  { label: 'Hand-drawn', value: 'cuphead', icon: 'paintbrush' },
+  { label: 'Circuit', value: 'circuit', icon: 'microchip' },
 ];
 
 const worldStyleModel = computed({
   get: () => settingsStore.config.map.worldStyle ?? 'plastic',
-  set: (val: string) => settingsStore.updateMap({ worldStyle: val as 'plastic' | 'cuphead' }),
+  set: (val: string) =>
+    settingsStore.updateMap({ worldStyle: val as AppConfig['map']['worldStyle'] }),
 });
 
 const renderModeOptions = [
@@ -318,6 +402,18 @@ const renderModeOptions = [
 const renderModeModel = computed({
   get: () => settingsStore.config.map.renderMode,
   set: (val: AppConfig['map']['renderMode']) => settingsStore.updateMap({ renderMode: val }),
+});
+
+const graphicsQualityOptions = [
+  { label: '自動', value: 'auto' },
+  { label: '低', value: 'low' },
+  { label: '中', value: 'medium' },
+  { label: '高', value: 'high' },
+];
+
+const graphicsQualityModel = computed({
+  get: () => settingsStore.config.map.graphicsQuality,
+  set: (val: AppConfig['map']['graphicsQuality']) => settingsStore.updateMap({ graphicsQuality: val }),
 });
 
 /** World button glyph mirrors the picked render mode, so it reads at a glance
@@ -636,6 +732,14 @@ const hasDualPower = computed(
   margin: 0;
   font-size: 12px;
   color: var(--hud-text-dim);
+  opacity: 0.8;
+}
+
+.checklist__workout-rounds {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.15rem;
   opacity: 0.8;
 }
 </style>

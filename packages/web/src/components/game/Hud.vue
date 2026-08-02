@@ -23,6 +23,8 @@
 
     <div class="hud__top-right">
       <HudCoins :combo="combo" />
+      <!-- 幽靈車差距看板(P8)— 自行依 ghostActive 顯隱。 -->
+      <HudGapBoard :total-route-dist-m="props.totalRouteDistM ?? 0" />
     </div>
 
     <div class="hud__bottom-left">
@@ -130,6 +132,7 @@ import { useGameStore } from '@/stores/gameStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import HudTopBar from './HudTopBar.vue';
 import HudCoins from './HudCoins.vue';
+import HudGapBoard from './HudGapBoard.vue';
 import HudBottomLeft from './HudBottomLeft.vue';
 import HudBottomRight from './HudBottomRight.vue';
 import HudChart from './HudChart.vue';
@@ -147,6 +150,8 @@ const props = defineProps<{
   ballBearing: number;
   elapsedMs: number;
   distanceTraveled: number;
+  /** 路線總長(m)— 幽靈差距看板的「終點剩餘」用(P8)。 */
+  totalRouteDistM?: number;
   combo: number;
   redLine: boolean;
   virtualPower?: number;
@@ -199,7 +204,7 @@ const settingsStore = useSettingsStore();
 
 // Chart skin follows the world: neon for the 3D-ish renderers (Three.js /
 // MapLibre), the hand-drawn/plastic palette for the Phaser 2D world.
-const chartTheme = computed<'neon' | 'plastic' | 'cuphead'>(() => {
+const chartTheme = computed<'neon' | 'plastic' | 'cuphead' | 'circuit'>(() => {
   if (settingsStore.config.map.renderMode !== 'phaser') return 'neon';
   return settingsStore.config.map.worldStyle ?? 'plastic';
 });

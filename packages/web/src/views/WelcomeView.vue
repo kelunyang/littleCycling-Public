@@ -99,6 +99,7 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { useAnalysisStore } from '@/stores/analysisStore';
 import { useWebSocket } from '@/composables/useWebSocket';
 import { useCalendar } from '@/composables/useCalendar';
+import { useThemeBgm } from '@/composables/useThemeBgm';
 
 const routeStore = useRouteStore();
 const settingsStore = useSettingsStore();
@@ -114,6 +115,11 @@ const calendar = useCalendar();
 const worldStyle = computed(
   () => settingsStore.config.map.worldStyle ?? 'plastic',
 );
+
+// The theme song plays here too, and keeps playing into the ride (shared
+// AudioManager). Picking a route swaps the music to that route's own tune, so
+// the welcome screen doubles as a preview.
+const { startOnFirstGesture } = useThemeBgm();
 
 const bodyRef = ref<HTMLElement | null>(null);
 const layer1Ref = ref<HTMLElement | null>(null);
@@ -151,6 +157,9 @@ onMounted(async () => {
   planStore.fetchPlans();
   planStore.fetchActivePlans();
   ws.connect();
+  // Autoplay policy: audio can only start from a user gesture, so arm a
+  // one-shot listener rather than trying (and silently failing) right here.
+  startOnFirstGesture();
   await settingsStore.fetchConfig();
   settingsStore.fetchLlmProviders();
   // 首次使用:後端回報必填個人化設定尚未填齊 → 自動打開設定 drawer 提示。

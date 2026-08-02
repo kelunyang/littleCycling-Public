@@ -33,6 +33,18 @@ export interface WorkoutProfile {
   name: string;
   description: string;
   templates: SegmentTemplate[];
+  /**
+   * The duration this workout is actually DESIGNED for, in ms.
+   *
+   * Templates are percentage-based, so by default a profile stretches to fill
+   * whatever ride length the rider picked. That is fine for Endurance and
+   * nonsense for everything with intervals in it: a Tabata stretched over an
+   * hour turns "8 × 20 s at 170% FTP" into 2.4-minute sprints, and a 20-minute
+   * FTP test becomes a 45-minute one. This is the length at which the
+   * percentages mean what the name and description say, and it is what the
+   * repeat option scales each round to.
+   */
+  nativeDurationMs: number;
 }
 
 /** Result of querying current segment at a given time */
@@ -69,6 +81,7 @@ export const ZONE_COLORS = {
 export const WORKOUT_PROFILES: WorkoutProfile[] = [
   {
     id: 'sweet-spot',
+    nativeDurationMs: 60 * 60_000,   // 3 SST blocks of 15/15/6 min
     name: 'Sweet Spot',
     description: 'Sustained efforts at 88-94% FTP to build aerobic fitness',
     templates: [
@@ -83,8 +96,12 @@ export const WORKOUT_PROFILES: WorkoutProfile[] = [
   },
   {
     id: 'vo2max',
+    nativeDurationMs: 30 * 60_000,   // 0.10 of 30 min = the 3-min intervals
     name: 'VO2max Intervals',
-    description: '5 × 3min at 120% FTP with equal rest — maximal aerobic capacity',
+    // Was described as 5 intervals but only ever had 4, and the percentages
+    // summed to 0.90 — so a tenth of every VO2max ride had no segment at all
+    // (the workout simply stopped early). Cool Down absorbs the missing 0.10.
+    description: '4 × 3min at 120% FTP with equal rest — maximal aerobic capacity',
     templates: [
       { name: 'Warm Up',     durationPct: 0.15, targetFtpPercent: 55, color: ZONE_COLORS.warmup },
       { name: 'Interval 1',  durationPct: 0.10, targetFtpPercent: 120, color: ZONE_COLORS.vo2max },
@@ -94,11 +111,12 @@ export const WORKOUT_PROFILES: WorkoutProfile[] = [
       { name: 'Interval 3',  durationPct: 0.10, targetFtpPercent: 120, color: ZONE_COLORS.vo2max },
       { name: 'Recovery',    durationPct: 0.10, targetFtpPercent: 45, color: ZONE_COLORS.recovery },
       { name: 'Interval 4',  durationPct: 0.10, targetFtpPercent: 120, color: ZONE_COLORS.vo2max },
-      { name: 'Cool Down',   durationPct: 0.05, targetFtpPercent: 40, color: ZONE_COLORS.warmup },
+      { name: 'Cool Down',   durationPct: 0.15, targetFtpPercent: 40, color: ZONE_COLORS.warmup },
     ],
   },
   {
     id: 'endurance',
+    nativeDurationMs: 60 * 60_000,  // scales gracefully; native is just a default
     name: 'Endurance',
     description: 'Long steady ride at 65-75% FTP — aerobic base building',
     templates: [
@@ -109,6 +127,7 @@ export const WORKOUT_PROFILES: WorkoutProfile[] = [
   },
   {
     id: 'ftp-test',
+    nativeDurationMs: 45 * 60_000,   // 0.45 of 45 min = the 20-minute test block
     name: 'FTP Test (20min)',
     description: '20-minute all-out effort to estimate FTP (result × 0.95)',
     templates: [
@@ -121,6 +140,7 @@ export const WORKOUT_PROFILES: WorkoutProfile[] = [
   },
   {
     id: 'tabata',
+    nativeDurationMs: 510_000,       // 0.04 of 8m30s = 20.4 s sprints, 0.02 = 10.2 s rests
     name: 'Tabata',
     description: '8 × 20s at 170% FTP / 10s rest — extreme anaerobic',
     templates: [
@@ -151,20 +171,80 @@ export const WORKOUT_PROFILES_MAP: Record<string, WorkoutProfile> =
 
 // ── Helper functions ──
 
-/**
- * Build concrete workout segments from a profile, scaled to a total duration.
- */
-export function buildWorkoutSegments(
+/** Shortest segment worth emitting — anything under this is noise in the HUD. */
+const MIN_SEGMENT_MS = 5_000;
+
+/** One round of a profile at an exact duration. */
+function buildRound(
   profile: WorkoutProfile,
-  totalDurationMs: number,
+  durationMs: number,
+  round: number,
+  rounds: number,
 ): WorkoutSegment[] {
+  const suffix = rounds > 1 ? ` (${round}/${rounds})` : '';
   return profile.templates.map((t) => ({
-    name: t.name,
-    durationMs: Math.round(t.durationPct * totalDurationMs),
+    name: t.name + suffix,
+    durationMs: Math.round(t.durationPct * durationMs),
     targetFtpPercent: t.targetFtpPercent,
     targetCadence: t.targetCadence,
     color: t.color,
   }));
+}
+
+/**
+ * Build concrete workout segments from a profile, scaled to a total duration.
+ *
+ * By default the profile STRETCHES to fill `totalDurationMs`, which is the
+ * historical behaviour and the right one for Endurance.
+ *
+ * With `repeat`, the profile instead runs at its `nativeDurationMs` and REPEATS
+ * until the ride is full — so a 20-minute FTP test ridden for an hour is two
+ * FTP tests plus a partial third, not one very slow 60-minute one. Intervals
+ * only mean anything at the length they were designed for.
+ *
+ * The final round is truncated to land exactly on `totalDurationMs`; a segment
+ * left shorter than MIN_SEGMENT_MS by that cut is dropped rather than shown as
+ * a sliver.
+ */
+export function buildWorkoutSegments(
+  profile: WorkoutProfile,
+  totalDurationMs: number,
+  options?: { repeat?: boolean },
+): WorkoutSegment[] {
+  const native = profile.nativeDurationMs;
+  // Nothing to repeat if the ride is not longer than one round.
+  if (!options?.repeat || !native || totalDurationMs <= native) {
+    return buildRound(profile, totalDurationMs, 1, 1);
+  }
+
+  const rounds = Math.ceil(totalDurationMs / native);
+  const out: WorkoutSegment[] = [];
+  let used = 0;
+  for (let r = 1; r <= rounds; r++) {
+    for (const seg of buildRound(profile, native, r, rounds)) {
+      const remaining = totalDurationMs - used;
+      if (remaining <= 0) return out;
+      if (seg.durationMs >= remaining) {
+        // Last segment: clip to land exactly on the target duration.
+        if (remaining >= MIN_SEGMENT_MS) out.push({ ...seg, durationMs: remaining });
+        return out;
+      }
+      out.push(seg);
+      used += seg.durationMs;
+    }
+  }
+  return out;
+}
+
+/** How many rounds `buildWorkoutSegments` would run for these inputs. */
+export function workoutRoundCount(
+  profile: WorkoutProfile,
+  totalDurationMs: number,
+  repeat: boolean,
+): number {
+  const native = profile.nativeDurationMs;
+  if (!repeat || !native || totalDurationMs <= native) return 1;
+  return Math.ceil(totalDurationMs / native);
 }
 
 /**

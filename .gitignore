@@ -1,5 +1,11 @@
 node_modules/
 dist/
+# Build state must not travel with the source: dist/ is ignored, so a tracked
+# tsbuildinfo tells a fresh checkout "already built" and `tsc -b` skips emitting.
+# Downstream then typechecks against stale or missing .d.ts, and compile-time
+# contracts pass VACUOUSLY — that is exactly how the WorldOptions ↔ StyleParams
+# assertion was found green while it was in fact checking nothing.
+*.tsbuildinfo
 **/recordings/*
 !**/recordings/.gitkeep
 data/*.jsonl

@@ -325,4 +325,20 @@ Build 順序：`shared → server → web`（`npm run build` 會自動處理）
 
 ---
 
+## 做一套自己的視覺世界
+
+內建三套完整世界（積木 / 瓦楞紙 / 電子）。要做第四套，或想知道現有三套是怎麼長出來的：
+
+| 文件 | 它回答什麼 |
+|------|------|
+| [`CUSTOM_WORLD_INSTRUCTIONS.md`](CUSTOM_WORLD_INSTRUCTIONS.md) | 一套世界要交付什麼、設計法則、效能預算、驗收工具、踩過的坑 |
+| [`plan/DEMO_POC_GUIDE.md`](plan/DEMO_POC_GUIDE.md) | demo 要長成什麼樣才配叫 POC —— 必備控制列、四個地形 profile |
+| [`plan/demo-gaps.md`](plan/demo-gaps.md) | 反方向：gameview 遇得到而 demo 仲裁不了的情況 |
+| [`plan/port-inventory.md`](plan/port-inventory.md) | 移植進度盤點 |
+
+世界的 demo 是 `plan/*-demo.html`，單檔 HTML、零 build、開瀏覽器就看得到。
+**它們不是原型 —— 那份程式碼會被直接搬進前端。**
+
+---
+
 Kelunyang@2026 by claude with :heart: | [GitHub](https://github.com/kelunyang/littleCycling)

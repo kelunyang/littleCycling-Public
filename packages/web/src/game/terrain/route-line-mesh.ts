@@ -15,8 +15,11 @@
  */
 
 import * as THREE from 'three';
+import { applyOverlayDepth } from './overlay-depth';
 import type { RoutePoint } from '@littlecycling/shared';
-import type { RouteLineStyle } from './terrain-style-strategy';
+import type {
+  RouteBody, RouteLineStyle, RoutePath, RoutePathPoint,
+} from './terrain-style-strategy';
 
 /**
  * Bloom layer index — objects on this layer are picked up by the selective bloom
@@ -45,6 +48,90 @@ export interface RouteLineMeshOptions {
   heightOffset?: number;
   /** Look of the stroke — from the world-style strategy. */
   style: RouteLineStyle;
+  /**
+   * The world's own route BODY (`strategy.buildRouteBody`), for a world whose
+   * route is an object along the path instead of a mark on the road — circuit's
+   * chain of dupont wires. Given, the two ribbons are NOT built: drawing both
+   * would put a painted stripe under a physical wire.
+   */
+  body?: (path: RoutePath) => RouteBody;
+}
+
+// ── The path, by mileage — what a route body walks ──
+
+/**
+ * Cumulative XZ arclength of the resampled polyline, metres.
+ *
+ * XZ only, and that is what makes a body's mileage chain stable: projecting onto
+ * streamed-in terrain moves y alone, and a floating-origin re-base translates
+ * every vertex equally, so neither changes a single distance here.
+ */
+function cumulativeXZ(positions: number[]): number[] {
+  const n = positions.length / 3;
+  const cum = new Array<number>(n);
+  cum[0] = 0;
+  for (let i = 1; i < n; i++) {
+    const a = (i - 1) * 3, b = i * 3;
+    cum[i] = cum[i - 1] + Math.hypot(positions[b] - positions[a], positions[b + 2] - positions[a + 2]);
+  }
+  return cum;
+}
+
+/**
+ * A `RoutePath` over the group's live position array — the gameview counterpart
+ * of the demos' `pathAt(d)`.
+ *
+ * The tangent is the containing segment's direction, which is the SAME convention
+ * `fillRibbon` uses for its perpendicular, so a body offset by `+lateral` lands on
+ * the same side of the route the ribbon's `+half` edge did. (The demo blends the
+ * two neighbouring segment directions; that smooths ITS synthetic path, whose
+ * vertices are a fixed 6 m grid of heading steps. A real GPX trace bends where it
+ * bends, and the resampled vertices already are that bend.)
+ */
+function makeRoutePath(group: THREE.Group): RoutePath {
+  const positions = group.userData._routePositions as number[];
+  const cum = group.userData._routeCum as number[];
+  const n = cum.length;
+  const out: RoutePathPoint = { x: 0, y: 0, z: 0, tx: 0, tz: 1 };
+  return {
+    get lengthM() { return n > 0 ? cum[n - 1] : 0; },
+    at(d: number): RoutePathPoint {
+      if (n === 0) return out;
+      if (n === 1) {
+        out.x = positions[0]; out.y = positions[1]; out.z = positions[2];
+        return out;
+      }
+      // Binary search for the segment holding `d` (clamped at both ends).
+      const target = Math.max(0, Math.min(d, cum[n - 1]));
+      let lo = 0, hi = n - 1;
+      while (lo < hi - 1) {
+        const mid = (lo + hi) >> 1;
+        if (cum[mid] <= target) lo = mid; else hi = mid;
+      }
+      const a = lo * 3, b = hi * 3;
+      const seg = cum[hi] - cum[lo];
+      const t = seg > 1e-9 ? (target - cum[lo]) / seg : 0;
+      out.x = positions[a] + (positions[b] - positions[a]) * t;
+      out.y = positions[a + 1] + (positions[b + 1] - positions[a + 1]) * t;
+      out.z = positions[a + 2] + (positions[b + 2] - positions[a + 2]) * t;
+      const dx = positions[b] - positions[a], dz = positions[b + 2] - positions[a + 2];
+      const len = Math.hypot(dx, dz);
+      if (len > 1e-9) { out.tx = dx / len; out.tz = dz / len; }
+      return out;
+    },
+  };
+}
+
+/** The body hanging off a route-line group, if this world has one. */
+function bodyOf(group: THREE.Group): RouteBody | null {
+  return (group.userData._routeBody as RouteBody | undefined) ?? null;
+}
+
+/** Vertex index → metres along the route. */
+function mileageAt(group: THREE.Group, vertexIdx: number): number {
+  const cum = group.userData._routeCum as number[] | undefined;
+  if (!cum || cum.length === 0) return 0;
+  return cum[Math.max(0, Math.min(vertexIdx, cum.length - 1))];
 }
 
 // ── Geometry ──
@@ -136,9 +223,15 @@ function buildLayer(
     side: THREE.DoubleSide,
     fog: true,
   });
+  // The route mark still depth-TESTS against the terrain even though it does
+  // not write depth, so at range it dashes in and out exactly like the road
+  // ribbons did. `name` is 'core' or 'glow' here.
+  applyOverlayDepth(mat, name === 'core' ? 'routeCore' : 'routeGlow');
 
   const mesh = new THREE.Mesh(geo, mat);
-  mesh.name = name;
+  // Namespaced so the scene-inspector's layer list can group it; `check:3d`
+  // asserts on this exact string.
+  mesh.name = `route/${name}`;
   mesh.renderOrder = renderOrder;
   mesh.userData._ribbonWidth = width;
   mesh.userData._ribbonLift = yLift;
@@ -196,12 +289,18 @@ const RESAMPLE_STEP_M = 6;
 interface ResampledRoute {
   positions: number[];
   srcIdx: number[];
+  /** Per-vertex GPS altitude in scene metres (ele − originEle) — the layer
+   *  disambiguator for `projectRouteLineOntoTerrain`: at a switchback the
+   *  terrain covers one (x, z) at two heights, and without this the line
+   *  snaps to whichever deck the scan finds first and zigzags through the air. */
+  gpsY: number[];
 }
 
 function toScenePositions(
   points: RoutePoint[],
   originLat: number,
   originLon: number,
+  originEle: number,
   heightOffset: number,
 ): ResampledRoute {
   const cosOrigin = Math.cos((originLat * Math.PI) / 180);
@@ -210,19 +309,23 @@ function toScenePositions(
 
   const positions: number[] = [];
   const srcIdx: number[] = [];
-  if (points.length === 0) return { positions, srcIdx };
+  const gpsY: number[] = [];
+  if (points.length === 0) return { positions, srcIdx, gpsY };
 
-  const push = (x: number, z: number, i: number) => {
+  const push = (x: number, z: number, i: number, y: number) => {
     positions.push(x, heightOffset, z);
     srcIdx.push(i);
+    gpsY.push(y);
   };
 
   for (let i = 0; i < points.length - 1; i++) {
     const x0 = sx(points[i]), z0 = sz(points[i]);
     const x1 = sx(points[i + 1]), z1 = sz(points[i + 1]);
+    const y0 = points[i].ele - originEle;
+    const y1 = points[i + 1].ele - originEle;
     const len = Math.hypot(x1 - x0, z1 - z0);
 
-    push(x0, z0, i);
+    push(x0, z0, i, y0);
 
     // Interior samples — the segment's own end is emitted by the next iteration
     // (or by the tail push below), so stop short of it.
@@ -230,14 +333,14 @@ function toScenePositions(
     for (let s = 1; s <= steps; s++) {
       const t = (s * RESAMPLE_STEP_M) / len;
       if (t >= 1) break;
-      push(x0 + (x1 - x0) * t, z0 + (z1 - z0) * t, i);
+      push(x0 + (x1 - x0) * t, z0 + (z1 - z0) * t, i, y0 + (y1 - y0) * t);
     }
   }
 
   const last = points.length - 1;
-  push(sx(points[last]), sz(points[last]), last);
+  push(sx(points[last]), sz(points[last]), last, points[last].ele - originEle);
 
-  return { positions, srcIdx };
+  return { positions, srcIdx, gpsY };
 }
 
 /** First vertex whose source point index is >= `value` (srcIdx ascending). */
@@ -264,12 +367,22 @@ export function createRouteLine(
 ): THREE.Group {
   const { style } = options;
   const heightOffset = options.heightOffset ?? HEIGHT_OFFSET;
-  const { positions, srcIdx } = toScenePositions(points, originLat, originLon, heightOffset);
+  const { positions, srcIdx, gpsY } = toScenePositions(points, originLat, originLon, _originEle, heightOffset);
 
   const group = new THREE.Group();
   group.userData._routePositions = positions;
   group.userData._routeSrcIdx = srcIdx;
+  group.userData._routeGpsY = gpsY;
+  group.userData._routeCum = cumulativeXZ(positions);
   group.userData._routeStyle = style;
+
+  // A world with its own route body gets THAT and not the ribbons.
+  if (options.body && positions.length >= 6) {
+    const body = options.body(makeRoutePath(group));
+    group.userData._routeBody = body;
+    group.add(body.group);
+    return group;
+  }
 
   // Halo first (renderOrder 9), stroke on top (10) — the demos' ordering.
   const glow = buildLayer(
@@ -294,21 +407,31 @@ export function updateRouteLineOrigin(
   _originEle: number,
   heightOffset = HEIGHT_OFFSET,
 ): void {
-  const { positions, srcIdx } = toScenePositions(points, originLat, originLon, heightOffset);
+  const { positions, srcIdx, gpsY } = toScenePositions(points, originLat, originLon, _originEle, heightOffset);
   group.userData._routePositions = positions;
   group.userData._routeSrcIdx = srcIdx;
-  refreshRibbons(group);
+  group.userData._routeGpsY = gpsY;
+  group.userData._routeCum = cumulativeXZ(positions);
+  const body = bodyOf(group);
+  // A re-base translates the whole path, so every joint moves — and the heights
+  // it had came from a ground function this call does not have. Re-seat the whole
+  // body from the path itself; the next chunk projection puts the ground back.
+  if (body) body.refresh(() => null, 0, Number.POSITIVE_INFINITY);
+  else refreshRibbons(group);
 }
 
 /**
- * Project the route line onto terrain by raycasting — this is what makes the
- * mark hug the ground instead of hovering over it.
+ * Project the route line onto terrain by sampling ground height per vertex —
+ * this is what makes the mark hug the ground instead of hovering over it.
  *
- * `range` limits the raycasts to the span that just gained terrain (one
- * streamed-in chunk). Raycasting is O(triangles) per call, so projecting only
- * the affected slice instead of the whole route is the difference between a
- * hitch and a no-op on each chunk load. Omit `range` to reproject everything
- * (used once on a style switch).
+ * `heightFn` is the chunk manager's `raycastGroundHeight`, which is now an
+ * O(1)/coherent height-grid lookup (a warm-started section scan against the
+ * BUILT terrain surface) rather than a per-vertex mesh raycast — the ribbon can
+ * resample thousands of vertices along a streamed-in chunk without the old
+ * O(triangles)-per-vertex hitch. `range` still limits the work to the span that
+ * just gained terrain (one chunk); omit it to reproject everything (style
+ * switch). Because the resampled vertices are walked in route order, the grid's
+ * `_lastSection` coherence cache keeps each lookup a couple of comparisons.
  *
  * NOTE `range` is in ORIGINAL route-point indices (that is what the chunk manager
  * knows about); the ribbon's vertices are resampled, so the span is translated
@@ -316,12 +439,13 @@ export function updateRouteLineOrigin(
  */
 export function projectRouteLineOntoTerrain(
   group: THREE.Group,
-  raycastFn: (x: number, z: number) => number | null,
+  heightFn: (x: number, z: number, gpsY: number) => number | null,
   heightOffset = HEIGHT_OFFSET,
   range?: { startIdx: number; endIdx: number },
 ): number {
   const positions = group.userData._routePositions as number[] | undefined;
   const srcIdx = group.userData._routeSrcIdx as number[] | undefined;
+  const gpsYArr = group.userData._routeGpsY as number[] | undefined;
   if (!positions || !srcIdx) return 0;
 
   const vertexCount = positions.length / 3;
@@ -335,7 +459,7 @@ export function projectRouteLineOntoTerrain(
 
   for (let i = from; i <= to; i++) {
     const i3 = i * 3;
-    const groundY = raycastFn(positions[i3], positions[i3 + 2]);
+    const groundY = heightFn(positions[i3], positions[i3 + 2], gpsYArr?.[i] ?? positions[i3 + 1]);
     if (groundY !== null) {
       positions[i3 + 1] = groundY + heightOffset;
       projected++;
@@ -344,12 +468,70 @@ export function projectRouteLineOntoTerrain(
 
   if (projected === 0) return 0;
 
-  refreshRibbons(group);
+  const body = bodyOf(group);
+  if (body) {
+    // The body asks the ground for ITS own (off-centreline) footing, so it gets
+    // the height function rather than the reprojected centreline. `gpsY` is the
+    // deck disambiguator, exactly as above.
+    body.refresh(
+      (x, z, preferY) => heightFn(x, z, preferY),
+      mileageAt(group, from),
+      mileageAt(group, to),
+    );
+  } else {
+    refreshRibbons(group);
+  }
   return projected;
+}
+
+/**
+ * Restrict both ribbons to the sample window covering original point indices
+ * [startIdx, endIdx] — the guide line's DISTANT segments otherwise snake along
+ * far mountain ridges as permanent dark lines across the sky (the glow halo is
+ * a 4.2m translucent ribbon; against the sky it reads as a black line). Pass
+ * null to show the whole route again.
+ */
+export function setRouteLineWindow(
+  group: THREE.Group,
+  range: { startIdx: number; endIdx: number } | null,
+): void {
+  const srcIdx = group.userData._routeSrcIdx as number[] | undefined;
+  if (!srcIdx || srcIdx.length < 2) return;
+  let start = 0;
+  let count = Number.POSITIVE_INFINITY;
+  let from = 0;
+  let to = srcIdx.length - 1;
+  if (range) {
+    from = lowerBoundSrc(srcIdx, range.startIdx);
+    to = Math.min(srcIdx.length - 1, lowerBoundSrc(srcIdx, range.endIdx + 1) - 1);
+    start = from * 6;
+    count = Math.max(0, to - from) * 6;
+  }
+  const body = bodyOf(group);
+  if (body) {
+    body.window(range ? { d0: mileageAt(group, from), d1: mileageAt(group, to) } : null);
+    return;
+  }
+  for (const child of group.children) {
+    const mesh = child as THREE.Mesh;
+    const geo = mesh.geometry as THREE.BufferGeometry | undefined;
+    if (!geo?.index) continue;
+    geo.setDrawRange(start, Math.min(count, Math.max(0, geo.index.count - start)));
+  }
 }
 
 /** Dispose all route line resources. */
 export function disposeRouteLine(group: THREE.Group): void {
+  const body = bodyOf(group);
+  if (body) {
+    // The body owns its geometry and NOT its materials (they are the strategy's
+    // shared singletons), so it disposes itself — this file must not walk into it
+    // and dispose materials another chunk is still drawing with.
+    body.dispose();
+    group.userData._routeBody = undefined;
+    group.clear();
+    return;
+  }
   for (const child of [...group.children]) {
     const mesh = child as THREE.Mesh;
     mesh.geometry?.dispose();
